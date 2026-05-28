@@ -192,7 +192,7 @@ Header en cada página:
 \`\`\`html
 <header class="page-header">
   <div class="logo-pill" style="background:#0A0C14;padding:6px 12px;border-radius:6px;display:inline-flex;align-items:center;">
-    <img src="https://inbound-tools.com/logo-white.png" alt="IBT" height="22">
+    <img src="https://apimensajeria-production.up.railway.app/logo-white.png" alt="IBT" height="22">
   </div>
   <div class="header-meta">
     <span class="tag-accent">GTM INTELLIGENCE</span>
@@ -491,6 +491,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
 // ---------------------------------------------------------------------------
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+app.use(express.static('.'));
 
 const jobs = new Map(); // ⚠️ en memoria: si reiniciás el container se pierden
 
