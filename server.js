@@ -1,5 +1,4 @@
 const express = require('express');
-const Anthropic = require('@anthropic-ai/sdk');
 
 const app = express();
 app.use(express.json());
@@ -44,40 +43,49 @@ app.post('/generar-reporte', async (req, res) => {
   }
 
   try {
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 16000,
-      mcp_servers: [
-        {
-          type: 'url',
-          url: 'https://backoffice-server-production.up.railway.app/api/mcp',
-          name: 'ibt-mcp',
-          tool_configuration: {
-            enabled: true
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'mcp-client-2025-04-04',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 16000,
+        mcp_servers: [
+          {
+            type: 'url',
+            url: 'https://backoffice-server-production.up.railway.app/api/mcp',
+            name: 'ibt-mcp',
+            authorization_token: Buffer.from(`${process.env.IBT_EMAIL}:${process.env.IBT_PASSWORD}`).toString('base64')
           }
-        }
-      ],
-      system: SKILL_SYSTEM_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content: `Generá el reporte PDF para el prospecto:\n- Email: ${email}\n- Dominio: ${dominio}\n\nDevolvé solo el JSON final con pdf_url.`
-        }
-      ]
+        ],
+        system: SKILL_SYSTEM_PROMPT,
+        messages: [
+          {
+            role: 'user',
+            content: `Generá el reporte PDF para el prospecto:\n- Email: ${email}\n- Dominio: ${dominio}\n\nDevolvé solo el JSON final con pdf_url.`
+          }
+        ]
+      })
     });
 
-    // Extraer el JSON de la respuesta
-    const text = response.content.find(b => b.type === 'text')?.text || '';
-    const jsonMatch = text.match(/\{[\s\S]*"pdf_url"[\s\S]*\}/);
-    
-    if (!jsonMatch) {
-      return res.status(500).json({ error: 'No se pudo extraer pdf_url de la respuesta', raw: text });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return res.status(500).json({ error: data });
     }
 
-    const result = JSON.parse(jsonMatch[0]);
-    return res.json(result);
+    const text = data.content?.find(b => b.type === 'text')?.text || '';
+    const jsonMatch = text.match(/\{[\s\S]*"pdf_url"[\s\S]*\}/);
+
+    if (!jsonMatch) {
+      return res.status(500).json({ error: 'No se pudo extraer pdf_url', raw: text });
+    }
+
+    return res.json(JSON.parse(jsonMatch[0]));
 
   } catch (err) {
     console.error(err);
