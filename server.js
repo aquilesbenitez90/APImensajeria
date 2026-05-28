@@ -176,9 +176,12 @@ Si RECHAZADO: aplicar fixes y re-generar el HTML.
 - PDF sale en 5+ páginas → Reducir font-size body a 10.5px, recortar texto
 - Sales Nav retorna 0 resultados → Quitar filtro industria, cambiar keywords
 
-## Output final
-
-Devolvé SOLO el HTML completo listo para renderizar. Sin markdown, sin explicaciones, sin bloques de código. El HTML debe empezar con <!DOCTYPE html> y terminar con </html>.`;
+Output FINAL CRÍTICO:
+- La respuesta DEBE empezar exactamente con <!DOCTYPE html>
+- La respuesta DEBE terminar exactamente con </html>
+- NO escribas NADA antes del <!DOCTYPE html>, ni explicaciones, ni "Here's the HTML", ni "Let me", ni comentarios
+- NO uses bloques de código markdown
+- Si necesitás pensar, hacelo internamente — solo el HTML final en la respuesta`;
 
 async function runClaude(email, dominio, empresa, nombre, tools) {
   const anthropicTools = tools.map(t => ({
