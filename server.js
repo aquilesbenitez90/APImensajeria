@@ -1,11 +1,16 @@
 /**
- * IBT GTM Report — server.js v5
+ * IBT GTM Report — server.js v6
  *
- * Cambios v5 respecto a v4:
- *   - WEB_SEARCH habilitado en runClaude y runFixer (resuelve el problema de datos inventados de la empresa)
- *   - Paso 3.3 (get_contact_profile) ahora es OPCIONAL — los IDs opacos ACwAA... son aceptables porque LinkedIn los resuelve igual
- *   - Énfasis en research real con web_search en paso 1 antes de armar el reporte
- *   - Juez relajado en slugs (acepta ACwAA...) pero ESTRICTO en veracidad de datos de la empresa
+ * Cambios v6 respecto a v5:
+ *   - REGLAS ANTI-ALUCINACIÓN de cargo/empresa en el paso 3 y 4:
+ *     El cargo y empresa se toman TEXTUAL del headline del perfil. PROHIBIDO inventar
+ *     un nombre de empresa o cargo que no esté literalmente en los datos.
+ *     Si el headline viene "sucio" (sin formato Rol @ Empresa), usar el headline crudo.
+ *   - El grado de conexión usa el valor REAL del search, no "2do grado" hardcodeado.
+ *   - Si una persona no encaja con el ICP según su headline real, DESCARTARLA (no distorsionar).
+ *   - Juez detecta cargo/empresa inventados (criterio 6 reforzado).
+ *
+ * Todo lo demás idéntico a v5 (web_search, IDs opacos OK, 4 páginas, etc.)
  */
 
 const express = require('express');
@@ -28,7 +33,6 @@ const IBT_HEADERS = {
   'x-password': process.env.IBT_PASSWORD
 };
 
-// Server-tool de Anthropic: web search nativo
 const WEB_SEARCH_TOOL = {
   type: 'web_search_20250305',
   name: 'web_search',
@@ -166,9 +170,23 @@ URL final: https://www.linkedin.com/in/[publicIdOrUrl]
 
 LinkedIn acepta tanto slugs limpios como member IDs opacos (ACwAA...) — ambos resuelven al perfil correcto.
 
-PROHIBIDO:
-- URLs inventadas que no salieron de search_sales_navigator_filtered
-- linkedin.com/company/X (usar perfil personal /in/)
+**Paso 3.3: REGLA ANTI-INVENCIÓN de cargo, empresa y grado (CRÍTICO)**
+
+El nombre y el URL (publicIdOrUrl) salen de campos estructurados → son confiables.
+PERO el cargo y la empresa salen del campo "headline" (texto libre) → ACÁ ES DONDE NO DEBÉS INVENTAR.
+
+Reglas estrictas:
+- El cargo y la empresa de cada tarjeta deben tomarse TEXTUALMENTE del headline del perfil que devuelve la búsqueda. PROHIBIDO inventar, deducir o "completar" un nombre de empresa o cargo que no aparezca literalmente en el headline.
+- Si el headline viene LIMPIO con formato "Rol @ Empresa" (ej: "CPO & Co-Founder @ Agree") → usar ese rol y esa empresa.
+- Si el headline viene SUCIO (en español con "en", con pipes "|", con varios fragmentos "||", o sin un "@" claro) → NO intentes adivinar la empresa. Mostrá el headline tal cual viene, o solo el primer rol mencionado. NUNCA fabriques un nombre de startup ni un título de "Founder/CEO" para que encaje con el ICP.
+- Si NO podés determinar con certeza el cargo y empresa de un perfil → ese perfil NO sirve para el reporte: DESCARTALO y elegí otro de los resultados de la búsqueda que tenga headline claro.
+- PROHIBIDO forzar a una persona dentro del molde del ICP distorsionando su cargo. Si su rol real no encaja con el ICP (ej: es un CTO de una empresa de 3 personas cuando buscás founders SaaS), DESCARTALO y buscá otro. Es preferible un perfil real que encaje a uno distorsionado.
+
+**Paso 3.4: Grado de conexión REAL**
+
+PROHIBIDO hardcodear "2do grado" en todas las tarjetas.
+Usar el grado de conexión REAL que devuelve search_sales_navigator_filtered para cada perfil (1er, 2do o 3er grado).
+Si la búsqueda se filtró por degreeOfConnection: ["2nd"], entonces los resultados ya son 2do grado y podés indicarlo. Pero si un perfil viene de otra búsqueda o el grado no está claro, usar el valor real o no mostrar el grado.
 
 ### 4. Estructura del reporte — EXACTAMENTE 4 páginas
 
@@ -192,13 +210,14 @@ NO agregar página 5. EXACTAMENTE 4 divs .page.
 [CHIPS de prioridad]
 
 #### Páginas 2-4 — Account cards (2 por página)
-[NÚMERO] · [EMPRESA]
-[Avatar] + [Nombre decisor] + [Cargo · Empresa]
-[linkedin.com/in/[publicIdOrUrl] → link clicable] + [País · 2do grado · Año en rol]
-[ÁNGULO PERSONALIZADO]: 3-4 oraciones específicas
+[NÚMERO] · [EMPRESA tomada TEXTUAL del headline]
+[Avatar] + [Nombre decisor] + [Cargo · Empresa — TEXTUAL del headline, sin inventar]
+[linkedin.com/in/[publicIdOrUrl] → link clicable] + [País · grado REAL · Año en rol si está disponible]
+[ÁNGULO PERSONALIZADO]: 3-4 oraciones específicas basadas en el cargo/empresa REAL del perfil
 [HOOK DE APERTURA]: una oración entre comillas
 
 REGLA ICE: cada card 100% única.
+REGLA ANTI-INVENCIÓN: el ángulo personalizado debe basarse en datos REALES del perfil (su headline, su empresa real). PROHIBIDO inventar contexto sobre la empresa de la persona si no lo verificaste. Si solo tenés el headline, basá el ángulo en ese headline, no en suposiciones.
 
 ### 5. Design system CommerceGlass v8
 
@@ -272,6 +291,9 @@ Footer:
 
 ## Anti-patterns
 - DATOS INVENTADOS de la empresa → SIEMPRE verificar con web_search antes de escribir el overview
+- CARGO/EMPRESA INVENTADO de un decisor → tomar TEXTUAL del headline; si está sucio, no adivinar; si no se entiende, descartar el perfil
+- Forzar a una persona dentro del ICP distorsionando su cargo real → DESCARTAR y elegir otra
+- "2do grado" hardcodeado en todas las tarjetas → usar el grado REAL
 - Año de fundación, stage, métricas asumidas sin búsqueda web → PROHIBIDO
 - URL tipo linkedin.com/company/X → usar /in/
 - URL inventada sin pasar por search_sales_navigator_filtered → PROHIBIDO
@@ -312,15 +334,22 @@ Criterios:
    - Stage de funding ("Series A", "$X ARR") sin evidencia clara
    - Número de productos/clientes específico ("+30 productos") sin fuente
    - Métricas sospechosamente redondas ("38% reply rate", "4x pipeline") sin contexto
-   Si el reporte hace afirmaciones cuantitativas específicas sobre la empresa, deben sonar verificables. Si todo el overview suena demasiado a "marketing copy genérico de SaaS B2B" → FAIL
+   Si todo el overview suena demasiado a "marketing copy genérico de SaaS B2B" → FAIL
 
 5. **Coherencia interna** — el reporte trata sobre la empresa correcta, las cuentas hacen sentido para ese ICP
    FAIL si una de las 6 cuentas target es la misma empresa mencionada como proof point/cliente del producto en el overview
 
-6. **Personalización ICE** — cada card tiene ángulo único, nombre del decisor, pain específico
-   FAIL si encuentra frases genéricas como "escalar tu operación", "mejorar la eficiencia"
+6. **Personalización ICE y CARGO/EMPRESA REAL de los decisores** (CRÍTICO):
+   - Cada card debe tener ángulo único, nombre del decisor, pain específico
+   - FAIL si encuentra frases genéricas como "escalar tu operación", "mejorar la eficiencia"
+   - FAIL si detectás señales de cargo/empresa INVENTADO en las tarjetas:
+     * Todas las 6 personas tienen exactamente el mismo tipo de cargo (todos "Founder & CEO") de forma sospechosamente uniforme cuando vinieron de una búsqueda amplia
+     * El ángulo personalizado inventa contexto muy específico sobre la empresa de la persona que no podría saberse solo del headline
+     * Una empresa mencionada como empleadora de un decisor suena fabricada o no se condice con un perfil real
+   - En duda sobre si un cargo/empresa fue inventado → FAIL
 
 7. **Sin datos rotos** — sin [INSERT], TODO, undefined, lorem ipsum, fechas incoherentes
+   FAIL si todas las tarjetas dicen "2do grado" de forma idéntica y hardcodeada (debería reflejar el grado real)
 
 8. **Proof points presentes y plausibles** — al menos 1 ancla de credibilidad del cliente
    FAIL si los proof points suenan fabricados (porcentajes redondos sin contexto, métricas sin fuente)
@@ -334,9 +363,11 @@ const SYSTEM_PROMPT_FIX = `Sos el generador del reporte GTM de IBT. Recibís un 
 
 IMPORTANTE:
 - Si el juez detectó datos inventados de la empresa, USAR web_search para verificar y corregir.
-- Si el juez detectó páginas extra (5+), eliminá las páginas que no sean: 1 overview + 3 account cards = 4 páginas exactas.
-- Si el juez detectó una cuenta que es proof point del cliente, reemplazala por otro perfil real de Sales Navigator.
-- NUNCA inventes datos. Si no podés verificar con web_search, usar formulación conservadora.`;
+- Si el juez detectó CARGO/EMPRESA inventado de un decisor, volvé a llamar a get_contact_profile o search_sales_navigator_filtered para obtener el headline REAL, y usá ese cargo/empresa textual. Si el headline está sucio y no se entiende la empresa, mostrá el headline crudo o descartá ese perfil y buscá otro real.
+- Si el juez detectó "2do grado" hardcodeado, usá el grado de conexión real.
+- Si el juez detectó páginas extra (5+), eliminá las que no sean: 1 overview + 3 account cards = 4 páginas.
+- Si el juez detectó una cuenta que es proof point del cliente, reemplazala por otro perfil real.
+- NUNCA inventes datos. Si no podés verificar, usar formulación conservadora o descartar.`;
 
 // ---------------------------------------------------------------------------
 // Llamadas a Claude
@@ -361,7 +392,6 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
 }
 
 async function runClaude({ email, dominio, empresa, nombre, tools }) {
-  // MCP tools + web_search server-tool de Anthropic
   const anthropicTools = [
     ...tools.map(t => ({
       name: t.name,
@@ -373,7 +403,7 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
 
   const messages = [{
     role: 'user',
-    content: `Generá el reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}\n\nSeguí el workflow completo del skill. PRIMERO hacé research REAL con web_search sobre la empresa (fundación, modelo, stage, tracción) — PROHIBIDO inventar datos. Luego encontrá 6 cuentas con Sales Navigator y devolvé SOLO el HTML con EXACTAMENTE 4 páginas.`
+    content: `Generá el reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}\n\nSeguí el workflow completo del skill. PRIMERO hacé research REAL con web_search sobre la empresa (fundación, modelo, stage, tracción) — PROHIBIDO inventar datos. Luego encontrá 6 cuentas con Sales Navigator. El cargo y empresa de cada decisor deben salir TEXTUAL del headline real — NUNCA inventes empresa/cargo para que encaje con el ICP. Devolvé SOLO el HTML con EXACTAMENTE 4 páginas.`
   }];
 
   let toolCallCount = 0;
@@ -403,14 +433,10 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
       for (const block of data.content) {
         if (block.type !== 'tool_use') continue;
         toolCallCount++;
-        
-        // web_search es un server-tool: Anthropic lo ejecuta del lado servidor, no llega acá
-        // Solo manejamos las tools del MCP
         if (block.name === 'web_search') {
           webSearchCount++;
           continue;
         }
-        
         const result = await callMCP(block.name, block.input);
         toolResults.push({
           type: 'tool_result',
@@ -421,13 +447,10 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
       if (toolResults.length > 0) {
         messages.push({ role: 'user', content: toolResults });
       } else {
-        // Solo había web_search → Anthropic ya lo ejecutó y vendrá en la próxima respuesta automáticamente
-        // Pero si no hay más tool_use que responder, salimos del loop
         break;
       }
     }
   }
-  // Fallback: si salimos del loop sin texto, devolver lo último
   const lastAssistantMsg = messages.filter(m => m.role === 'assistant').pop();
   return lastAssistantMsg?.content?.find(b => b.type === 'text')?.text || '';
 }
@@ -477,7 +500,7 @@ async function runFixer({ html, fixes, empresa, tools }) {
 
   const messages = [{
     role: 'user',
-    content: `Empresa: ${empresa}\n\nCorrecciones a aplicar del juez:\n- ${fixes.join('\n- ')}\n\nHTML actual:\n${html}\n\nAplicá los fixes (usando web_search si hay datos a verificar) y devolvé SOLO el HTML completo corregido con EXACTAMENTE 4 páginas.`
+    content: `Empresa: ${empresa}\n\nCorrecciones a aplicar del juez:\n- ${fixes.join('\n- ')}\n\nHTML actual:\n${html}\n\nAplicá los fixes (usando web_search o get_contact_profile si hay datos a verificar) y devolvé SOLO el HTML completo corregido con EXACTAMENTE 4 páginas.`
   }];
 
   let toolCallCount = 0;
@@ -503,11 +526,9 @@ async function runFixer({ html, fixes, empresa, tools }) {
       for (const block of data.content) {
         if (block.type !== 'tool_use') continue;
         toolCallCount++;
-        
         if (block.name === 'web_search') {
           continue;
         }
-        
         const result = await callMCP(block.name, block.input);
         toolResults.push({
           type: 'tool_result',
