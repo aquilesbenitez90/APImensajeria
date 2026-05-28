@@ -48,7 +48,30 @@ async function listMCPTools() {
   return parsed?.result?.tools || [];
 }
 
-const SYSTEM_PROMPT = `Sos un agente que genera reportes GTM en PDF para Inbound Tools.
+async function runClaude(email, dominio, empresa, nombre, tools) {
+  const anthropicTools = tools.map(t => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.inputSchema
+  }));
+
+  const messages = [{
+    role: 'user',
+    content: `Generá el reporte HTML para:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}\n\nDevolvé solo el HTML completo listo para renderizar.`
+  }];
+
+  while (true) {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 16000,
+        system: `Sos un agente que genera reportes GTM en PDF para Inbound Tools.
 
 Workflow completo:
 1. Research del dominio usando las tools disponibles
@@ -67,32 +90,7 @@ Estructura 4 páginas:
 - Pág 1: Overview estratégico (ribbon empresa, H1, stats, ICP grid, contexto macro, ángulos apertura)
 - Págs 2-4: 2 account cards por página (decisor, cargo, URL linkedin.com/in/slug, ángulo personalizado, hook apertura)
 
-Output FINAL: devolvé SOLO el HTML completo listo para renderizar. Sin markdown, sin explicaciones, sin bloques de código.`;
-
-async function runClaude(email, dominio, tools) {
-  const anthropicTools = tools.map(t => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.inputSchema
-  }));
-
-  const messages = [{
-    role: 'user',
-    content: `Generá el reporte HTML para:\n- Email: ${email}\n- Dominio: ${dominio}\n\nDevolvé solo el HTML.`
-  }];
-
-  while (true) {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 16000,
-        system: SYSTEM_PROMPT,
+Output FINAL: devolvé SOLO el HTML completo listo para renderizar. Sin markdown, sin explicaciones, sin bloques de código.`,
         tools: anthropicTools,
         messages
       })
@@ -124,12 +122,12 @@ async function runClaude(email, dominio, tools) {
 }
 
 app.post('/generar-reporte', async (req, res) => {
-  const { email, dominio } = req.body;
+  const { email, dominio, empresa, nombre } = req.body;
   if (!email || !dominio) return res.status(400).json({ error: 'email y dominio son obligatorios' });
 
   try {
     const tools = await listMCPTools();
-    const html = await runClaude(email, dominio, tools);
+    const html = await runClaude(email, dominio, empresa || dominio, nombre || '', tools);
     if (!html) return res.status(500).json({ error: 'Claude no devolvió HTML' });
 
     const browser = await puppeteer.launch({
@@ -143,7 +141,8 @@ app.post('/generar-reporte', async (req, res) => {
     return res.json({
       status: 'ok',
       pdf_base64: pdfBuffer.toString('base64'),
-      empresa: dominio,
+      empresa: empresa || dominio,
+      nombre: nombre || '',
       email: email
     });
 
