@@ -272,4 +272,25 @@ app.post('/generar-reporte', async (req, res) => {
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
     const page = await browser.newPage();
-    await page.setContent
+    await page.setContent(cleanHtml, { waitUntil: 'networkidle0' });
+    const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
+    await browser.close();
+
+    return res.json({
+      status: 'ok',
+      pdf_base64: pdfBuffer.toString('base64'),
+      empresa: empresa || dominio,
+      nombre: nombre || '',
+      email: email
+    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/health', (req, res) => res.json({ ok: true }));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
