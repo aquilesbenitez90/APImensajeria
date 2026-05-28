@@ -176,7 +176,8 @@ Si RECHAZADO: aplicar fixes y re-generar el HTML.
 - PDF sale en 5+ páginas → Reducir font-size body a 10.5px, recortar texto
 - Sales Nav retorna 0 resultados → Quitar filtro industria, cambiar keywords
 
-Output FINAL CRÍTICO:
+## Output FINAL CRÍTICO
+
 - La respuesta DEBE empezar exactamente con <!DOCTYPE html>
 - La respuesta DEBE terminar exactamente con </html>
 - NO escribas NADA antes del <!DOCTYPE html>, ni explicaciones, ni "Here's the HTML", ni "Let me", ni comentarios
@@ -246,11 +247,15 @@ app.post('/generar-reporte', async (req, res) => {
     const html = await runClaude(email, dominio, empresa || dominio, nombre || '', tools);
     if (!html) return res.status(500).json({ error: 'Claude no devolvió HTML' });
 
+    // Extraer solo el HTML válido, ignorando cualquier texto antes o después
+    const htmlMatch = html.match(/<!DOCTYPE[\s\S]*?<\/html>/i);
+    const cleanHtml = htmlMatch ? htmlMatch[0] : html;
+
     const browser = await puppeteer.launch({
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    await page.setContent(cleanHtml, { waitUntil: 'networkidle0' });
     const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
     await browser.close();
 
