@@ -1,11 +1,12 @@
 /**
- * IBT GTM Report — server.js (versión híbrida final v3)
+ * IBT GTM Report — server.js (versión híbrida final v4)
  *
- * Cambios respecto a v2:
- *   - Logs detallados en callMCP y listMCPTools (debug del uso real del MCP)
- *   - Juez más estricto con detección de slugs inventados
- *   - Re-validación con el juez DESPUÉS del fixer (veredicto final real)
- *   - Log de tools disponibles al inicio del job
+ * Cambios v4 respecto a v3:
+ *   - Paso 3 actualizado: OBLIGATORIO llamar a get_contact_profile DESPUÉS de search_sales_navigator_filtered
+ *     para obtener los slugs públicos verificables (publicIdentifier limpio tipo "juan-perez")
+ *   - PROHIBIDO usar IDs opacos del tipo "ACwAA..." en las URLs
+ *   - Estructura ESTRICTAMENTE 4 páginas: 1 overview + 3 con account cards (sin agregar playbooks ni páginas extras)
+ *   - Coherencia: las 6 cuentas son PROSPECTS, nunca proof points o casos de éxito existentes del cliente
  */
 
 const express = require('express');
@@ -76,8 +77,10 @@ async function listMCPTools() {
   
   const hasResolve = toolList.some(t => t.name === 'resolve_sales_navigator_id');
   const hasSearch = toolList.some(t => t.name === 'search_sales_navigator_filtered');
+  const hasProfile = toolList.some(t => t.name === 'get_contact_profile');
   if (!hasResolve) console.warn(`[MCP] WARNING: resolve_sales_navigator_id NO está disponible`);
   if (!hasSearch) console.warn(`[MCP] WARNING: search_sales_navigator_filtered NO está disponible`);
+  if (!hasProfile) console.warn(`[MCP] WARNING: get_contact_profile NO está disponible`);
   
   return toolList;
 }
@@ -87,7 +90,7 @@ async function listMCPTools() {
 // ---------------------------------------------------------------------------
 const SYSTEM_PROMPT_HTML = `# IBT GTM Report — Skill completo
 
-Generás un reporte GTM de 4 páginas A4 que IBT manda a prospectos: identificás 6 decisores reales en LinkedIn que encajan con el ICP del cliente, los organizás en un HTML branded. El PDF se renderiza después con Puppeteer.
+Generás un reporte GTM de EXACTAMENTE 4 páginas A4 que IBT manda a prospectos: identificás 6 decisores reales en LinkedIn que encajan con el ICP del cliente, los organizás en un HTML branded. El PDF se renderiza después con Puppeteer.
 
 ---
 
@@ -112,22 +115,22 @@ A partir del research, definir:
 
 Regla: los 6 accounts deben ser EMPRESAS ANCLA — grandes, conocidas, con cadenas de valor o bases de clientes que el producto puede monetizar.
 
+REGLA DE COHERENCIA: las 6 cuentas son PROSPECTS — empresas que aún NO son clientes del producto. NUNCA incluir como cuenta target a una empresa que ya es proof point, caso de éxito o cliente conocido del producto del reporte. Si una empresa aparece como referencia en el research, EXCLUIRLA de las 6 cuentas target.
+
 ### 3. Buscar 6 perfiles REALES en Sales Navigator
 
-REGLA CRÍTICA: PROHIBIDO inventar URLs, nombres o slugs de LinkedIn. TODOS los perfiles DEBEN salir de la búsqueda real en Sales Navigator. Si no podés llamar a las tools, devolvé un error explícito — NUNCA inventes datos.
+REGLA CRÍTICA: PROHIBIDO inventar URLs, nombres o slugs de LinkedIn. TODOS los perfiles DEBEN salir de la búsqueda real en Sales Navigator.
 
-El flujo OBLIGATORIO es de 2 pasos:
+El flujo OBLIGATORIO es de 3 pasos:
 
 **Paso 3.1: Resolver IDs con resolve_sales_navigator_id**
 
-search_sales_navigator_filtered NO acepta nombres como strings ("Argentina", "CFO"). Necesita IDs.
-Para obtenerlos, llamá primero a resolve_sales_navigator_id con:
+search_sales_navigator_filtered NO acepta nombres como strings. Necesita IDs.
+Llamar primero a resolve_sales_navigator_id con:
 - type: "LOCATION", keywords: nombre del país (ej: "Argentina", "Mexico", "Colombia")
-- type: "SALES_INDUSTRY", keywords: nombre de la industria (ej: "Financial Services", "Software")
+- type: "SALES_INDUSTRY", keywords: nombre de la industria
 - type: "SENIORITY", keywords: nivel (ej: "Director", "VP", "C-level")
 - type: "FUNCTION", keywords: función (ej: "Sales", "Operations", "Finance")
-
-Cada llamada devuelve una lista de matches con su ID. Tomá el ID del match más relevante.
 
 **Paso 3.2: Buscar perfiles con search_sales_navigator_filtered**
 
@@ -142,20 +145,45 @@ Llamar con esta estructura:
   "profilesLimit": 20
 }
 
-De los resultados, seleccionar EXACTAMENTE 6 perfiles considerando:
+De los resultados, pre-seleccionar EXACTAMENTE 6 perfiles considerando:
 1. Rol / seniority (decision-makers, no ICs junior)
 2. Empresa ancla reconocible (no startups desconocidas)
 3. Fit con el pain del producto
 
-Cada perfil viene con su publicIdentifier. La URL final ES:
-https://www.linkedin.com/in/[publicIdentifier]
+**Paso 3.3: OBLIGATORIO — Obtener slug público con get_contact_profile**
 
-PROHIBIDO usar URLs que no salgan de publicIdentifier de la búsqueda.
+search_sales_navigator_filtered devuelve IDs opacos del tipo "ACwAA..." en publicIdOrUrl. ESTOS NO SON SLUGS PÚBLICOS VÁLIDOS.
+
+Para CADA uno de los 6 perfiles preseleccionados, DEBÉS llamar a get_contact_profile pasando ese ID opaco como publicIdOrUrl. La respuesta va a contener el publicIdentifier REAL (un slug limpio tipo "juan-perez" o "maria-garcia-cfo").
+
+PROHIBIDO usar URLs con IDs opacos tipo "linkedin.com/in/ACwAA...". 
+PROHIBIDO usar URLs inventadas.
 PROHIBIDO usar linkedin.com/company/X.
 
-Si la primera búsqueda trae <6 perfiles, ampliar: cambiar industria, quitar seniority, o cambiar país. Máximo 3 intentos antes de seleccionar los mejores que haya.
+URL FINAL OBLIGATORIA: https://www.linkedin.com/in/[publicIdentifier limpio de get_contact_profile]
 
-### 4. Estructura del reporte (4 páginas)
+Ejemplos de URLs VÁLIDAS:
+- linkedin.com/in/antonio-feeney
+- linkedin.com/in/gustavo-barsola
+- linkedin.com/in/edmundo-miralles
+- linkedin.com/in/andres-salazar-oracle
+
+Ejemplos de URLs INVÁLIDAS (PROHIBIDAS):
+- linkedin.com/in/ACwAABbL89gBQGDmLsHNWaE9wF5AlSzoTA5v8VY ← ID opaco, INVÁLIDO
+- linkedin.com/in/ACwAAAPioh8BGa-lrnSM_vLC-0v16pDLlk6mvUM ← ID opaco, INVÁLIDO
+
+Si get_contact_profile no devuelve un publicIdentifier limpio para un perfil, DESCARTAR ese perfil y elegir otro de los resultados de search_sales_navigator_filtered. Repetir hasta tener 6 perfiles con slugs limpios verificables.
+
+### 4. Estructura del reporte — EXACTAMENTE 4 páginas (NI MÁS NI MENOS)
+
+PROHIBIDO agregar páginas extra como "playbook", "secuencia operativa", "plan de 30 días" o cualquier otra cosa fuera del scope. La estructura es ESTRICTAMENTE:
+
+- Página 1: Overview estratégico
+- Página 2: Account cards 1 y 2
+- Página 3: Account cards 3 y 4  
+- Página 4: Account cards 5 y 6
+
+NO agregar página 5. NO agregar página 0 con índice. EXACTAMENTE 4 páginas.
 
 #### Página 1 — Overview estratégico
 [HEADER IBT] + [RIBBON: Vertical · País · Fundada · ARR/Tracción]
@@ -170,7 +198,7 @@ Si la primera búsqueda trae <6 perfiles, ampliar: cambiar industria, quitar sen
 #### Páginas 2-4 — Account cards (2 por página)
 [NÚMERO] · [EMPRESA]
 [Avatar circular con inicial] + [Nombre decisor] + [Cargo · Empresa]
-[linkedin.com/in/[slug] → link clicable] + [País · 2do grado · Año en rol]
+[linkedin.com/in/[slug limpio] → link clicable] + [País · 2do grado · Año en rol]
 [ÁNGULO PERSONALIZADO]: 3-4 oraciones específicas. Mencionar nombre del decisor, pain concreto, cómo el producto lo resuelve. NO copy-paste entre cards.
 [HOOK DE APERTURA]: una oración entre comillas.
 
@@ -248,10 +276,12 @@ Footer en cada página (DENTRO del HTML):
 
 ## Anti-patterns
 - URL tipo linkedin.com/company/X → usar perfil personal /in/
-- URL inventada sin pasar por search_sales_navigator_filtered → SIEMPRE buscar primero
+- URL con ID opaco linkedin.com/in/ACwAA... → INVÁLIDO, llamar a get_contact_profile para obtener slug limpio
+- URL inventada sin pasar por search_sales_navigator_filtered + get_contact_profile → PROHIBIDO
+- Empresa proof point/cliente del producto como cuenta target → INCONSISTENCIA, excluirla
+- PDF en 5+ páginas con playbook extra → ELIMINAR, exactamente 4 páginas
 - Copy-paste de ángulos entre cards → cada card con pain específico
 - PDF en 3 páginas → revisar page-break-after en las 3 primeras
-- PDF en 5+ páginas → reducir font-size del cuerpo a 10.5px, recortar texto
 - Sales Nav 0 resultados → quitar filtro industria, cambiar keywords ES/EN
 - Datos rotos: nada de [INSERT], TODO, undefined, lorem ipsum
 
@@ -261,34 +291,37 @@ Footer en cada página (DENTRO del HTML):
 - La respuesta DEBE empezar exactamente con <!DOCTYPE html>
 - La respuesta DEBE terminar exactamente con </html>
 - NO escribas NADA antes del <!DOCTYPE html>, ni explicaciones, ni "Let me"
-- NO uses bloques de código markdown`;
+- NO uses bloques de código markdown
+- EXACTAMENTE 4 divs .page, ni uno más ni uno menos`;
 
 const SYSTEM_PROMPT_JUDGE = `Sos un juez de control de calidad EXTREMADAMENTE ESTRICTO para reportes GTM de IBT.
 
 Recibís el HTML del reporte + el número de páginas del PDF ya renderizado. Validás los 8 criterios y retornás un JSON.
 
-Tu objetivo: detectar reportes con datos INVENTADOS. Sé paranoico. En duda → FAIL.
+Tu objetivo: detectar reportes con datos INVENTADOS o inconsistencias. Sé paranoico. En duda → FAIL.
 
 Criterios:
 
 1. **LinkedIn /in/ format** — todos los URLs usan linkedin.com/in/[slug], NUNCA company
    FAIL si encuentras algún linkedin.com/company/
+   FAIL si encuentras URLs con IDs opacos tipo "linkedin.com/in/ACwAA..." (esos son member IDs internos, NO slugs públicos verificables)
 
 2. **Exactamente 6 cuentas** — ni más ni menos
 
-3. **4 páginas PDF** — usá el conteo provisto en el mensaje
+3. **EXACTAMENTE 4 páginas PDF** — usá el conteo provisto en el mensaje
+   FAIL si el PDF tiene 5 o más páginas (no debe haber playbooks, secuencias operativas, ni páginas extra fuera de overview + 3 de account cards)
+   FAIL si tiene 3 o menos páginas
 
-4. **Slug accuracy — DETECCIÓN DE SLUGS INVENTADOS** (CRÍTICO):
+4. **Slug accuracy — DETECCIÓN DE SLUGS INVENTADOS o INVÁLIDOS** (CRÍTICO):
    FAIL si detectás CUALQUIERA de estas señales:
-   - Slugs con patrón demasiado limpio: "juan-perez", "maria-garcia", "carlos-lopez" (los slugs reales suelen tener números, sufijos, o variaciones)
-   - Los 6 slugs siguen el mismo formato sospechosamente uniforme
+   - URLs con IDs opacos tipo "linkedin.com/in/ACwAA..." → estos son member IDs internos, NO slugs públicos verificables, INVÁLIDOS
+   - Slugs con patrón demasiado limpio sospechoso: todos "nombre-apellido" perfecto
    - Slugs genéricos: "ceo-empresa", "cfo-banco", "director-comercial-fintech"
-   - Nombres demasiado comunes en combinación perfecta con el rol (todos los CFOs llamados "Juan Pérez", "María González")
-   - Slugs que parecen construidos a partir de nombre + apellido + empresa sin ninguna variación natural
-   - Si el reporte habla de una empresa específica y todos los slugs tienen referencias a esa empresa en el slug (ej: "ana-cfo-yochana", "luis-vp-yochana")
-   En cualquier duda razonable → FAIL.
+   - Slugs construidos a partir de nombre + apellido + empresa sin variación natural
+   Los slugs VÁLIDOS son los publicIdentifier públicos de LinkedIn (ej: "antonio-feeney", "gustavo-barsola", "edmundo-miralles", "andres-salazar-oracle")
 
 5. **Coherencia de contenido** — el reporte trata sobre la empresa correcta, las cuentas hacen sentido para ese ICP
+   FAIL si una de las 6 cuentas target es la misma empresa mencionada como proof point/cliente del producto en el overview (inconsistencia: una empresa no puede ser cliente Y prospect a la vez)
 
 6. **Personalización ICE** — cada card tiene ángulo único, nombre del decisor, pain específico. PROHIBIDO frases genéricas como "escalar tu operación", "mejorar la eficiencia"
 
@@ -299,11 +332,15 @@ Criterios:
 Respondé EXCLUSIVAMENTE con un JSON válido, sin markdown, sin texto extra, con esta forma:
 {"veredicto":"APROBADO"|"RECHAZADO","score":<0-8>,"fixes":["fix concreto 1","fix concreto 2"]}
 
-APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concretas de corrección, especificando qué slugs parecen inventados.`;
+APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concretas de corrección.`;
 
-const SYSTEM_PROMPT_FIX = `Sos el generador del reporte GTM de IBT. Recibís un HTML existente y una lista de correcciones del juez. Aplicá las correcciones y devolvé SOLO el HTML completo corregido (<!DOCTYPE html> ... </html>), 4 páginas A4, footer incluido, mismo design system CommerceGlass v8. Sin explicaciones, sin markdown.
+const SYSTEM_PROMPT_FIX = `Sos el generador del reporte GTM de IBT. Recibís un HTML existente y una lista de correcciones del juez. Aplicá las correcciones y devolvé SOLO el HTML completo corregido (<!DOCTYPE html> ... </html>), EXACTAMENTE 4 páginas A4 (ni más ni menos), footer incluido, mismo design system CommerceGlass v8. Sin explicaciones, sin markdown.
 
-IMPORTANTE: Si el juez detectó slugs inventados, DEBES llamar a search_sales_navigator_filtered (con resolve_sales_navigator_id antes) para obtener perfiles REALES. NO uses slugs inventados.`;
+IMPORTANTE:
+- Si el juez detectó slugs con IDs opacos (ACwAA...), DEBES llamar a get_contact_profile pasando ese ID para obtener el publicIdentifier público real y reemplazar la URL.
+- Si el juez detectó páginas extra (5+), eliminá las páginas que no sean: 1 overview + 3 account cards = 4 páginas exactas.
+- Si el juez detectó una cuenta que es proof point del cliente, reemplazala por otro perfil real de Sales Navigator usando el flujo resolve → search → get_contact_profile.
+- NUNCA inventes slugs nuevos. Si no podés resolver con get_contact_profile, descartá el perfil y elegí otro.`;
 
 // ---------------------------------------------------------------------------
 // Llamadas a Claude
@@ -336,7 +373,7 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
 
   const messages = [{
     role: 'user',
-    content: `Generá el reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}\n\nSeguí el workflow completo del skill. Hacé el research, encontrá 6 cuentas con Sales Navigator y devolvé SOLO el HTML.`
+    content: `Generá el reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}\n\nSeguí el workflow completo del skill. Hacé el research, encontrá 6 cuentas con Sales Navigator (incluyendo get_contact_profile para obtener slugs públicos limpios) y devolvé SOLO el HTML con EXACTAMENTE 4 páginas.`
   }];
 
   let toolCallCount = 0;
@@ -419,7 +456,7 @@ async function runFixer({ html, fixes, empresa, tools }) {
 
   const messages = [{
     role: 'user',
-    content: `Empresa: ${empresa}\n\nCorrecciones a aplicar del juez:\n- ${fixes.join('\n- ')}\n\nHTML actual:\n${html}\n\nAplicá los fixes y devolvé SOLO el HTML completo corregido.`
+    content: `Empresa: ${empresa}\n\nCorrecciones a aplicar del juez:\n- ${fixes.join('\n- ')}\n\nHTML actual:\n${html}\n\nAplicá los fixes y devolvé SOLO el HTML completo corregido con EXACTAMENTE 4 páginas.`
   }];
 
   let toolCallCount = 0;
@@ -506,19 +543,15 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
 
     const tools = await listMCPTools();
 
-    // Paso 1: Generar HTML
     let html = await runClaude({ email, dominio, empresa, nombre, tools });
     let cleanHtml = limpiarHtml(html);
     if (!cleanHtml) throw new Error('Claude no devolvió HTML');
 
-    // Render inicial + conteo
     let pdfBuffer = await renderizarPdf(cleanHtml);
     let pageCount = await contarPaginas(pdfBuffer);
 
-    // AGENTE 1: Juez (primera evaluación)
     let judgeResult = await runJudge(cleanHtml, pageCount);
 
-    // AGENTE 2: Fixer (si juez rechaza)
     if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
       console.log(`[Job ${jobId}] Juez rechazó ${judgeResult.score}/8 — aplicando fixes...`);
       const fixedHtml = await runFixer({
@@ -533,7 +566,6 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
         pdfBuffer = await renderizarPdf(cleanHtml);
         pageCount = await contarPaginas(pdfBuffer);
 
-        // RE-VALIDACIÓN: el juez evalúa el HTML corregido
         console.log(`[Job ${jobId}] Re-validando con el juez después de fixes...`);
         judgeResult = await runJudge(cleanHtml, pageCount);
       }
