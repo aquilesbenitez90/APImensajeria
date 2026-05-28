@@ -1,20 +1,11 @@
 /**
- * IBT GTM Report — server.js (versión híbrida final)
+ * IBT GTM Report — server.js (versión híbrida final v3)
  *
- * Mantiene el skill de Mario tal cual (prompts, design system, 2 agentes: juez + fixer).
- * Diferencias INTENCIONALES respecto del skill:
- *   - Render con Puppeteer (no WeasyPrint, no aplica en Node)
- *   - NO crea el draft de Gmail (lo hace n8n)
- *   - Arquitectura asíncrona (job + polling) para no chocar el timeout de Railway
- *   - MCP de IBT con fetch directo + x-email/x-password (la API de Anthropic NO acepta esos headers en mcp_servers)
- *
- * Dependencias: npm i express puppeteer pdf-lib
- *
- * Env vars (configurar en Railway):
- *   ANTHROPIC_API_KEY
- *   IBT_EMAIL
- *   IBT_PASSWORD
- *   PORT (lo inyecta Railway)
+ * Cambios respecto a v2:
+ *   - Logs detallados en callMCP y listMCPTools (debug del uso real del MCP)
+ *   - Juez más estricto con detección de slugs inventados
+ *   - Re-validación con el juez DESPUÉS del fixer (veredicto final real)
+ *   - Log de tools disponibles al inicio del job
  */
 
 const express = require('express');
@@ -25,9 +16,9 @@ const { PDFDocument } = require('pdf-lib');
 // ---------------------------------------------------------------------------
 // Configuración
 // ---------------------------------------------------------------------------
-const MODEL_GEN = 'claude-sonnet-4-6';     // generación
-const MODEL_JUDGE = 'claude-sonnet-4-6';   // juez
-const MODEL_FIX = 'claude-opus-4-7';       // fixer
+const MODEL_GEN = 'claude-sonnet-4-6';
+const MODEL_JUDGE = 'claude-sonnet-4-6';
+const MODEL_FIX = 'claude-opus-4-7';
 
 const MCP_URL = 'https://backoffice-server-production.up.railway.app/api/mcp';
 const IBT_HEADERS = {
@@ -38,9 +29,10 @@ const IBT_HEADERS = {
 };
 
 // ---------------------------------------------------------------------------
-// MCP IBT (fetch directo con headers x-email + x-password)
+// MCP IBT con logs
 // ---------------------------------------------------------------------------
 async function callMCP(toolName, args) {
+  console.log(`[MCP] Llamando ${toolName} con args:`, JSON.stringify(args).substring(0, 200));
   const res = await fetch(MCP_URL, {
     method: 'POST',
     headers: IBT_HEADERS,
@@ -53,12 +45,18 @@ async function callMCP(toolName, args) {
   });
   const text = await res.text();
   const match = text.match(/data: ({.*})\n\n/);
-  if (!match) throw new Error('No se pudo parsear respuesta MCP');
+  if (!match) {
+    console.error(`[MCP] ERROR: no se pudo parsear respuesta de ${toolName}`);
+    throw new Error('No se pudo parsear respuesta MCP');
+  }
   const parsed = JSON.parse(match[1]);
-  return parsed?.result?.content?.[0]?.text || JSON.stringify(parsed?.result);
+  const result = parsed?.result?.content?.[0]?.text || JSON.stringify(parsed?.result);
+  console.log(`[MCP] ${toolName} OK (${result.length} chars)`);
+  return result;
 }
 
 async function listMCPTools() {
+  console.log(`[MCP] Listando tools disponibles...`);
   const res = await fetch(MCP_URL, {
     method: 'POST',
     headers: IBT_HEADERS,
@@ -73,11 +71,19 @@ async function listMCPTools() {
   const match = text.match(/data: ({.*})\n\n/);
   if (!match) throw new Error('No se pudo listar tools');
   const parsed = JSON.parse(match[1]);
-  return parsed?.result?.tools || [];
+  const toolList = parsed?.result?.tools || [];
+  console.log(`[MCP] ${toolList.length} tools disponibles: ${toolList.map(t => t.name).join(', ')}`);
+  
+  const hasResolve = toolList.some(t => t.name === 'resolve_sales_navigator_id');
+  const hasSearch = toolList.some(t => t.name === 'search_sales_navigator_filtered');
+  if (!hasResolve) console.warn(`[MCP] WARNING: resolve_sales_navigator_id NO está disponible`);
+  if (!hasSearch) console.warn(`[MCP] WARNING: search_sales_navigator_filtered NO está disponible`);
+  
+  return toolList;
 }
 
 // ---------------------------------------------------------------------------
-// PROMPTS — fieles al skill ibt-gtm-report
+// PROMPTS
 // ---------------------------------------------------------------------------
 const SYSTEM_PROMPT_HTML = `# IBT GTM Report — Skill completo
 
@@ -257,37 +263,53 @@ Footer en cada página (DENTRO del HTML):
 - NO escribas NADA antes del <!DOCTYPE html>, ni explicaciones, ni "Let me"
 - NO uses bloques de código markdown`;
 
-const SYSTEM_PROMPT_JUDGE = `Sos un juez de control de calidad para reportes GTM de IBT.
+const SYSTEM_PROMPT_JUDGE = `Sos un juez de control de calidad EXTREMADAMENTE ESTRICTO para reportes GTM de IBT.
 
 Recibís el HTML del reporte + el número de páginas del PDF ya renderizado. Validás los 8 criterios y retornás un JSON.
 
+Tu objetivo: detectar reportes con datos INVENTADOS. Sé paranoico. En duda → FAIL.
+
 Criterios:
-1. LinkedIn /in/ format — todos los URLs usan linkedin.com/in/[slug], NUNCA company
-2. Exactamente 6 cuentas — ni más ni menos
-3. 4 páginas PDF — usá el conteo provisto en el mensaje
-4. Slug accuracy — slugs con partes de nombre real, sin palabras genéricas
-5. Coherencia de contenido — el reporte trata sobre la empresa correcta, las cuentas hacen sentido para ese ICP
-6. Personalización ICE — cada card tiene ángulo único, nombre del decisor, pain específico
-7. Sin datos rotos — sin [INSERT], TODO, undefined, lorem ipsum, fechas incoherentes
-8. Proof points presentes — al menos 1 ancla de credibilidad del cliente
+
+1. **LinkedIn /in/ format** — todos los URLs usan linkedin.com/in/[slug], NUNCA company
+   FAIL si encuentras algún linkedin.com/company/
+
+2. **Exactamente 6 cuentas** — ni más ni menos
+
+3. **4 páginas PDF** — usá el conteo provisto en el mensaje
+
+4. **Slug accuracy — DETECCIÓN DE SLUGS INVENTADOS** (CRÍTICO):
+   FAIL si detectás CUALQUIERA de estas señales:
+   - Slugs con patrón demasiado limpio: "juan-perez", "maria-garcia", "carlos-lopez" (los slugs reales suelen tener números, sufijos, o variaciones)
+   - Los 6 slugs siguen el mismo formato sospechosamente uniforme
+   - Slugs genéricos: "ceo-empresa", "cfo-banco", "director-comercial-fintech"
+   - Nombres demasiado comunes en combinación perfecta con el rol (todos los CFOs llamados "Juan Pérez", "María González")
+   - Slugs que parecen construidos a partir de nombre + apellido + empresa sin ninguna variación natural
+   - Si el reporte habla de una empresa específica y todos los slugs tienen referencias a esa empresa en el slug (ej: "ana-cfo-yochana", "luis-vp-yochana")
+   En cualquier duda razonable → FAIL.
+
+5. **Coherencia de contenido** — el reporte trata sobre la empresa correcta, las cuentas hacen sentido para ese ICP
+
+6. **Personalización ICE** — cada card tiene ángulo único, nombre del decisor, pain específico. PROHIBIDO frases genéricas como "escalar tu operación", "mejorar la eficiencia"
+
+7. **Sin datos rotos** — sin [INSERT], TODO, undefined, lorem ipsum, fechas incoherentes
+
+8. **Proof points presentes** — al menos 1 ancla de credibilidad del cliente (ej: clientes conocidos, funding, métricas)
 
 Respondé EXCLUSIVAMENTE con un JSON válido, sin markdown, sin texto extra, con esta forma:
 {"veredicto":"APROBADO"|"RECHAZADO","score":<0-8>,"fixes":["fix concreto 1","fix concreto 2"]}
 
-APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concretas de corrección.`;
+APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concretas de corrección, especificando qué slugs parecen inventados.`;
 
-const SYSTEM_PROMPT_FIX = `Sos el generador del reporte GTM de IBT. Recibís un HTML existente y una lista de correcciones del juez. Aplicá las correcciones y devolvé SOLO el HTML completo corregido (<!DOCTYPE html> ... </html>), 4 páginas A4, footer incluido, mismo design system CommerceGlass v8. Sin explicaciones, sin markdown.`;
+const SYSTEM_PROMPT_FIX = `Sos el generador del reporte GTM de IBT. Recibís un HTML existente y una lista de correcciones del juez. Aplicá las correcciones y devolvé SOLO el HTML completo corregido (<!DOCTYPE html> ... </html>), 4 páginas A4, footer incluido, mismo design system CommerceGlass v8. Sin explicaciones, sin markdown.
+
+IMPORTANTE: Si el juez detectó slugs inventados, DEBES llamar a search_sales_navigator_filtered (con resolve_sales_navigator_id antes) para obtener perfiles REALES. NO uses slugs inventados.`;
 
 // ---------------------------------------------------------------------------
-// Llamadas a Claude (con MCP IBT via fetch directo)
+// Llamadas a Claude
 // ---------------------------------------------------------------------------
 async function callClaude({ model, system, messages, tools = [], stopSequences = [], maxTokens = 16000 }) {
-  const body = {
-    model,
-    max_tokens: maxTokens,
-    system,
-    messages
-  };
+  const body = { model, max_tokens: maxTokens, system, messages };
   if (tools.length > 0) body.tools = tools;
   if (stopSequences.length > 0) body.stop_sequences = stopSequences;
 
@@ -317,6 +339,7 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
     content: `Generá el reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}\n\nSeguí el workflow completo del skill. Hacé el research, encontrá 6 cuentas con Sales Navigator y devolvé SOLO el HTML.`
   }];
 
+  let toolCallCount = 0;
   while (true) {
     const data = await callClaude({
       model: MODEL_GEN,
@@ -330,6 +353,10 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
     messages.push({ role: 'assistant', content: data.content });
 
     if (data.stop_reason === 'stop_sequence' || data.stop_reason === 'end_turn') {
+      console.log(`[GEN] Generación terminada. Total tool calls: ${toolCallCount}`);
+      if (toolCallCount === 0) {
+        console.warn(`[GEN] WARNING: Claude NO llamó a ninguna tool. Los datos pueden estar inventados.`);
+      }
       return data.content.find(b => b.type === 'text')?.text;
     }
 
@@ -337,6 +364,7 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
       const toolResults = [];
       for (const block of data.content) {
         if (block.type !== 'tool_use') continue;
+        toolCallCount++;
         const result = await callMCP(block.name, block.input);
         toolResults.push({
           type: 'tool_result',
@@ -349,8 +377,8 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
   }
 }
 
-// AGENTE 1: Judge — segunda llamada a la API con prompt distinto
 async function runJudge(html, pageCount) {
+  console.log(`[JUDGE] Evaluando reporte (${pageCount} páginas)...`);
   const data = await callClaude({
     model: MODEL_JUDGE,
     system: SYSTEM_PROMPT_JUDGE,
@@ -365,19 +393,24 @@ async function runJudge(html, pageCount) {
   const match = raw.match(/\{[\s\S]*\}/);
   try {
     const parsed = JSON.parse(match ? match[0] : raw);
-    return {
+    const result = {
       veredicto: parsed.veredicto || 'APROBADO',
       score: parsed.score ?? 0,
       fixes: Array.isArray(parsed.fixes) ? parsed.fixes : []
     };
+    console.log(`[JUDGE] Veredicto: ${result.veredicto} ${result.score}/8`);
+    if (result.fixes.length > 0) {
+      console.log(`[JUDGE] Fixes: ${result.fixes.join(' | ')}`);
+    }
+    return result;
   } catch (e) {
-    console.error('No se pudo parsear el juez, aprobando por defecto:', e.message);
+    console.error('[JUDGE] No se pudo parsear, aprobando por defecto:', e.message);
     return { veredicto: 'APROBADO', score: 0, fixes: [] };
   }
 }
 
-// AGENTE 2: Fixer — tercera llamada con los fixes del juez
 async function runFixer({ html, fixes, empresa, tools }) {
+  console.log(`[FIX] Aplicando ${fixes.length} fixes...`);
   const anthropicTools = tools.map(t => ({
     name: t.name,
     description: t.description,
@@ -389,6 +422,7 @@ async function runFixer({ html, fixes, empresa, tools }) {
     content: `Empresa: ${empresa}\n\nCorrecciones a aplicar del juez:\n- ${fixes.join('\n- ')}\n\nHTML actual:\n${html}\n\nAplicá los fixes y devolvé SOLO el HTML completo corregido.`
   }];
 
+  let toolCallCount = 0;
   while (true) {
     const data = await callClaude({
       model: MODEL_FIX,
@@ -402,6 +436,7 @@ async function runFixer({ html, fixes, empresa, tools }) {
     messages.push({ role: 'assistant', content: data.content });
 
     if (data.stop_reason === 'stop_sequence' || data.stop_reason === 'end_turn') {
+      console.log(`[FIX] Terminado. Tool calls en fix: ${toolCallCount}`);
       return data.content.find(b => b.type === 'text')?.text;
     }
 
@@ -409,6 +444,7 @@ async function runFixer({ html, fixes, empresa, tools }) {
       const toolResults = [];
       for (const block of data.content) {
         if (block.type !== 'tool_use') continue;
+        toolCallCount++;
         const result = await callMCP(block.name, block.input);
         toolResults.push({
           type: 'tool_result',
@@ -422,7 +458,7 @@ async function runFixer({ html, fixes, empresa, tools }) {
 }
 
 // ---------------------------------------------------------------------------
-// HTML -> PDF (Puppeteer, fiel al @page del skill)
+// HTML -> PDF
 // ---------------------------------------------------------------------------
 function limpiarHtml(html) {
   if (!html) return null;
@@ -461,23 +497,30 @@ async function contarPaginas(pdfBuffer) {
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline en background (skill completo + 2 agentes)
+// Pipeline en background con re-validación del juez
 // ---------------------------------------------------------------------------
 async function procesar(jobId, { email, dominio, empresa, nombre }) {
   try {
+    console.log(`\n========== Job ${jobId} - Inicio ==========`);
+    console.log(`Empresa: ${empresa} | Email: ${email} | Dominio: ${dominio}`);
+
     const tools = await listMCPTools();
 
+    // Paso 1: Generar HTML
     let html = await runClaude({ email, dominio, empresa, nombre, tools });
     let cleanHtml = limpiarHtml(html);
     if (!cleanHtml) throw new Error('Claude no devolvió HTML');
 
+    // Render inicial + conteo
     let pdfBuffer = await renderizarPdf(cleanHtml);
     let pageCount = await contarPaginas(pdfBuffer);
 
-    const judgeResult = await runJudge(cleanHtml, pageCount);
+    // AGENTE 1: Juez (primera evaluación)
+    let judgeResult = await runJudge(cleanHtml, pageCount);
 
+    // AGENTE 2: Fixer (si juez rechaza)
     if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
-      console.log(`Job ${jobId}: juez RECHAZADO ${judgeResult.score}/8, aplicando fixes...`);
+      console.log(`[Job ${jobId}] Juez rechazó ${judgeResult.score}/8 — aplicando fixes...`);
       const fixedHtml = await runFixer({
         html: cleanHtml,
         fixes: judgeResult.fixes,
@@ -489,6 +532,10 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
         cleanHtml = cleanFixed;
         pdfBuffer = await renderizarPdf(cleanHtml);
         pageCount = await contarPaginas(pdfBuffer);
+
+        // RE-VALIDACIÓN: el juez evalúa el HTML corregido
+        console.log(`[Job ${jobId}] Re-validando con el juez después de fixes...`);
+        judgeResult = await runJudge(cleanHtml, pageCount);
       }
     }
 
@@ -500,17 +547,18 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
       email,
       paginas: pageCount,
       juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8',
+      juez_fixes: judgeResult.fixes,
       finishedAt: Date.now()
     });
-    console.log(`Job ${jobId}: OK, ${pageCount} páginas, juez ${judgeResult.veredicto} ${judgeResult.score}/8`);
+    console.log(`========== Job ${jobId} - OK ${pageCount} páginas, juez FINAL ${judgeResult.veredicto} ${judgeResult.score}/8 ==========\n`);
   } catch (err) {
-    console.error('Error en job', jobId, err);
+    console.error(`[Job ${jobId}] Error:`, err);
     jobs.set(jobId, { status: 'error', error: err.message, finishedAt: Date.now() });
   }
 }
 
 // ---------------------------------------------------------------------------
-// Servidor HTTP (async: job + polling, para n8n)
+// Servidor HTTP
 // ---------------------------------------------------------------------------
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -554,7 +602,7 @@ app.post('/generar-reporte', async (req, res) => {
 
     let pdfBuffer = await renderizarPdf(cleanHtml);
     let pageCount = await contarPaginas(pdfBuffer);
-    const judgeResult = await runJudge(cleanHtml, pageCount);
+    let judgeResult = await runJudge(cleanHtml, pageCount);
 
     if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
       const fixedHtml = await runFixer({ html: cleanHtml, fixes: judgeResult.fixes, empresa: empresa || dominio, tools });
@@ -563,6 +611,7 @@ app.post('/generar-reporte', async (req, res) => {
         cleanHtml = cleanFixed;
         pdfBuffer = await renderizarPdf(cleanHtml);
         pageCount = await contarPaginas(pdfBuffer);
+        judgeResult = await runJudge(cleanHtml, pageCount);
       }
     }
 
@@ -573,7 +622,8 @@ app.post('/generar-reporte', async (req, res) => {
       nombre: nombre || '',
       email,
       paginas: pageCount,
-      juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8'
+      juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8',
+      juez_fixes: judgeResult.fixes
     });
   } catch (err) {
     console.error(err);
@@ -585,5 +635,3 @@ app.get('/health', (req, res) => res.json({ ok: true, jobs_activos: jobs.size })
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
-
-
