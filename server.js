@@ -25,7 +25,7 @@ const { PDFDocument } = require('pdf-lib');
 // ---------------------------------------------------------------------------
 // Configuración
 // ---------------------------------------------------------------------------
-const MODEL_GEN = 'claude-opus-4-7';     // generación: fiel al skill original
+const MODEL_GEN = 'claude-sonnet-4-6';     // generación: fiel al skill original claude-opus-4-7
 const MODEL_JUDGE = 'claude-sonnet-4-6'; // juez: más rápido y barato
 const MODEL_FIX = 'claude-opus-4-7';     // fixer: misma calidad que el generador
 
