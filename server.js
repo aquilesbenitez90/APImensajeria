@@ -133,8 +133,7 @@ app.post('/generar-reporte', async (req, res) => {
     if (!html) return res.status(500).json({ error: 'Claude no devolvió HTML' });
 
     const browser = await puppeteer.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium'
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: 'networkidle0' });
