@@ -135,9 +135,19 @@ Tipografía:
 Página: width 210mm, min-height 297mm, padding 12mm 15mm 10mm
 
 Header: logo IBT + tag "GTM INTELLIGENCE" + nombre empresa + fecha
-Footer: INBOUND-TOOLS.COM + PÁGINA N / 4
 
-### 6. Reglas CSS anti-corte OBLIGATORIAS
+### 6. Footer obligatorio por página
+
+Cada <div class="page"> tiene su PROPIO <footer> con el número de página correcto. NO usar un footer global.
+
+- Página 1: <footer>INBOUND-TOOLS.COM · PÁGINA 1 / 4</footer>
+- Página 2: <footer>INBOUND-TOOLS.COM · PÁGINA 2 / 4</footer>
+- Página 3: <footer>INBOUND-TOOLS.COM · PÁGINA 3 / 4</footer>
+- Página 4: <footer>INBOUND-TOOLS.COM · PÁGINA 4 / 4</footer>
+
+PROHIBIDO escribir "1234" o concatenar números. Cada página tiene UN solo número.
+
+### 7. Reglas CSS anti-corte OBLIGATORIAS
 
 Incluir SIEMPRE en el <style>:
 - * { box-sizing: border-box; }
@@ -154,7 +164,7 @@ Incluir SIEMPRE en el <style>:
 Si el PDF sale en menos de 4 páginas, revisar page-break-after.
 Si sale en más de 4 páginas, reducir font-size body a 10.5px o recortar texto.
 
-### 7. Validación obligatoria antes de devolver el HTML (Judge Agent)
+### 8. Validación obligatoria antes de devolver el HTML (Judge Agent)
 
 Validar 8 criterios:
 1. LinkedIn /in/ format — URLs usan linkedin.com/in/[slug], NUNCA company
@@ -209,7 +219,8 @@ async function runClaude(email, dominio, empresa, nombre, tools) {
         max_tokens: 16000,
         system: SYSTEM_PROMPT,
         tools: anthropicTools,
-        messages
+        messages,
+        stop_sequences: ['</html>']
       })
     });
 
@@ -218,7 +229,8 @@ async function runClaude(email, dominio, empresa, nombre, tools) {
 
     messages.push({ role: 'assistant', content: data.content });
 
-    if (data.stop_reason === 'end_turn') {
+    // Si llegó al stop_sequence, ya tenemos el HTML completo
+    if (data.stop_reason === 'stop_sequence' || data.stop_reason === 'end_turn') {
       return data.content.find(b => b.type === 'text')?.text;
     }
 
@@ -247,33 +259,17 @@ app.post('/generar-reporte', async (req, res) => {
     const html = await runClaude(email, dominio, empresa || dominio, nombre || '', tools);
     if (!html) return res.status(500).json({ error: 'Claude no devolvió HTML' });
 
-    // Extraer solo el HTML válido, ignorando cualquier texto antes o después
-    const htmlMatch = html.match(/<!DOCTYPE[\s\S]*?<\/html>/i);
-    const cleanHtml = htmlMatch ? htmlMatch[0] : html;
+    // Extraer solo el HTML válido, ignorando cualquier texto antes
+    const htmlMatch = html.match(/<!DOCTYPE[\s\S]*/i);
+    let cleanHtml = htmlMatch ? htmlMatch[0] : html;
+    
+    // Re-agregar </html> porque stop_sequences lo corta antes de generarlo
+    if (!cleanHtml.includes('</html>')) {
+      cleanHtml = cleanHtml + '\n</html>';
+    }
 
     const browser = await puppeteer.launch({
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
     const page = await browser.newPage();
-    await page.setContent(cleanHtml, { waitUntil: 'networkidle0' });
-    const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
-    await browser.close();
-
-    return res.json({
-      status: 'ok',
-      pdf_base64: pdfBuffer.toString('base64'),
-      empresa: empresa || dominio,
-      nombre: nombre || '',
-      email: email
-    });
-
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/health', (req, res) => res.json({ ok: true }));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+    await page.setContent
