@@ -25,9 +25,9 @@ const { PDFDocument } = require('pdf-lib');
 // ---------------------------------------------------------------------------
 // Configuración
 // ---------------------------------------------------------------------------
-const MODEL_GEN = 'claude-sonnet-4-6';     // generación: fiel al skill original claude-opus-4-7
-const MODEL_JUDGE = 'claude-sonnet-4-6'; // juez: más rápido y barato
-const MODEL_FIX = 'claude-opus-4-7';     // fixer: misma calidad que el generador
+const MODEL_GEN = 'claude-sonnet-4-6';     // generación
+const MODEL_JUDGE = 'claude-sonnet-4-6';   // juez
+const MODEL_FIX = 'claude-opus-4-7';       // fixer
 
 const MCP_URL = 'https://backoffice-server-production.up.railway.app/api/mcp';
 const IBT_HEADERS = {
@@ -106,20 +106,48 @@ A partir del research, definir:
 
 Regla: los 6 accounts deben ser EMPRESAS ANCLA — grandes, conocidas, con cadenas de valor o bases de clientes que el producto puede monetizar.
 
-### 3. Buscar 6 perfiles en Sales Navigator
-Usar search_sales_navigator_filtered. Reglas:
-- EXACTAMENTE 6 perfiles — no más, no menos
-- connectionDegree: ["2nd"] siempre
-- Buscar por keywords de rol + industria + ubicación
-- Verificar que cada publicIdentifier sea slug de persona real (NUNCA "company" o "page")
-- Formato de URL OBLIGATORIO: https://www.linkedin.com/in/[slug] — NUNCA linkedin.com/company/
+### 3. Buscar 6 perfiles REALES en Sales Navigator
 
-Si la primera búsqueda trae pocos resultados, variar keywords (español/inglés), quitar filtros de industria, o cambiar país. Máximo 3 intentos.
+REGLA CRÍTICA: PROHIBIDO inventar URLs, nombres o slugs de LinkedIn. TODOS los perfiles DEBEN salir de la búsqueda real en Sales Navigator. Si no podés llamar a las tools, devolvé un error explícito — NUNCA inventes datos.
 
-Seleccionar los 6 más relevantes considerando:
+El flujo OBLIGATORIO es de 2 pasos:
+
+**Paso 3.1: Resolver IDs con resolve_sales_navigator_id**
+
+search_sales_navigator_filtered NO acepta nombres como strings ("Argentina", "CFO"). Necesita IDs.
+Para obtenerlos, llamá primero a resolve_sales_navigator_id con:
+- type: "LOCATION", keywords: nombre del país (ej: "Argentina", "Mexico", "Colombia")
+- type: "SALES_INDUSTRY", keywords: nombre de la industria (ej: "Financial Services", "Software")
+- type: "SENIORITY", keywords: nivel (ej: "Director", "VP", "C-level")
+- type: "FUNCTION", keywords: función (ej: "Sales", "Operations", "Finance")
+
+Cada llamada devuelve una lista de matches con su ID. Tomá el ID del match más relevante.
+
+**Paso 3.2: Buscar perfiles con search_sales_navigator_filtered**
+
+Llamar con esta estructura:
+{
+  "category": "people",
+  "degreeOfConnection": ["2nd"],
+  "location": { "include": ["<ID de location>"] },
+  "industry": { "include": ["<ID de industria>"] },
+  "seniority": { "include": ["<ID de seniority>"] },
+  "function": { "include": ["<ID de función>"] },
+  "profilesLimit": 20
+}
+
+De los resultados, seleccionar EXACTAMENTE 6 perfiles considerando:
 1. Rol / seniority (decision-makers, no ICs junior)
 2. Empresa ancla reconocible (no startups desconocidas)
 3. Fit con el pain del producto
+
+Cada perfil viene con su publicIdentifier. La URL final ES:
+https://www.linkedin.com/in/[publicIdentifier]
+
+PROHIBIDO usar URLs que no salgan de publicIdentifier de la búsqueda.
+PROHIBIDO usar linkedin.com/company/X.
+
+Si la primera búsqueda trae <6 perfiles, ampliar: cambiar industria, quitar seniority, o cambiar país. Máximo 3 intentos antes de seleccionar los mejores que haya.
 
 ### 4. Estructura del reporte (4 páginas)
 
@@ -214,6 +242,7 @@ Footer en cada página (DENTRO del HTML):
 
 ## Anti-patterns
 - URL tipo linkedin.com/company/X → usar perfil personal /in/
+- URL inventada sin pasar por search_sales_navigator_filtered → SIEMPRE buscar primero
 - Copy-paste de ángulos entre cards → cada card con pain específico
 - PDF en 3 páginas → revisar page-break-after en las 3 primeras
 - PDF en 5+ páginas → reducir font-size del cuerpo a 10.5px, recortar texto
@@ -410,8 +439,6 @@ async function renderizarPdf(cleanHtml) {
   try {
     const page = await browser.newPage();
     await page.setContent(cleanHtml, { waitUntil: 'networkidle0' });
-    // Footer va dentro del HTML (como el skill) — sin displayHeaderFooter
-    // preferCSSPageSize + márgenes 0 respetan @page { size: A4; margin: 0 }
     const pdfBuffer = await page.pdf({
       printBackground: true,
       preferCSSPageSize: true,
@@ -440,19 +467,15 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
   try {
     const tools = await listMCPTools();
 
-    // Paso 1-4 del skill: research + ICP + Sales Navigator + HTML
     let html = await runClaude({ email, dominio, empresa, nombre, tools });
     let cleanHtml = limpiarHtml(html);
     if (!cleanHtml) throw new Error('Claude no devolvió HTML');
 
-    // Render + conteo de páginas
     let pdfBuffer = await renderizarPdf(cleanHtml);
     let pageCount = await contarPaginas(pdfBuffer);
 
-    // AGENTE 1: Juez (8 criterios, incluye conteo de páginas)
     const judgeResult = await runJudge(cleanHtml, pageCount);
 
-    // AGENTE 2: Si rechaza, regenerar con fixes (máximo 1 reintento) y re-renderizar
     if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
       console.log(`Job ${jobId}: juez RECHAZADO ${judgeResult.score}/8, aplicando fixes...`);
       const fixedHtml = await runFixer({
@@ -493,9 +516,8 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static('.'));
 
-const jobs = new Map(); // ⚠️ en memoria: si reiniciás el container se pierden
+const jobs = new Map();
 
-// Cleanup de jobs viejos (cada 30 min, borra los de más de 1h)
 setInterval(() => {
   const limite = Date.now() - 60 * 60 * 1000;
   for (const [id, job] of jobs.entries()) {
@@ -503,7 +525,6 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000);
 
-// Endpoint async: crea el job y devuelve jobId
 app.post('/generar', (req, res) => {
   const { email, dominio, empresa, nombre } = req.body || {};
   if (!empresa && !dominio) {
@@ -515,14 +536,12 @@ app.post('/generar', (req, res) => {
   procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '' });
 });
 
-// Endpoint polling: consulta el estado del job
 app.get('/resultado/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'jobId no encontrado o expirado' });
   res.json(job);
 });
 
-// Endpoint legacy compatible con el flujo viejo (sincrónico - puede timeout)
 app.post('/generar-reporte', async (req, res) => {
   const { email, dominio, empresa, nombre } = req.body || {};
   if (!email || !dominio) return res.status(400).json({ error: 'email y dominio son obligatorios' });
@@ -566,3 +585,5 @@ app.get('/health', (req, res) => res.json({ ok: true, jobs_activos: jobs.size })
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+
+
