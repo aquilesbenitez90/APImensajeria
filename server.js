@@ -1,12 +1,11 @@
 /**
- * IBT GTM Report — server.js (versión híbrida final v4)
+ * IBT GTM Report — server.js v5
  *
- * Cambios v4 respecto a v3:
- *   - Paso 3 actualizado: OBLIGATORIO llamar a get_contact_profile DESPUÉS de search_sales_navigator_filtered
- *     para obtener los slugs públicos verificables (publicIdentifier limpio tipo "juan-perez")
- *   - PROHIBIDO usar IDs opacos del tipo "ACwAA..." en las URLs
- *   - Estructura ESTRICTAMENTE 4 páginas: 1 overview + 3 con account cards (sin agregar playbooks ni páginas extras)
- *   - Coherencia: las 6 cuentas son PROSPECTS, nunca proof points o casos de éxito existentes del cliente
+ * Cambios v5 respecto a v4:
+ *   - WEB_SEARCH habilitado en runClaude y runFixer (resuelve el problema de datos inventados de la empresa)
+ *   - Paso 3.3 (get_contact_profile) ahora es OPCIONAL — los IDs opacos ACwAA... son aceptables porque LinkedIn los resuelve igual
+ *   - Énfasis en research real con web_search en paso 1 antes de armar el reporte
+ *   - Juez relajado en slugs (acepta ACwAA...) pero ESTRICTO en veracidad de datos de la empresa
  */
 
 const express = require('express');
@@ -27,6 +26,13 @@ const IBT_HEADERS = {
   'Accept': 'application/json, text/event-stream',
   'x-email': process.env.IBT_EMAIL,
   'x-password': process.env.IBT_PASSWORD
+};
+
+// Server-tool de Anthropic: web search nativo
+const WEB_SEARCH_TOOL = {
+  type: 'web_search_20250305',
+  name: 'web_search',
+  max_uses: 8
 };
 
 // ---------------------------------------------------------------------------
@@ -73,15 +79,7 @@ async function listMCPTools() {
   if (!match) throw new Error('No se pudo listar tools');
   const parsed = JSON.parse(match[1]);
   const toolList = parsed?.result?.tools || [];
-  console.log(`[MCP] ${toolList.length} tools disponibles: ${toolList.map(t => t.name).join(', ')}`);
-  
-  const hasResolve = toolList.some(t => t.name === 'resolve_sales_navigator_id');
-  const hasSearch = toolList.some(t => t.name === 'search_sales_navigator_filtered');
-  const hasProfile = toolList.some(t => t.name === 'get_contact_profile');
-  if (!hasResolve) console.warn(`[MCP] WARNING: resolve_sales_navigator_id NO está disponible`);
-  if (!hasSearch) console.warn(`[MCP] WARNING: search_sales_navigator_filtered NO está disponible`);
-  if (!hasProfile) console.warn(`[MCP] WARNING: get_contact_profile NO está disponible`);
-  
+  console.log(`[MCP] ${toolList.length} tools disponibles`);
   return toolList;
 }
 
@@ -96,45 +94,58 @@ Generás un reporte GTM de EXACTAMENTE 4 páginas A4 que IBT manda a prospectos:
 
 ## Workflow completo
 
-### 1. Research de la empresa
-Hacer web_fetch o WebSearch sobre el dominio. Extraer:
-- Qué hace el producto (1-2 oraciones)
-- Modelo de negocio (B2B SaaS / marketplace / fintech / etc.)
-- País de origen y expansión
-- Tracción / métricas públicas (funding, clientes, revenue, usuarios)
-- Proof point clave para usar en el reporte
+### 1. Research REAL de la empresa con web_search (OBLIGATORIO)
 
-Si el sitio bloquea JS, buscar en LinkedIn company page y Crunchbase.
+REGLA CRÍTICA: PROHIBIDO inventar o asumir datos de la empresa. TODOS los datos del overview (año de fundación, tracción, modelo de negocio, stage, número de clientes/productos, funding) deben salir de búsquedas reales con la tool web_search.
+
+Pasos obligatorios:
+- Buscar el nombre de la empresa + "fundada" o "founded" → confirmar año de fundación
+- Buscar el nombre + "funding" o "seed" o "Series A" → confirmar stage real
+- Buscar el nombre + "crunchbase" o "linkedin" → confirmar modelo de negocio
+- Buscar noticias recientes (último año) sobre la empresa
+
+PROHIBIDO escribir el reporte sin tener al menos 3 fuentes web verificables sobre la empresa.
+
+Si la información es ambigua o no se puede confirmar:
+- Usar fórmulas conservadoras ("startup en etapa temprana", "company builder")
+- NO inventar números específicos (NUNCA "+30 productos", "Series A", "$X ARR" si no está confirmado)
+- En duda → usar formulación genérica verificada en lugar de número específico inventado
+
+Extraer del research:
+- Qué hace el producto/empresa (1-2 oraciones)
+- Modelo de negocio REAL (no asumir B2B SaaS si no está confirmado)
+- País de origen y expansión
+- Tracción / métricas públicas VERIFICADAS (funding real, clientes públicos, etc.)
+- Stage real (seed / Series A / Series B / etc.) — solo si está confirmado
+- Año de fundación REAL
 
 ### 2. Definir el ICP del cliente
-A partir del research, definir:
+A partir del research VERIFICADO (no asumido), definir:
 - Tamaño de empresa target (headcount, revenue)
-- Rol del decisor (CFO, Director Comercial, Head of CX, etc.)
-- Industrias donde el producto tiene fit claro
+- Rol del decisor
+- Industrias donde el producto tiene fit claro según lo que la empresa REALMENTE hace
 - País(es) donde tiene sentido hacer outreach
 
-Regla: los 6 accounts deben ser EMPRESAS ANCLA — grandes, conocidas, con cadenas de valor o bases de clientes que el producto puede monetizar.
+REGLA: el ICP debe alinearse con el modelo de negocio REAL verificado, no con un modelo asumido.
 
-REGLA DE COHERENCIA: las 6 cuentas son PROSPECTS — empresas que aún NO son clientes del producto. NUNCA incluir como cuenta target a una empresa que ya es proof point, caso de éxito o cliente conocido del producto del reporte. Si una empresa aparece como referencia en el research, EXCLUIRLA de las 6 cuentas target.
+REGLA DE COHERENCIA: las 6 cuentas son PROSPECTS — empresas que aún NO son clientes del producto. NUNCA incluir como cuenta target a una empresa que ya es proof point o cliente conocido del producto.
 
 ### 3. Buscar 6 perfiles REALES en Sales Navigator
 
-REGLA CRÍTICA: PROHIBIDO inventar URLs, nombres o slugs de LinkedIn. TODOS los perfiles DEBEN salir de la búsqueda real en Sales Navigator.
-
-El flujo OBLIGATORIO es de 3 pasos:
+PROHIBIDO inventar URLs, nombres o slugs de LinkedIn. TODOS los perfiles DEBEN salir de la búsqueda real en Sales Navigator.
 
 **Paso 3.1: Resolver IDs con resolve_sales_navigator_id**
 
 search_sales_navigator_filtered NO acepta nombres como strings. Necesita IDs.
 Llamar primero a resolve_sales_navigator_id con:
-- type: "LOCATION", keywords: nombre del país (ej: "Argentina", "Mexico", "Colombia")
+- type: "LOCATION", keywords: nombre del país
 - type: "SALES_INDUSTRY", keywords: nombre de la industria
-- type: "SENIORITY", keywords: nivel (ej: "Director", "VP", "C-level")
-- type: "FUNCTION", keywords: función (ej: "Sales", "Operations", "Finance")
+- type: "SENIORITY", keywords: nivel
+- type: "FUNCTION", keywords: función
 
 **Paso 3.2: Buscar perfiles con search_sales_navigator_filtered**
 
-Llamar con esta estructura:
+Llamar con:
 {
   "category": "people",
   "degreeOfConnection": ["2nd"],
@@ -145,68 +156,53 @@ Llamar con esta estructura:
   "profilesLimit": 20
 }
 
-De los resultados, pre-seleccionar EXACTAMENTE 6 perfiles considerando:
+De los resultados, seleccionar EXACTAMENTE 6 perfiles considerando:
 1. Rol / seniority (decision-makers, no ICs junior)
-2. Empresa ancla reconocible (no startups desconocidas)
+2. Empresa ancla reconocible
 3. Fit con el pain del producto
 
-**Paso 3.3: OBLIGATORIO — Obtener slug público con get_contact_profile**
+Usar el publicIdOrUrl que devuelve search_sales_navigator_filtered como slug en la URL final.
+URL final: https://www.linkedin.com/in/[publicIdOrUrl]
 
-search_sales_navigator_filtered devuelve IDs opacos del tipo "ACwAA..." en publicIdOrUrl. ESTOS NO SON SLUGS PÚBLICOS VÁLIDOS.
+LinkedIn acepta tanto slugs limpios como member IDs opacos (ACwAA...) — ambos resuelven al perfil correcto.
 
-Para CADA uno de los 6 perfiles preseleccionados, DEBÉS llamar a get_contact_profile pasando ese ID opaco como publicIdOrUrl. La respuesta va a contener el publicIdentifier REAL (un slug limpio tipo "juan-perez" o "maria-garcia-cfo").
+PROHIBIDO:
+- URLs inventadas que no salieron de search_sales_navigator_filtered
+- linkedin.com/company/X (usar perfil personal /in/)
 
-PROHIBIDO usar URLs con IDs opacos tipo "linkedin.com/in/ACwAA...". 
-PROHIBIDO usar URLs inventadas.
-PROHIBIDO usar linkedin.com/company/X.
+### 4. Estructura del reporte — EXACTAMENTE 4 páginas
 
-URL FINAL OBLIGATORIA: https://www.linkedin.com/in/[publicIdentifier limpio de get_contact_profile]
-
-Ejemplos de URLs VÁLIDAS:
-- linkedin.com/in/antonio-feeney
-- linkedin.com/in/gustavo-barsola
-- linkedin.com/in/edmundo-miralles
-- linkedin.com/in/andres-salazar-oracle
-
-Ejemplos de URLs INVÁLIDAS (PROHIBIDAS):
-- linkedin.com/in/ACwAABbL89gBQGDmLsHNWaE9wF5AlSzoTA5v8VY ← ID opaco, INVÁLIDO
-- linkedin.com/in/ACwAAAPioh8BGa-lrnSM_vLC-0v16pDLlk6mvUM ← ID opaco, INVÁLIDO
-
-Si get_contact_profile no devuelve un publicIdentifier limpio para un perfil, DESCARTAR ese perfil y elegir otro de los resultados de search_sales_navigator_filtered. Repetir hasta tener 6 perfiles con slugs limpios verificables.
-
-### 4. Estructura del reporte — EXACTAMENTE 4 páginas (NI MÁS NI MENOS)
-
-PROHIBIDO agregar páginas extra como "playbook", "secuencia operativa", "plan de 30 días" o cualquier otra cosa fuera del scope. La estructura es ESTRICTAMENTE:
+PROHIBIDO agregar páginas extra como "playbook", "secuencia operativa", "plan de 30 días" o cualquier otra cosa fuera del scope.
 
 - Página 1: Overview estratégico
 - Página 2: Account cards 1 y 2
-- Página 3: Account cards 3 y 4  
+- Página 3: Account cards 3 y 4
 - Página 4: Account cards 5 y 6
 
-NO agregar página 5. NO agregar página 0 con índice. EXACTAMENTE 4 páginas.
+NO agregar página 5. EXACTAMENTE 4 divs .page.
 
 #### Página 1 — Overview estratégico
-[HEADER IBT] + [RIBBON: Vertical · País · Fundada · ARR/Tracción]
+[HEADER IBT] + [RIBBON: Vertical · País · Fundada · ARR/Tracción] — DATOS VERIFICADOS con web_search
 [EYEBROW Geist Mono uppercase] + [H1: "6 [tipo de cuenta] para escalar [Empresa] en [País]"]
-[Lead: 2-3 oraciones, ancla el proof point clave del cliente]
-[STATS — 4 chips]: Fecha · "6 · Priorizadas" · Métrica clave · Meta comercial
-[ICP GRID — 4 tarjetas]: perfil decisor · señal de compra · pain primario · tamaño empresa
-[CONTEXTO MACRO]: 2-3 bullets con datos de mercado
+[Lead: 2-3 oraciones, ancla el proof point REAL VERIFICADO del cliente]
+[STATS — 4 chips]: Fecha · "6 · Priorizadas" · Métrica clave VERIFICADA · Meta comercial
+[ICP GRID — 4 tarjetas]
+[CONTEXTO MACRO]: 2-3 bullets con datos de mercado verificados
 [ÁNGULOS DE APERTURA]: 3 hooks para LinkedIn
-[CHIPS de prioridad]: etiquetas de industria/vertical
+[CHIPS de prioridad]
 
 #### Páginas 2-4 — Account cards (2 por página)
 [NÚMERO] · [EMPRESA]
-[Avatar circular con inicial] + [Nombre decisor] + [Cargo · Empresa]
-[linkedin.com/in/[slug limpio] → link clicable] + [País · 2do grado · Año en rol]
-[ÁNGULO PERSONALIZADO]: 3-4 oraciones específicas. Mencionar nombre del decisor, pain concreto, cómo el producto lo resuelve. NO copy-paste entre cards.
-[HOOK DE APERTURA]: una oración entre comillas.
+[Avatar] + [Nombre decisor] + [Cargo · Empresa]
+[linkedin.com/in/[publicIdOrUrl] → link clicable] + [País · 2do grado · Año en rol]
+[ÁNGULO PERSONALIZADO]: 3-4 oraciones específicas
+[HOOK DE APERTURA]: una oración entre comillas
 
-REGLA ICE: cada card 100% única. Diferente empresa, pain y gancho. PROHIBIDO frases genéricas como "escalar tu operación" o "mejorar la eficiencia".
+REGLA ICE: cada card 100% única.
 
 ### 5. Design system CommerceGlass v8
 
-Variables CSS — NO TOCAR:
+Variables CSS:
 \`\`\`css
 :root {
   --ink: #0A0C14; --ink-2: #3A3F4A; --ink-3: #6B717B; --ink-4: #A0A5AE;
@@ -217,19 +213,19 @@ Variables CSS — NO TOCAR:
 }
 \`\`\`
 
-Fuentes (incluir en <head>):
+Fuentes:
 \`\`\`html
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 \`\`\`
 
 Tipografía:
-- Eyebrow/labels: Geist Mono · 8-9px · uppercase · letter-spacing 0.14em
+- Eyebrow: Geist Mono · 8-9px · uppercase · letter-spacing 0.14em
 - H1: 28px · weight 700 · letter-spacing -0.03em
 - H2: 14-15px · weight 600
 - Cuerpo: 11px · line-height 1.55
-- Acento: <span style="color:var(--accent)">texto</span> — máximo 1-2 palabras por sección
+- Acento: <span style="color:var(--accent)">texto</span>
 
-CSS de página (usar tal cual):
+CSS de página:
 \`\`\`css
 .page {
   width: 210mm; min-height: 297mm; margin: 24px auto;
@@ -264,7 +260,7 @@ Header en cada página:
 </header>
 \`\`\`
 
-Footer en cada página (DENTRO del HTML):
+Footer:
 \`\`\`html
 <footer class="page-footer">
   <span>INBOUND-TOOLS.COM ● ANÁLISIS GTM · [EMPRESA]</span>
@@ -275,72 +271,72 @@ Footer en cada página (DENTRO del HTML):
 ---
 
 ## Anti-patterns
-- URL tipo linkedin.com/company/X → usar perfil personal /in/
-- URL con ID opaco linkedin.com/in/ACwAA... → INVÁLIDO, llamar a get_contact_profile para obtener slug limpio
-- URL inventada sin pasar por search_sales_navigator_filtered + get_contact_profile → PROHIBIDO
-- Empresa proof point/cliente del producto como cuenta target → INCONSISTENCIA, excluirla
-- PDF en 5+ páginas con playbook extra → ELIMINAR, exactamente 4 páginas
-- Copy-paste de ángulos entre cards → cada card con pain específico
-- PDF en 3 páginas → revisar page-break-after en las 3 primeras
-- Sales Nav 0 resultados → quitar filtro industria, cambiar keywords ES/EN
-- Datos rotos: nada de [INSERT], TODO, undefined, lorem ipsum
+- DATOS INVENTADOS de la empresa → SIEMPRE verificar con web_search antes de escribir el overview
+- Año de fundación, stage, métricas asumidas sin búsqueda web → PROHIBIDO
+- URL tipo linkedin.com/company/X → usar /in/
+- URL inventada sin pasar por search_sales_navigator_filtered → PROHIBIDO
+- Empresa proof point/cliente del producto como cuenta target → excluirla
+- PDF en 5+ páginas con playbook extra → ELIMINAR
+- Copy-paste de ángulos entre cards
+- Datos rotos: [INSERT], TODO, undefined, lorem ipsum
 
 ---
 
 ## Output FINAL
-- La respuesta DEBE empezar exactamente con <!DOCTYPE html>
-- La respuesta DEBE terminar exactamente con </html>
-- NO escribas NADA antes del <!DOCTYPE html>, ni explicaciones, ni "Let me"
-- NO uses bloques de código markdown
-- EXACTAMENTE 4 divs .page, ni uno más ni uno menos`;
+- Empezar con <!DOCTYPE html>
+- Terminar con </html>
+- NO escribir nada antes del <!DOCTYPE html>
+- NO usar bloques de código markdown
+- EXACTAMENTE 4 divs .page`;
 
 const SYSTEM_PROMPT_JUDGE = `Sos un juez de control de calidad EXTREMADAMENTE ESTRICTO para reportes GTM de IBT.
 
 Recibís el HTML del reporte + el número de páginas del PDF ya renderizado. Validás los 8 criterios y retornás un JSON.
 
-Tu objetivo: detectar reportes con datos INVENTADOS o inconsistencias. Sé paranoico. En duda → FAIL.
+Tu objetivo: detectar reportes con DATOS INVENTADOS o INCONSISTENCIAS. Sé paranoico. En duda → FAIL.
 
 Criterios:
 
-1. **LinkedIn /in/ format** — todos los URLs usan linkedin.com/in/[slug], NUNCA company
-   FAIL si encuentras algún linkedin.com/company/
-   FAIL si encuentras URLs con IDs opacos tipo "linkedin.com/in/ACwAA..." (esos son member IDs internos, NO slugs públicos verificables)
+1. **LinkedIn /in/ format** — todos los URLs usan linkedin.com/in/[algo], NUNCA linkedin.com/company/
+   PASS si las URLs son /in/ — son aceptables tanto slugs limpios (juan-perez) como member IDs opacos (ACwAA...) porque LinkedIn los resuelve igual
+   FAIL solo si encuentras linkedin.com/company/
 
 2. **Exactamente 6 cuentas** — ni más ni menos
 
 3. **EXACTAMENTE 4 páginas PDF** — usá el conteo provisto en el mensaje
-   FAIL si el PDF tiene 5 o más páginas (no debe haber playbooks, secuencias operativas, ni páginas extra fuera de overview + 3 de account cards)
-   FAIL si tiene 3 o menos páginas
+   FAIL si tiene 5+ páginas o 3 o menos
 
-4. **Slug accuracy — DETECCIÓN DE SLUGS INVENTADOS o INVÁLIDOS** (CRÍTICO):
-   FAIL si detectás CUALQUIERA de estas señales:
-   - URLs con IDs opacos tipo "linkedin.com/in/ACwAA..." → estos son member IDs internos, NO slugs públicos verificables, INVÁLIDOS
-   - Slugs con patrón demasiado limpio sospechoso: todos "nombre-apellido" perfecto
-   - Slugs genéricos: "ceo-empresa", "cfo-banco", "director-comercial-fintech"
-   - Slugs construidos a partir de nombre + apellido + empresa sin variación natural
-   Los slugs VÁLIDOS son los publicIdentifier públicos de LinkedIn (ej: "antonio-feeney", "gustavo-barsola", "edmundo-miralles", "andres-salazar-oracle")
+4. **VERACIDAD de los datos de la empresa** (CRÍTICO):
+   FAIL si el overview contiene datos que parecen inventados o demasiado específicos sin verificación:
+   - Año de fundación específico ("Fundada 2020") sin que pueda confirmarse
+   - Stage de funding ("Series A", "$X ARR") sin evidencia clara
+   - Número de productos/clientes específico ("+30 productos") sin fuente
+   - Métricas sospechosamente redondas ("38% reply rate", "4x pipeline") sin contexto
+   Si el reporte hace afirmaciones cuantitativas específicas sobre la empresa, deben sonar verificables. Si todo el overview suena demasiado a "marketing copy genérico de SaaS B2B" → FAIL
 
-5. **Coherencia de contenido** — el reporte trata sobre la empresa correcta, las cuentas hacen sentido para ese ICP
-   FAIL si una de las 6 cuentas target es la misma empresa mencionada como proof point/cliente del producto en el overview (inconsistencia: una empresa no puede ser cliente Y prospect a la vez)
+5. **Coherencia interna** — el reporte trata sobre la empresa correcta, las cuentas hacen sentido para ese ICP
+   FAIL si una de las 6 cuentas target es la misma empresa mencionada como proof point/cliente del producto en el overview
 
-6. **Personalización ICE** — cada card tiene ángulo único, nombre del decisor, pain específico. PROHIBIDO frases genéricas como "escalar tu operación", "mejorar la eficiencia"
+6. **Personalización ICE** — cada card tiene ángulo único, nombre del decisor, pain específico
+   FAIL si encuentra frases genéricas como "escalar tu operación", "mejorar la eficiencia"
 
 7. **Sin datos rotos** — sin [INSERT], TODO, undefined, lorem ipsum, fechas incoherentes
 
-8. **Proof points presentes** — al menos 1 ancla de credibilidad del cliente (ej: clientes conocidos, funding, métricas)
+8. **Proof points presentes y plausibles** — al menos 1 ancla de credibilidad del cliente
+   FAIL si los proof points suenan fabricados (porcentajes redondos sin contexto, métricas sin fuente)
 
-Respondé EXCLUSIVAMENTE con un JSON válido, sin markdown, sin texto extra, con esta forma:
+Respondé EXCLUSIVAMENTE con JSON válido, sin markdown, sin texto extra:
 {"veredicto":"APROBADO"|"RECHAZADO","score":<0-8>,"fixes":["fix concreto 1","fix concreto 2"]}
 
-APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concretas de corrección.`;
+APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concretas.`;
 
-const SYSTEM_PROMPT_FIX = `Sos el generador del reporte GTM de IBT. Recibís un HTML existente y una lista de correcciones del juez. Aplicá las correcciones y devolvé SOLO el HTML completo corregido (<!DOCTYPE html> ... </html>), EXACTAMENTE 4 páginas A4 (ni más ni menos), footer incluido, mismo design system CommerceGlass v8. Sin explicaciones, sin markdown.
+const SYSTEM_PROMPT_FIX = `Sos el generador del reporte GTM de IBT. Recibís un HTML existente y una lista de correcciones del juez. Aplicá las correcciones y devolvé SOLO el HTML completo corregido (<!DOCTYPE html> ... </html>), EXACTAMENTE 4 páginas A4, footer incluido, mismo design system CommerceGlass v8. Sin explicaciones, sin markdown.
 
 IMPORTANTE:
-- Si el juez detectó slugs con IDs opacos (ACwAA...), DEBES llamar a get_contact_profile pasando ese ID para obtener el publicIdentifier público real y reemplazar la URL.
+- Si el juez detectó datos inventados de la empresa, USAR web_search para verificar y corregir.
 - Si el juez detectó páginas extra (5+), eliminá las páginas que no sean: 1 overview + 3 account cards = 4 páginas exactas.
-- Si el juez detectó una cuenta que es proof point del cliente, reemplazala por otro perfil real de Sales Navigator usando el flujo resolve → search → get_contact_profile.
-- NUNCA inventes slugs nuevos. Si no podés resolver con get_contact_profile, descartá el perfil y elegí otro.`;
+- Si el juez detectó una cuenta que es proof point del cliente, reemplazala por otro perfil real de Sales Navigator.
+- NUNCA inventes datos. Si no podés verificar con web_search, usar formulación conservadora.`;
 
 // ---------------------------------------------------------------------------
 // Llamadas a Claude
@@ -365,18 +361,23 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
 }
 
 async function runClaude({ email, dominio, empresa, nombre, tools }) {
-  const anthropicTools = tools.map(t => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.inputSchema
-  }));
+  // MCP tools + web_search server-tool de Anthropic
+  const anthropicTools = [
+    ...tools.map(t => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.inputSchema
+    })),
+    WEB_SEARCH_TOOL
+  ];
 
   const messages = [{
     role: 'user',
-    content: `Generá el reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}\n\nSeguí el workflow completo del skill. Hacé el research, encontrá 6 cuentas con Sales Navigator (incluyendo get_contact_profile para obtener slugs públicos limpios) y devolvé SOLO el HTML con EXACTAMENTE 4 páginas.`
+    content: `Generá el reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}\n\nSeguí el workflow completo del skill. PRIMERO hacé research REAL con web_search sobre la empresa (fundación, modelo, stage, tracción) — PROHIBIDO inventar datos. Luego encontrá 6 cuentas con Sales Navigator y devolvé SOLO el HTML con EXACTAMENTE 4 páginas.`
   }];
 
   let toolCallCount = 0;
+  let webSearchCount = 0;
   while (true) {
     const data = await callClaude({
       model: MODEL_GEN,
@@ -390,9 +391,9 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
     messages.push({ role: 'assistant', content: data.content });
 
     if (data.stop_reason === 'stop_sequence' || data.stop_reason === 'end_turn') {
-      console.log(`[GEN] Generación terminada. Total tool calls: ${toolCallCount}`);
-      if (toolCallCount === 0) {
-        console.warn(`[GEN] WARNING: Claude NO llamó a ninguna tool. Los datos pueden estar inventados.`);
+      console.log(`[GEN] Generación terminada. Tool calls: ${toolCallCount} (web_search: ${webSearchCount})`);
+      if (webSearchCount === 0) {
+        console.warn(`[GEN] WARNING: Claude NO usó web_search. Datos de la empresa pueden estar inventados.`);
       }
       return data.content.find(b => b.type === 'text')?.text;
     }
@@ -402,6 +403,14 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
       for (const block of data.content) {
         if (block.type !== 'tool_use') continue;
         toolCallCount++;
+        
+        // web_search es un server-tool: Anthropic lo ejecuta del lado servidor, no llega acá
+        // Solo manejamos las tools del MCP
+        if (block.name === 'web_search') {
+          webSearchCount++;
+          continue;
+        }
+        
         const result = await callMCP(block.name, block.input);
         toolResults.push({
           type: 'tool_result',
@@ -409,9 +418,18 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
           content: result
         });
       }
-      messages.push({ role: 'user', content: toolResults });
+      if (toolResults.length > 0) {
+        messages.push({ role: 'user', content: toolResults });
+      } else {
+        // Solo había web_search → Anthropic ya lo ejecutó y vendrá en la próxima respuesta automáticamente
+        // Pero si no hay más tool_use que responder, salimos del loop
+        break;
+      }
     }
   }
+  // Fallback: si salimos del loop sin texto, devolver lo último
+  const lastAssistantMsg = messages.filter(m => m.role === 'assistant').pop();
+  return lastAssistantMsg?.content?.find(b => b.type === 'text')?.text || '';
 }
 
 async function runJudge(html, pageCount) {
@@ -448,15 +466,18 @@ async function runJudge(html, pageCount) {
 
 async function runFixer({ html, fixes, empresa, tools }) {
   console.log(`[FIX] Aplicando ${fixes.length} fixes...`);
-  const anthropicTools = tools.map(t => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.inputSchema
-  }));
+  const anthropicTools = [
+    ...tools.map(t => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.inputSchema
+    })),
+    WEB_SEARCH_TOOL
+  ];
 
   const messages = [{
     role: 'user',
-    content: `Empresa: ${empresa}\n\nCorrecciones a aplicar del juez:\n- ${fixes.join('\n- ')}\n\nHTML actual:\n${html}\n\nAplicá los fixes y devolvé SOLO el HTML completo corregido con EXACTAMENTE 4 páginas.`
+    content: `Empresa: ${empresa}\n\nCorrecciones a aplicar del juez:\n- ${fixes.join('\n- ')}\n\nHTML actual:\n${html}\n\nAplicá los fixes (usando web_search si hay datos a verificar) y devolvé SOLO el HTML completo corregido con EXACTAMENTE 4 páginas.`
   }];
 
   let toolCallCount = 0;
@@ -482,6 +503,11 @@ async function runFixer({ html, fixes, empresa, tools }) {
       for (const block of data.content) {
         if (block.type !== 'tool_use') continue;
         toolCallCount++;
+        
+        if (block.name === 'web_search') {
+          continue;
+        }
+        
         const result = await callMCP(block.name, block.input);
         toolResults.push({
           type: 'tool_result',
@@ -489,9 +515,15 @@ async function runFixer({ html, fixes, empresa, tools }) {
           content: result
         });
       }
-      messages.push({ role: 'user', content: toolResults });
+      if (toolResults.length > 0) {
+        messages.push({ role: 'user', content: toolResults });
+      } else {
+        break;
+      }
     }
   }
+  const lastAssistantMsg = messages.filter(m => m.role === 'assistant').pop();
+  return lastAssistantMsg?.content?.find(b => b.type === 'text')?.text || '';
 }
 
 // ---------------------------------------------------------------------------
@@ -534,7 +566,7 @@ async function contarPaginas(pdfBuffer) {
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline en background con re-validación del juez
+// Pipeline
 // ---------------------------------------------------------------------------
 async function procesar(jobId, { email, dominio, empresa, nombre }) {
   try {
