@@ -37,22 +37,46 @@ const WEB_SEARCH_TOOL = {
   max_uses: 8
 };
 
-// Acumulador de tokens por job (para el log de costo)
+// Acumulador de tokens por job (total + desglose por etapa)
 let tokenStats = { input: 0, output: 0, cache_write: 0, cache_read: 0 };
+// Desglose por etapa: cuánto costó cada parte del pipeline
+let stageStats = {
+  gen:   { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+  judge: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+  fix:   { input: 0, output: 0, cache_write: 0, cache_read: 0 }
+};
+// Etapa actual (la setea cada función antes de llamar a Claude)
+let currentStage = 'gen';
+
 function resetTokenStats() {
   tokenStats = { input: 0, output: 0, cache_write: 0, cache_read: 0 };
+  stageStats = {
+    gen:   { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    judge: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    fix:   { input: 0, output: 0, cache_write: 0, cache_read: 0 }
+  };
+  currentStage = 'gen';
 }
+
+function costoDe({ input, output, cache_write, cache_read }) {
+  // Precios Sonnet 4.6: $3 input / $15 output por millón.
+  // Cache write = 1.25x input ($3.75). Cache read = 0.1x input ($0.30).
+  return (input * 3 + output * 15 + cache_write * 3.75 + cache_read * 0.30) / 1e6;
+}
+
 function logTokenCost(label) {
-  const { input, output, cache_write, cache_read } = tokenStats;
-  // Precios Sonnet 4.6: $3/$15 por millón. Cache write +25%, cache read -90%.
-  // (Aprox: el fixer usa Opus pero esto da una referencia útil)
-  const costInput = (input * 3) / 1e6;
-  const costOutput = (output * 15) / 1e6;
-  const costCacheWrite = (cache_write * 3.75) / 1e6;
-  const costCacheRead = (cache_read * 0.30) / 1e6;
-  const total = costInput + costOutput + costCacheWrite + costCacheRead;
-  console.log(`[TOKENS] ${label} | in:${input} out:${output} cache_w:${cache_write} cache_r:${cache_read} | ~$${total.toFixed(4)} (ref Sonnet)`);
+  const total = costoDe(tokenStats);
+  console.log(`[TOKENS] ${label} | in:${tokenStats.input} out:${tokenStats.output} cache_w:${tokenStats.cache_write} cache_r:${tokenStats.cache_read} | ~$${total.toFixed(4)} (Sonnet)`);
+  // Desglose: cuánto se fue en cada etapa
+  for (const etapa of ['gen', 'judge', 'fix']) {
+    const s = stageStats[etapa];
+    const c = costoDe(s);
+    if (s.input || s.output || s.cache_read || s.cache_write) {
+      console.log(`[TOKENS]   └─ ${etapa.padEnd(5)} | in:${s.input} out:${s.output} cache_w:${s.cache_write} cache_r:${s.cache_read} | ~$${c.toFixed(4)}`);
+    }
+  }
 }
+
 
 // ---------------------------------------------------------------------------
 // MCP IBT con logs
@@ -430,18 +454,30 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
   const data = await res.json();
   if (!res.ok) throw new Error(JSON.stringify(data));
 
-  // Acumular tokens para el log de costo
+  // Acumular tokens para el log de costo (total + etapa actual)
   if (data.usage) {
-    tokenStats.input += data.usage.input_tokens || 0;
-    tokenStats.output += data.usage.output_tokens || 0;
-    tokenStats.cache_write += data.usage.cache_creation_input_tokens || 0;
-    tokenStats.cache_read += data.usage.cache_read_input_tokens || 0;
+    const i = data.usage.input_tokens || 0;
+    const o = data.usage.output_tokens || 0;
+    const cw = data.usage.cache_creation_input_tokens || 0;
+    const cr = data.usage.cache_read_input_tokens || 0;
+    tokenStats.input += i;
+    tokenStats.output += o;
+    tokenStats.cache_write += cw;
+    tokenStats.cache_read += cr;
+    const st = stageStats[currentStage];
+    if (st) {
+      st.input += i;
+      st.output += o;
+      st.cache_write += cw;
+      st.cache_read += cr;
+    }
   }
 
   return data;
 }
 
 async function runClaude({ email, dominio, empresa, nombre, tools }) {
+  currentStage = 'gen';
   const anthropicTools = [
     ...tools.map(t => ({
       name: t.name,
@@ -506,6 +542,7 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
 }
 
 async function runJudge(html, pageCount) {
+  currentStage = 'judge';
   console.log(`[JUDGE] Evaluando reporte (${pageCount} páginas)...`);
   const data = await callClaude({
     model: MODEL_JUDGE,
@@ -538,6 +575,7 @@ async function runJudge(html, pageCount) {
 }
 
 async function runFixer({ html, fixes, empresa, tools }) {
+  currentStage = 'fix';
   console.log(`[FIX] Aplicando ${fixes.length} fixes...`);
   const anthropicTools = [
     ...tools.map(t => ({
@@ -688,6 +726,11 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
       juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8',
       juez_fixes: judgeResult.fixes,
       tokens: { ...tokenStats },
+      // Campos planos para mapear fácil en n8n / Google Sheets
+      tokens_input: tokenStats.input,
+      tokens_output: tokenStats.output,
+      tokens_cache_write: tokenStats.cache_write,
+      tokens_cache_read: tokenStats.cache_read,
       finishedAt: Date.now()
     });
     console.log(`========== Job ${jobId} - OK ${pageCount} páginas, juez FINAL ${judgeResult.veredicto} ${judgeResult.score}/8 ==========\n`);
@@ -767,7 +810,11 @@ app.post('/generar-reporte', async (req, res) => {
       paginas: pageCount,
       juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8',
       juez_fixes: judgeResult.fixes,
-      tokens: { ...tokenStats }
+      tokens: { ...tokenStats },
+      tokens_input: tokenStats.input,
+      tokens_output: tokenStats.output,
+      tokens_cache_write: tokenStats.cache_write,
+      tokens_cache_read: tokenStats.cache_read
     });
   } catch (err) {
     console.error(err);
