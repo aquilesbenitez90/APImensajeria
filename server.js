@@ -19,6 +19,7 @@ const express = require('express');
 const crypto = require('crypto');
 const puppeteer = require('puppeteer');
 const { PDFDocument } = require('pdf-lib');
+const { renderReport } = require('./render.js'); // plantilla fija + datos JSON -> HTML
 
 // ---------------------------------------------------------------------------
 // Configuración
@@ -383,6 +384,119 @@ Footer:
 - NO usar bloques de código markdown
 - EXACTAMENTE 4 divs .page`;
 
+// ===========================================================================
+// PROMPT DE GENERACIÓN — devuelve SOLO JSON (la IA YA NO arma HTML).
+// El diseño vive en template.html; el HTML lo arma render.js. Esto baja el
+// output del gen de ~12k tokens a ~1-2k. Conserva TODAS las reglas de
+// veracidad del skill (research web, anti-invención de cargo/empresa, grado
+// real, anti-patterns). Solo se eliminó el design system y el HTML.
+// ===========================================================================
+const SYSTEM_PROMPT_JSON = `# IBT GTM Report — generador de DATOS (JSON)
+
+Generás los DATOS de un reporte GTM que IBT manda a prospectos: identificás 6 decisores reales en LinkedIn que encajan con el ICP del cliente. NO generás HTML, CSS ni diseño — devolvés EXCLUSIVAMENTE un objeto JSON con los datos. El sistema arma el HTML con una plantilla fija y el PDF con Puppeteer.
+
+---
+
+## Workflow
+
+### 1. Research REAL de la empresa con web_search (OBLIGATORIO)
+
+REGLA CRÍTICA: PROHIBIDO inventar o asumir datos de la empresa. TODOS los datos del overview (año de fundación, tracción, modelo de negocio, stage, número de clientes/productos, funding) deben salir de búsquedas reales con la tool web_search.
+
+Pasos obligatorios:
+- Buscar el nombre de la empresa + "fundada" o "founded" → confirmar año de fundación
+- Buscar el nombre + "funding" o "seed" o "Series A" → confirmar stage real
+- Buscar el nombre + "crunchbase" o "linkedin" → confirmar modelo de negocio
+- Buscar noticias recientes (último año) sobre la empresa
+
+PROHIBIDO escribir el reporte sin tener al menos 3 fuentes web verificables sobre la empresa.
+
+Si la información es ambigua o no se puede confirmar:
+- Usar fórmulas conservadoras ("startup en etapa temprana", "company builder")
+- NO inventar números específicos (NUNCA "+30 productos", "Series A", "$X ARR" si no está confirmado)
+- En duda → usar formulación genérica verificada en lugar de número específico inventado
+
+### 2. Definir el ICP del cliente
+A partir del research VERIFICADO (no asumido): tamaño de empresa target, rol del decisor, industrias con fit claro según lo que la empresa REALMENTE hace, país(es) de outreach.
+REGLA: el ICP debe alinearse con el modelo de negocio REAL verificado.
+REGLA DE COHERENCIA: las 6 cuentas son PROSPECTS — NUNCA incluir como cuenta target a una empresa que ya es proof point o cliente conocido del producto.
+
+### 3. Buscar 6 perfiles REALES en Sales Navigator
+
+PROHIBIDO inventar URLs, nombres o slugs de LinkedIn. TODOS los perfiles DEBEN salir de la búsqueda real en Sales Navigator.
+
+Paso 3.1: Resolver IDs con resolve_sales_navigator_id (LOCATION, SALES_INDUSTRY, SENIORITY, FUNCTION).
+Paso 3.2: Buscar con search_sales_navigator_filtered (category people, degreeOfConnection ["2nd"], location/industry/seniority/function include, profilesLimit 20). Elegir EXACTAMENTE 6 por: seniority decisora, empresa ancla reconocible, fit con el pain del producto.
+
+Paso 3.3: ANTI-INVENCIÓN de cargo y empresa (CRÍTICO)
+- El cargo y la empresa de cada card se toman TEXTUALMENTE del headline del perfil. PROHIBIDO inventar/deducir/"completar" empresa o cargo que no aparezca literal en el headline.
+- Headline limpio "Rol @ Empresa" → usar ese rol y empresa.
+- Headline sucio (español con "en", pipes "|" o "||", sin "@" claro) → NO adivinar; mostrar el headline tal cual o solo el primer rol. NUNCA fabricar startup ni título "Founder/CEO" para que encaje con el ICP.
+- Si no podés determinar con certeza cargo+empresa → DESCARTAR ese perfil y elegir otro con headline claro.
+- PROHIBIDO forzar a una persona dentro del ICP distorsionando su cargo. Mejor un perfil real que encaje que uno distorsionado.
+
+Paso 3.4: Grado de conexión REAL
+- PROHIBIDO hardcodear "2do grado" en todas las cards. Usar el grado REAL que devuelve la búsqueda (1er/2do/3er). Si no está claro, usar el valor real o dejar el campo vacío.
+
+Paso 3.5: Link de cada perfil (slug + urn)
+- "slug" = el publicIdOrUrl que devuelve la búsqueda (es el texto visible del link).
+- "urn" = el mismo publicIdOrUrl, o el member id opaco (ACwAA...) si lo tenés. El sistema usa "urn" para el href y "slug" para el texto; AMBOS deben apuntar a la MISMA persona. Si dudás, poné el mismo valor en los dos.
+
+### 4. Qué llenar (contenido) — cantidades EXACTAS
+- ribbon: 5 chips de datos VERIFICADOS (Vertical, País, Fundada, Stage/Tracción, Modelo).
+- stats: 4 (sugerido: año fundación · "6"/"Cuentas priorizadas" · métrica clave VERIFICADA · meta comercial).
+- icp: 4 tarjetas (Rol del decisor, Tamaño de empresa, Geografía, Vertical/industria).
+- context: 3 bullets de mercado con datos verificados.
+- apertura: 3 hooks de apertura para LinkedIn.
+- prioridades: 4 chips de prioridad de abordaje.
+- cards: 6 decisores (ver schema). El ángulo (3-4 oraciones) y el hook (1 oración entre comillas) se basan en datos REALES del headline/perfil — PROHIBIDO inventar contexto de la empresa de la persona si no lo verificaste. Cada card 100% única.
+
+## Anti-patterns
+- Datos inventados de la empresa → SIEMPRE web_search antes del overview.
+- Cargo/empresa inventado de un decisor → TEXTUAL del headline; si está sucio, no adivinar; si no se entiende, descartar.
+- Forzar a una persona dentro del ICP distorsionando su cargo → descartar y elegir otra.
+- "2do grado" hardcodeado → usar el grado REAL.
+- Año de fundación, stage o métricas asumidas sin búsqueda web → PROHIBIDO.
+- Empresa proof point/cliente del producto como cuenta target → excluirla.
+- Copy-paste de ángulos entre cards. Datos rotos: [INSERT], TODO, undefined, lorem ipsum.
+
+---
+
+## Output FINAL — SOLO JSON
+Devolvé EXCLUSIVAMENTE un objeto JSON válido, sin texto antes ni después, sin markdown, sin comillas triples. Estructura EXACTA (respetá los nombres de campo y las cantidades):
+
+{
+  "empresa": "Nombre de la empresa cliente",
+  "fecha": "Mes Año (ej: Mayo 2025)",
+  "eyebrow": "Reporte de prospección GTM · ... (línea corta uppercase)",
+  "h1_pre": "6 [tipo de cuenta] para escalar",
+  "h1_company": "Nombre Empresa (va resaltado)",
+  "h1_post": "en [País]",
+  "lead": "2-3 oraciones que anclan el proof point REAL verificado del cliente.",
+  "proof": "El proof point / origen del cliente (texto del box PROOF).",
+  "ribbon": [ {"label":"Vertical","value":"..."}, {"label":"País","value":"..."}, {"label":"Fundada","value":"..."}, {"label":"Stage","value":"..."}, {"label":"Modelo","value":"..."} ],
+  "stats": [ {"num":"2023","label":"Año fundación"}, {"num":"6","label":"Cuentas priorizadas"}, {"num":"...","label":"..."}, {"num":"...","label":"..."} ],
+  "icp": [ {"title":"Rol del decisor","desc":"..."}, {"title":"Tamaño de empresa","desc":"..."}, {"title":"Geografía","desc":"..."}, {"title":"Vertical / industria","desc":"..."} ],
+  "context": [ "bullet 1", "bullet 2", "bullet 3" ],
+  "apertura": [ "hook 1", "hook 2", "hook 3" ],
+  "prioridades": [ "Alta — ...", "Media — ...", "...", "..." ],
+  "cards": [
+    {
+      "empresa": "Empresa TEXTUAL del headline",
+      "nombre": "Nombre completo del decisor",
+      "cargo": "Rol @ Empresa TEXTUAL del headline",
+      "slug": "publicIdOrUrl (texto visible del link)",
+      "urn": "publicIdOrUrl o member id ACwAA... (href)",
+      "ubicacion": "Ciudad / País real",
+      "grado": "2do grado (REAL: 1er/2do/3er)",
+      "angulo": "3-4 oraciones específicas basadas en el cargo/empresa REAL.",
+      "hook": "\\"Una oración de apertura entre comillas.\\""
+    }
+  ]
+}
+
+CANTIDADES EXACTAS: ribbon 5, stats 4, icp 4, context 3, apertura 3, prioridades 4, cards 6. Ni más ni menos. NADA fuera del objeto JSON.`;
+
 const SYSTEM_PROMPT_JUDGE = `Sos un juez de control de calidad EXTREMADAMENTE ESTRICTO para reportes GTM de IBT.
 
 Recibís el HTML del reporte + el número de páginas del PDF ya renderizado. Validás los 8 criterios y retornás un JSON.
@@ -509,6 +623,15 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
   return data;
 }
 
+// Extrae el objeto JSON que devuelve el gen (tolera fences/markdown y texto suelto).
+function parseReporteJSON(raw) {
+  if (!raw || !raw.trim()) throw new Error('El generador devolvió vacío (sin JSON)');
+  const t = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+  const m = t.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('El generador no devolvió un JSON parseable');
+  return JSON.parse(m[0]);
+}
+
 async function runClaude({ email, dominio, empresa, nombre, tools }) {
   currentStage = 'gen';
   const anthropicTools = [
@@ -522,7 +645,7 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
 
   const messages = [{
     role: 'user',
-    content: `Generá el reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}\n\nSeguí el workflow completo del skill. PRIMERO hacé research REAL con web_search sobre la empresa (fundación, modelo, stage, tracción) — PROHIBIDO inventar datos. Luego encontrá 6 cuentas con Sales Navigator. El cargo y empresa de cada decisor deben salir TEXTUAL del headline real — NUNCA inventes empresa/cargo para que encaje con el ICP. Devolvé SOLO el HTML con EXACTAMENTE 4 páginas.`
+    content: `Generá los DATOS del reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}\n\nSeguí el workflow completo. PRIMERO hacé research REAL con web_search sobre la empresa (fundación, modelo, stage, tracción) — PROHIBIDO inventar datos. Luego encontrá 6 cuentas con Sales Navigator. El cargo y empresa de cada decisor deben salir TEXTUAL del headline real — NUNCA inventes empresa/cargo para que encaje con el ICP. Devolvé SOLO el objeto JSON del schema (sin HTML, sin markdown, sin texto alrededor).`
   }];
 
   let mcpCallCount = 0;       // llamadas a IBT (client tools que puenteamos)
@@ -530,10 +653,10 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
   while (true) {
     const data = await callClaude({
       model: MODEL_GEN,
-      system: SYSTEM_PROMPT_HTML,
+      system: SYSTEM_PROMPT_JSON,
       messages,
       tools: anthropicTools,
-      stopSequences: ['</html>'],
+      stopSequences: [],
       maxTokens: 16000
     });
 
@@ -547,7 +670,7 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
       if (webSearchCount === 0) {
         console.warn(`[GEN] WARNING: 0 búsquedas web reales. Datos de la empresa NO verificados contra internet.`);
       }
-      return data.content.find(b => b.type === 'text')?.text;
+      return parseReporteJSON(data.content.find(b => b.type === 'text')?.text);
     }
 
     if (data.stop_reason === 'tool_use') {
@@ -572,7 +695,7 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
     }
   }
   const lastAssistantMsg = messages.filter(m => m.role === 'assistant').pop();
-  return lastAssistantMsg?.content?.find(b => b.type === 'text')?.text || '';
+  return parseReporteJSON(lastAssistantMsg?.content?.find(b => b.type === 'text')?.text || '');
 }
 
 async function runJudge(html, pageCount) {
@@ -811,9 +934,10 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
 
     const tools = await listMCPTools();
 
-    let html = await runClaude({ email, dominio, empresa, nombre, tools });
+    const data = await runClaude({ email, dominio, empresa, nombre, tools });
+    let html = renderReport(data);            // datos JSON -> HTML con plantilla fija
     let cleanHtml = limpiarHtml(html);
-    if (!cleanHtml) throw new Error('Claude no devolvió HTML');
+    if (!cleanHtml) throw new Error('No se pudo renderizar el reporte');
 
     // GATE de integridad de links (post-gen, antes del juez)
     let linkCheck = await verificarLinks(cleanHtml);
@@ -923,9 +1047,9 @@ app.post('/generar-reporte', async (req, res) => {
   try {
     resetTokenStats();
     const tools = await listMCPTools();
-    let html = await runClaude({ email, dominio, empresa: empresa || dominio, nombre: nombre || '', tools });
+    let html = renderReport(await runClaude({ email, dominio, empresa: empresa || dominio, nombre: nombre || '', tools }));
     let cleanHtml = limpiarHtml(html);
-    if (!cleanHtml) return res.status(500).json({ error: 'Claude no devolvió HTML' });
+    if (!cleanHtml) return res.status(500).json({ error: 'No se pudo renderizar el reporte' });
 
     // GATE de integridad de links (post-gen, antes del juez)
     let linkCheck = await verificarLinks(cleanHtml);

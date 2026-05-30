@@ -1,0 +1,152 @@
+{
+  "empresa": "SquadS Ventures",
+  "fecha": "Mayo 2025",
+  "eyebrow": "Reporte de prospección GTM · B2B SaaS LatAm",
+  "h1_pre": "6 founders SaaS para escalar",
+  "h1_company": "SquadS Ventures",
+  "h1_post": "en Argentina",
+  "lead": "SquadS Ventures es un company builder argentino fundado en 2023 por Diego Noriega, Daniel Soldán, Julian Drault y Cristian Pereyra, con el objetivo de co-crear un portafolio de 20 startups B2B SaaS bootstrapped hacia early exits. Con su ronda Seed cerrada con BDev Ventures y LEAF (SaaS Climate Tech) como primera startup del portafolio ya en mercado, SquadS está en el momento exacto para activar outreach sistemático en LinkedIn hacia founders y operadores SaaS del ecosistema regional.",
+  "proof": "InboundTools nació dentro del portfolio de SquadS Ventures como respuesta al dolor de generar pipeline B2B sin inflar equipos comerciales — hoy IBT es utilizado por SquadS y sus startups como motor de outreach automatizado en LinkedIn.",
+  "ribbon": [
+    {
+      "label": "Vertical",
+      "value": "Company Builder"
+    },
+    {
+      "label": "País",
+      "value": "Argentina"
+    },
+    {
+      "label": "Fundada",
+      "value": "2023"
+    },
+    {
+      "label": "Stage",
+      "value": "Seed — BDev Ventures"
+    },
+    {
+      "label": "Modelo",
+      "value": "Portfolio B2B SaaS"
+    }
+  ],
+  "stats": [
+    {
+      "num": "2023",
+      "label": "Año fundación"
+    },
+    {
+      "num": "6",
+      "label": "Cuentas priorizadas"
+    },
+    {
+      "num": "20",
+      "label": "Startups objetivo portafolio"
+    },
+    {
+      "num": "6×",
+      "label": "ROI proyectado inversores"
+    }
+  ],
+  "icp": [
+    {
+      "title": "Rol del decisor",
+      "desc": "Founder, Co-founder, CEO, COO o CPO de startup B2B SaaS en etapa seed/early-stage. Perfil con responsabilidad sobre tracción comercial y outreach escalable en LinkedIn."
+    },
+    {
+      "title": "Tamaño de empresa",
+      "desc": "Startups de 2–50 empleados, bootstrapped o seed-funded, con producto en mercado y primeras señales de PMF. No buscan unicornios — buscan rentabilidad."
+    },
+    {
+      "title": "Geografía",
+      "desc": "Foco primario en Argentina (Buenos Aires, Córdoba, Rosario). Expansión potencial a Colombia, México y Chile donde SquadS tiene ambición regional."
+    },
+    {
+      "title": "Vertical / industria",
+      "desc": "Desarrollo de software, HRTech, LegalTech, RetailTech, ClimateTech y soluciones B2B para PYMEs y corporaciones en LatAm. Modelo SaaS con ingresos recurrentes."
+    }
+  ],
+  "context": [
+    "El venture building creció exponencialmente en el mundo en los últimos 5 años, pero menos del 2% de esas iniciativas están en LatAm — brecha que SquadS busca cerrar activamente.",
+    "El ecosistema SaaS argentino concentra cientos de startups activas; los founders con PMF demostrado pero sin motor de outreach B2B son el segmento de mayor fit para IBT.",
+    "LinkedIn es el canal dominante de prospección B2B en LatAm: los decisores SaaS en Argentina están activos en la plataforma y responden a mensajes con relevancia contextual."
+  ],
+  "apertura": [
+    "Modelo co-builder: SquadS no invierte — cocrea. Resonar desde el dolor del founder que no consigue inversión externa.",
+    "Early exit en 3–5 años: propuesta diferencial vs. VC tradicional. Apela a founders que priorizan rentabilidad sobre valoración.",
+    "Portafolio de 20 SaaS bajo mismo modelo: sinergia operativa y acceso a red de +90 años de experiencia emprendedora acumulada."
+  ],
+  "prioridades": [
+    "Alta — Founders con PMF activo",
+    "Media — Co-founders buscando escala",
+    "Desarrollo — COO/CPO con visión comercial",
+    "Outreach 2do grado · LinkedIn Sales Nav"
+  ],
+  "cards": [
+    {
+      "empresa": "EGA Futura",
+      "nombre": "Juan Manuel Garrido",
+      "cargo": "Founder & CEO @ EGA Futura",
+      "slug": "juanmanuelgarrido",
+      "urn": "",
+      "ubicacion": "Greater Buenos Aires",
+      "grado": "2° grado",
+      "angulo": "Juan Manuel lidera EGA Futura como Founder & CEO, una posición que implica gestionar simultáneamente producto, ventas y equipo. Para un CEO-founder en etapa de crecimiento, el mayor cuello de botella suele ser la capacidad de generar pipeline B2B de manera sistemática sin depender exclusivamente de referidos. El modelo de SquadS —co-creación con foco en PMF y exits tempranos— es exactamente el contexto donde IBT puede demostrar valor: activar outreach automatizado en LinkedIn para que Juan Manuel llegue a más decisores en menos tiempo, sin sacrificar la personalización que convierte.",
+      "hook": "\"Juan Manuel, viendo la trayectoria de EGA Futura me imagino que el desafío hoy no es producto sino tiempo de founder dedicado a generar pipeline. Te comparto un caso de cómo lo resolvimos con otra SaaS argentina de tu tamaño — ¿lo charlamos 15 min esta semana?\""
+    },
+    {
+      "empresa": "MCMTech",
+      "nombre": "Daniela Suarez",
+      "cargo": "Founder & CEO MCMTech @ mcmtech",
+      "slug": "danielasuarez-mcmtech",
+      "urn": "",
+      "ubicacion": "Argentina",
+      "grado": "2° grado",
+      "angulo": "Daniela fundó y dirige MCMTech como CEO, lo que significa que además de construir producto lleva la bandera comercial de la empresa. Las fundadoras que son el motor de ventas de su propia startup enfrentan un desafío de tiempo real: ¿cómo hacer outreach de calidad sin que consuma toda la agenda? SquadS Ventures entiende ese dolor en primera persona con su portafolio, e IBT es la herramienta que resuelve exactamente eso: automatización inteligente de LinkedIn que genera conversaciones reales, no spam. Una demo de 20 minutos puede cambiar cómo Daniela diseña su pipeline para el próximo trimestre.",
+      "hook": "\"Daniela, fundadora-CEO que carga el peso comercial: es el perfil exacto donde IBT mueve más la aguja. Te dejo 3 ejemplos de secuencias de LinkedIn que usamos con SaaS argentinas para liberar 4-6 horas semanales de la agenda del founder. ¿Te los mando por DM?\""
+    },
+    {
+      "empresa": "trama.",
+      "nombre": "Yaco Peralta Bertolez",
+      "cargo": "CEO · Co-founder @ trama.",
+      "slug": "yacoperaltabertolez",
+      "urn": "",
+      "ubicacion": "Córdoba",
+      "grado": "2° grado",
+      "angulo": "Yaco es CEO y Co-founder de trama., una startup con base en Córdoba, lo que lo posiciona como un decisor que opera fuera del hub porteño y probablemente busca activamente cómo competir con empresas de Buenos Aires en la captación de clientes B2B. El outreach en LinkedIn bien ejecutado nivela el campo de juego: permite llegar a decisores de cualquier geografía con mensajes personalizados y secuencias automatizadas. Para SquadS Ventures, Yaco representa exactamente el perfil de co-founder que buscan para su portafolio: enfocado en construir negocio, no en levantar capital sin tracción real.",
+      "hook": "\"Yaco, construir SaaS desde Córdoba y vender en todo el país es un superpoder cuando el canal de outreach está aceitado. Tengo una hipótesis específica sobre qué segmentos en BA podrían reaccionar mejor al mensaje de trama. — ¿la armamos juntos en una llamada corta?\""
+    },
+    {
+      "empresa": "RivoLegal",
+      "nombre": "Ezequiel Gajer",
+      "cargo": "Co-Fundador @ RivoLegal",
+      "slug": "ezequielgajer",
+      "urn": "",
+      "ubicacion": "Argentina",
+      "grado": "2° grado",
+      "angulo": "Ezequiel co-fundó RivoLegal, una startup que opera en el vertical LegalTech — un segmento donde los clientes objetivo son estudios jurídicos, corporaciones y departamentos legales que tienen ciclos de compra largos y necesitan ser trabajados con paciencia y consistencia. LinkedIn es el canal ideal para LegalTech B2B: los decisores legales están activos en la plataforma y responden bien a mensajes con relevancia contextual. IBT permite a Ezequiel construir una secuencia de outreach de 3–5 pasos completamente automatizada, con personalización de IA, que mantiene la conversación activa sin que él tenga que estar encima del proceso.",
+      "hook": "\"Ezequiel, en LegalTech el verdadero costo no es generar el primer mensaje sino sostener los 4 follow-ups que abren la reunión. Te puedo mostrar el flujo exacto que usamos para que socios de estudios respondan después del 3er touch — ¿prefieres link a Loom o demo en vivo?\""
+    },
+    {
+      "empresa": "Kigüi",
+      "nombre": "Maximiliano Dicranian",
+      "cargo": "Co-Fundador y COO / CPO @ Kigüi",
+      "slug": "maximilianodicranian",
+      "urn": "",
+      "ubicacion": "Buenos Aires",
+      "grado": "2° grado",
+      "angulo": "Maximiliano co-fundó Kigüi y combina dos roles muy poco frecuentes en una startup early-stage: COO y CPO. Esa doble responsabilidad significa que probablemente carga tanto la operación comercial como la dirección de producto, y que cualquier sistema que libere ciclos del founder tiene impacto directo en la velocidad de la empresa. IBT encaja exactamente ahí: automatiza la prospección outbound en LinkedIn para que Maximiliano no tenga que elegir entre seguir un lead y seguir construyendo producto. Es justo el perfil de co-founder operativo que SquadS busca empoderar en su portfolio.",
+      "hook": "\"Maxi, ser COO y CPO al mismo tiempo en Kigüi te obliga a elegir entre producto y pipeline todos los días — IBT te saca esa decisión de encima automatizando outbound en LinkedIn. ¿Te dejo agendado un call de 20 min la próxima semana para mostrarte el setup?\""
+    },
+    {
+      "empresa": "WeSpeak",
+      "nombre": "Santiago Esmoris",
+      "cargo": "Co-Founder & CPO @ WeSpeak",
+      "slug": "santiagoesmoris",
+      "urn": "",
+      "ubicacion": "Buenos Aires",
+      "grado": "2° grado",
+      "angulo": "Santiago es Co-Founder y CPO de WeSpeak, lo que lo posiciona como el responsable de producto en una startup B2B SaaS argentina early-stage. En este tipo de empresas, el CPO co-founder muchas veces necesita validar hipótesis de mercado directamente con prospectos, no solo a través del equipo de ventas — y LinkedIn es el canal que mejor permite esa conversación directa con decisores en escala. IBT habilita ese loop de discovery acelerado: campañas segmentadas por industria que abren conversaciones con perfiles ICP específicos, dando al CPO insumos de mercado mientras simultáneamente alimentan el pipeline comercial.",
+      "hook": "\"Santiago, como CPO co-founder validar hipótesis con decisores reales es oro puro para producto. Tengo una secuencia de LinkedIn pensada para que un CPO converse con 10-15 ICPs por semana sin perder foco en roadmap. ¿La armamos juntos para WeSpeak?\""
+    }
+  ]
+}
