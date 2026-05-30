@@ -670,6 +670,98 @@ async function runFixer({ html, fixes, empresa, tools }) {
 }
 
 // ---------------------------------------------------------------------------
+// GATE de integridad de links  (NUEVO)
+// ---------------------------------------------------------------------------
+// Verifica que el href (member URN) de cada card apunte a la MISMA persona que
+// nombra el slug visible del link. Si no coincide, re-busca al correcto en IBT
+// y reemplaza el URN en el HTML. Determinístico, sin LLM. Corre después de
+// gen/fix y ANTES del juez. Lo que no puede corregir lo deja flageado.
+function _stripTags(s){return (s||'').replace(/<[^>]+>/g,' ').replace(/&[a-z]+;/gi,' ').replace(/\s+/g,' ').trim();}
+function _norm(s){return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();}
+function _profileName(txt){return ((txt||'').match(/Profile:\s*(.+?)\s*(?:\[profileId|\u2014|@|$)/i)||[])[1]?.trim()||'';}
+function _esc(s){return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');}
+function _gradoReclamado(win){const m=win.match(/([123])\s*(?:er|do|ro|\u00b0|\u00ba)?\s*grado/i);return m?parseInt(m[1],10):null;}
+function _degOrdinal(n,sample){if(/[\u00b0\u00ba]/.test(sample))return n+'\u00b0';const w={1:'1er',2:'2do',3:'3er'}[n]||(n+'do');return /[A-Z\u00c1\u00c9\u00cd\u00d3\u00da]{2,}/.test(sample)?w.toUpperCase():w;}
+
+async function _buscarPersona(first,last){
+  try{
+    const res=await callMCP('search_sales_navigator_filtered',{category:'people',first_name:first,last_name:last,profilesLimit:5});
+    return [...res.matchAll(/id=([A-Za-z0-9_\-]+)\s+"([^"]+)"\s+([^(]*)\(DISTANCE_(\d)/g)]
+      .map(x=>({id:x[1],name:x[2],head:x[3],dist:parseInt(x[4],10)}));
+  }catch{ return []; }
+}
+
+async function verificarLinks(html){
+  const anchorRe=/<a\b[^>]*href="https?:\/\/(?:www\.)?linkedin\.com\/in\/([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const matches=[]; let m;
+  while((m=anchorRe.exec(html))!==null) matches.push({urnRaw:m[1],inner:m[2],idx:m.index,end:anchorRe.lastIndex});
+
+  const swaps=[], corregidos=[], noResueltos=[], gradosCorregidos=[], gradosMal=[], degFixes=[];
+
+  // FASE 1: scan sobre el html original (sin mutar) — posiciones estables
+  for(const a of matches){
+    const urn=decodeURIComponent(a.urnRaw);
+    const innerTxt=_stripTags(a.inner);
+    const slug=((innerTxt.match(/\/in\/([^\s/]+)/)||[])[1]||innerTxt).trim();
+    const slugTokens=_norm(slug.replace(/[-_]/g,' ')).split(' ').filter(t=>t.length>2 && !/^\d+$/.test(t));
+    const slugEsUrn=/^ac[a-z0-9]{12,}$/i.test(slug) || slugTokens.length===0;
+    const ventana=_stripTags(html.slice(Math.max(0,a.idx-250),Math.min(html.length,a.end+250)));
+    const ventanaNorm=_norm(html.slice(Math.max(0,a.idx-700),a.idx));
+
+    let realName='';
+    try{ realName=_profileName(await callMCP('get_contact_profile',{publicIdOrUrl:urn,noCache:true})); }
+    catch{ noResueltos.push({urn,motivo:'el URN no resuelve'}); continue; }
+
+    let realDist=null;
+    if(slugEsUrn){
+      noResueltos.push({urn,resuelveA:realName,motivo:'slug visible opaco, no se pudo cruzar'});
+    }else{
+      const realTokens=_norm(realName).split(' ').filter(t=>t.length>2);
+      const realApellido=realTokens[realTokens.length-1];
+      const linkOk=realApellido && slugTokens.includes(realApellido);
+
+      if(linkOk){
+        const cands=await _buscarPersona(slugTokens[0]||'',slugTokens[1]||'');
+        const me=cands.find(c=>c.id===a.urnRaw||c.id===urn);
+        if(me) realDist=me.dist;
+      }else{
+        console.log(`[LINKS] Mismatch: slug "${slug}" pero el URN resuelve a "${realName}"`);
+        const cands=await _buscarPersona(slugTokens[0]||'',slugTokens[1]||'');
+        const pick=cands.find(c=>_norm(c.head).split(' ').filter(t=>t.length>3).some(w=>ventanaNorm.includes(w)))||cands[0];
+        if(pick && pick.id!==a.urnRaw){
+          swaps.push({from:a.urnRaw,to:pick.id});
+          corregidos.push({slug,de:urn,a:pick.id});
+          realDist=pick.dist;
+          console.log(`[LINKS] Corregido: ${slug} -> ${pick.id}`);
+        }else{
+          noResueltos.push({urn,slug,resuelveA:realName,motivo:'no encontre el URN correcto'});
+        }
+      }
+    }
+
+    // grado: comparar reclamado vs real
+    const claimed=_gradoReclamado(ventana);
+    if(realDist && claimed && realDist!==claimed){
+      gradosMal.push({slug:slug||urn,dice:claimed,real:realDist});
+      degFixes.push({anchor:a.urnRaw,real:realDist,slug:slug||urn,claimed});
+    }
+  }
+
+  // FASE 2: aplicar correcciones (string-based, sin depender de posiciones)
+  // 2a) grados — se anclan al URN ORIGINAL (todavía presente en el html)
+  for(const f of degFixes){
+    const re=new RegExp(_esc(f.anchor)+'([\\s\\S]{0,220}?)([123])((?:er|do|ro|\u00b0|\u00ba)?)(\\s*)(grado)','i');
+    let hecho=false;
+    const out=html.replace(re,(full,mid,dnum,ord,sp,gr)=>{hecho=true;return f.anchor+mid+_degOrdinal(f.real,dnum+ord)+sp+gr;});
+    if(hecho){ html=out; gradosCorregidos.push({slug:f.slug,de:f.claimed,a:f.real}); console.log(`[LINKS] Grado corregido: ${f.slug} ${f.claimed} -> ${f.real}`); }
+  }
+  // 2b) swaps de URN
+  for(const s of swaps) html=html.split(s.from).join(s.to);
+
+  return {html,corregidos,noResueltos,gradosCorregidos,gradosMal};
+}
+
+// ---------------------------------------------------------------------------
 // HTML -> PDF
 // ---------------------------------------------------------------------------
 function limpiarHtml(html) {
@@ -723,6 +815,12 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
     let cleanHtml = limpiarHtml(html);
     if (!cleanHtml) throw new Error('Claude no devolvió HTML');
 
+    // GATE de integridad de links (post-gen, antes del juez)
+    let linkCheck = await verificarLinks(cleanHtml);
+    cleanHtml = linkCheck.html;
+    if (linkCheck.corregidos.length) console.log(`[LINKS] ${linkCheck.corregidos.length} link(s) corregido(s)`);
+    if (linkCheck.noResueltos.length) console.warn(`[LINKS] ⚠️ ${linkCheck.noResueltos.length} link(s) NO resuelto(s):`, JSON.stringify(linkCheck.noResueltos));
+
     let pdfBuffer = await renderizarPdf(cleanHtml);
     let pageCount = await contarPaginas(pdfBuffer);
 
@@ -739,6 +837,13 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
       const cleanFixed = limpiarHtml(fixedHtml);
       if (cleanFixed) {
         cleanHtml = cleanFixed;
+
+        // GATE de links otra vez (el fixer regenera todo el HTML)
+        linkCheck = await verificarLinks(cleanHtml);
+        cleanHtml = linkCheck.html;
+        if (linkCheck.corregidos.length) console.log(`[LINKS] post-fix: ${linkCheck.corregidos.length} corregido(s)`);
+        if (linkCheck.noResueltos.length) console.warn(`[LINKS] ⚠️ post-fix NO resuelto(s):`, JSON.stringify(linkCheck.noResueltos));
+
         pdfBuffer = await renderizarPdf(cleanHtml);
         pageCount = await contarPaginas(pdfBuffer);
 
@@ -759,6 +864,10 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
       paginas: pageCount,
       juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8',
       juez_fixes: judgeResult.fixes,
+      links_corregidos: linkCheck.corregidos,
+      links_no_resueltos: linkCheck.noResueltos,
+      grados_corregidos: linkCheck.gradosCorregidos,
+      grados_mal: linkCheck.gradosMal,
       tokens: { ...tokenStats },
       // Campos planos para mapear fácil en n8n / Google Sheets
       tokens_input: tokenStats.input,
@@ -818,6 +927,12 @@ app.post('/generar-reporte', async (req, res) => {
     let cleanHtml = limpiarHtml(html);
     if (!cleanHtml) return res.status(500).json({ error: 'Claude no devolvió HTML' });
 
+    // GATE de integridad de links (post-gen, antes del juez)
+    let linkCheck = await verificarLinks(cleanHtml);
+    cleanHtml = linkCheck.html;
+    if (linkCheck.corregidos.length) console.log(`[LINKS] ${linkCheck.corregidos.length} link(s) corregido(s)`);
+    if (linkCheck.noResueltos.length) console.warn(`[LINKS] ⚠️ ${linkCheck.noResueltos.length} link(s) NO resuelto(s):`, JSON.stringify(linkCheck.noResueltos));
+
     let pdfBuffer = await renderizarPdf(cleanHtml);
     let pageCount = await contarPaginas(pdfBuffer);
     let judgeResult = await runJudge(cleanHtml, pageCount);
@@ -827,6 +942,8 @@ app.post('/generar-reporte', async (req, res) => {
       const cleanFixed = limpiarHtml(fixedHtml);
       if (cleanFixed) {
         cleanHtml = cleanFixed;
+        linkCheck = await verificarLinks(cleanHtml);
+        cleanHtml = linkCheck.html;
         pdfBuffer = await renderizarPdf(cleanHtml);
         pageCount = await contarPaginas(pdfBuffer);
         judgeResult = await runJudge(cleanHtml, pageCount);
@@ -844,6 +961,10 @@ app.post('/generar-reporte', async (req, res) => {
       paginas: pageCount,
       juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8',
       juez_fixes: judgeResult.fixes,
+      links_corregidos: linkCheck.corregidos,
+      links_no_resueltos: linkCheck.noResueltos,
+      grados_corregidos: linkCheck.gradosCorregidos,
+      grados_mal: linkCheck.gradosMal,
       tokens: { ...tokenStats },
       tokens_input: tokenStats.input,
       tokens_output: tokenStats.output,
