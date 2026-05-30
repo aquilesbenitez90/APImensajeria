@@ -1,14 +1,18 @@
 /**
- * IBT GTM Report — server.js v7
+ * IBT GTM Report — server.js v7.1
  *
- * Cambios v7 respecto a v6 (SOLO optimización de costo, lógica idéntica):
- *   - PROMPT CACHING: el system prompt y las definiciones de tools se marcan con
- *     cache_control. Como se repiten idénticos en cada vuelta de tool, a partir de
- *     la 2da lectura cuestan 90% menos. Es el mayor ahorro de costo.
- *   - LOGGING DE TOKENS: cada llamada a la API loguea input/output/cache tokens,
- *     para medir el costo real por reporte y el efecto del caching.
+ * Cambios v7.1 respecto a v7 (SOLO logging, lógica de negocio IDÉNTICA):
+ *   - FIX DE LOGGING DE web_search: web_search es un SERVER TOOL de Anthropic.
+ *     La API lo ejecuta sola y devuelve bloques `server_tool_use` +
+ *     `web_search_tool_result`, NO bloques `tool_use`. El conteo viejo miraba
+ *     solo bloques `tool_use`, así que SIEMPRE daba 0 y el WARNING "no usó
+ *     web_search" se disparaba en todos los jobs, buscara o no.
+ *     Ahora se cuenta con data.usage.server_tool_use.web_search_requests y se
+ *     loguea cada query y cuántos resultados trajo. Aplica a gen y a fix.
+ *   - Poné WS_DEBUG=1 para dumpear el `usage` crudo y los tipos de bloque una vez.
  *
- * Los prompts y el flujo (gen → juez → fixer) son IDÉNTICOS a v6.
+ * Cambios previos (v7): prompt caching + logging de tokens. Sin cambios acá.
+ * Los prompts y el flujo (gen → juez → fixer) son IDÉNTICOS a v7.
  */
 
 const express = require('express');
@@ -77,6 +81,35 @@ function logTokenCost(label) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Conteo y log REAL de web_search  (NUEVO en v7.1)
+// ---------------------------------------------------------------------------
+// web_search es un SERVER TOOL: la API lo ejecuta del lado del servidor y
+// devuelve bloques `server_tool_use` (la query) + `web_search_tool_result`
+// (los resultados). NO produce bloques `tool_use` (esos son los client tools
+// como IBT, que puenteamos nosotros). El número autoritativo de búsquedas está
+// en data.usage.server_tool_use.web_search_requests.
+function contarYLoguearWebSearch(data, stage) {
+  if (process.env.WS_DEBUG === '1') {
+    console.log(`[${stage}][WS-DEBUG] usage:`, JSON.stringify(data.usage));
+    console.log(`[${stage}][WS-DEBUG] blocks:`, JSON.stringify((data.content || []).map(b => b.type)));
+  }
+  const n = data.usage?.server_tool_use?.web_search_requests || 0;
+  for (const block of (data.content || [])) {
+    if (block.type === 'server_tool_use' && block.name === 'web_search') {
+      console.log(`[${stage}] web_search query: ${JSON.stringify(block.input?.query)}`);
+    }
+    if (block.type === 'web_search_tool_result') {
+      const c = block.content;
+      if (Array.isArray(c)) {
+        console.log(`[${stage}] web_search → ${c.length} resultados`);
+      } else if (c && c.type === 'web_search_tool_result_error') {
+        console.log(`[${stage}] web_search ERROR: ${c.error_code}`);
+      }
+    }
+  }
+  return n;
+}
 
 // ---------------------------------------------------------------------------
 // MCP IBT con logs
@@ -127,7 +160,7 @@ async function listMCPTools() {
 }
 
 // ---------------------------------------------------------------------------
-// PROMPTS (idénticos a v6)
+// PROMPTS (idénticos a v7)
 // ---------------------------------------------------------------------------
 const SYSTEM_PROMPT_HTML = `# IBT GTM Report — Skill completo
 
@@ -492,8 +525,8 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
     content: `Generá el reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}\n\nSeguí el workflow completo del skill. PRIMERO hacé research REAL con web_search sobre la empresa (fundación, modelo, stage, tracción) — PROHIBIDO inventar datos. Luego encontrá 6 cuentas con Sales Navigator. El cargo y empresa de cada decisor deben salir TEXTUAL del headline real — NUNCA inventes empresa/cargo para que encaje con el ICP. Devolvé SOLO el HTML con EXACTAMENTE 4 páginas.`
   }];
 
-  let toolCallCount = 0;
-  let webSearchCount = 0;
+  let mcpCallCount = 0;       // llamadas a IBT (client tools que puenteamos)
+  let webSearchCount = 0;     // búsquedas web REALES (server tool)
   while (true) {
     const data = await callClaude({
       model: MODEL_GEN,
@@ -504,12 +537,15 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
       maxTokens: 16000
     });
 
+    // Conteo + log REAL de web_search (server tool). Ver contarYLoguearWebSearch.
+    webSearchCount += contarYLoguearWebSearch(data, 'GEN');
+
     messages.push({ role: 'assistant', content: data.content });
 
     if (data.stop_reason === 'stop_sequence' || data.stop_reason === 'end_turn') {
-      console.log(`[GEN] Generación terminada. Tool calls: ${toolCallCount} (web_search: ${webSearchCount})`);
+      console.log(`[GEN] Generación terminada. MCP calls: ${mcpCallCount} | web_search: ${webSearchCount}`);
       if (webSearchCount === 0) {
-        console.warn(`[GEN] WARNING: Claude NO usó web_search. Datos de la empresa pueden estar inventados.`);
+        console.warn(`[GEN] WARNING: 0 búsquedas web reales. Datos de la empresa NO verificados contra internet.`);
       }
       return data.content.find(b => b.type === 'text')?.text;
     }
@@ -517,12 +553,10 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
     if (data.stop_reason === 'tool_use') {
       const toolResults = [];
       for (const block of data.content) {
+        // Solo procesamos client tools (IBT). Los server tools (web_search) ya
+        // los ejecutó la API y NO aparecen como bloques `tool_use`.
         if (block.type !== 'tool_use') continue;
-        toolCallCount++;
-        if (block.name === 'web_search') {
-          webSearchCount++;
-          continue;
-        }
+        mcpCallCount++;
         const result = await callMCP(block.name, block.input);
         toolResults.push({
           type: 'tool_result',
@@ -591,7 +625,8 @@ async function runFixer({ html, fixes, empresa, tools }) {
     content: `Empresa: ${empresa}\n\nCorrecciones a aplicar del juez:\n- ${fixes.join('\n- ')}\n\nHTML actual:\n${html}\n\nAplicá los fixes (usando web_search o get_contact_profile si hay datos a verificar) y devolvé SOLO el HTML completo corregido con EXACTAMENTE 4 páginas.`
   }];
 
-  let toolCallCount = 0;
+  let mcpCallCount = 0;       // llamadas a IBT
+  let webSearchCount = 0;     // búsquedas web REALES (server tool)
   while (true) {
     const data = await callClaude({
       model: MODEL_FIX,
@@ -602,10 +637,12 @@ async function runFixer({ html, fixes, empresa, tools }) {
       maxTokens: 16000
     });
 
+    webSearchCount += contarYLoguearWebSearch(data, 'FIX');
+
     messages.push({ role: 'assistant', content: data.content });
 
     if (data.stop_reason === 'stop_sequence' || data.stop_reason === 'end_turn') {
-      console.log(`[FIX] Terminado. Tool calls en fix: ${toolCallCount}`);
+      console.log(`[FIX] Terminado. MCP calls: ${mcpCallCount} | web_search: ${webSearchCount}`);
       return data.content.find(b => b.type === 'text')?.text;
     }
 
@@ -613,10 +650,7 @@ async function runFixer({ html, fixes, empresa, tools }) {
       const toolResults = [];
       for (const block of data.content) {
         if (block.type !== 'tool_use') continue;
-        toolCallCount++;
-        if (block.name === 'web_search') {
-          continue;
-        }
+        mcpCallCount++;
         const result = await callMCP(block.name, block.input);
         toolResults.push({
           type: 'tool_result',
