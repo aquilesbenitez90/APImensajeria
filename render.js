@@ -2,6 +2,22 @@
 const fs = require('fs');
 const path = require('path');
 
+// Logo: se lee del repo (LOGO_PATH o ./logo-white.png) y se inyecta como data URI
+// en el render, pisando el base64 embebido de la plantilla (que queda solo de fallback).
+const LOGO_PATH = process.env.LOGO_PATH || path.join(__dirname, 'logo-white.png');
+let _logoCache; // undefined = no probado | '' = no encontrado | string = data URI
+function _logoDataUri() {
+  if (_logoCache !== undefined) return _logoCache;
+  try {
+    const buf = fs.readFileSync(LOGO_PATH);
+    _logoCache = 'data:image/png;base64,' + buf.toString('base64');
+  } catch {
+    _logoCache = '';
+    console.warn('[RENDER] no encontré ' + LOGO_PATH + ' — uso el logo embebido de la plantilla');
+  }
+  return _logoCache;
+}
+
 /**
  * Render de reporte GTM determinístico.
  * La IA YA NO genera HTML: devuelve SOLO el objeto `data` (ver schema abajo).
@@ -34,6 +50,11 @@ function _initials(nombre) {
   return ((p[0] && p[0][0] || '') + (p[1] && p[1][0] || '')).toUpperCase();
 }
 
+// Member URN opaco de LinkedIn (ACwAA.../ACoAA...). Los slugs públicos limpios nunca lo son.
+function _isOpaque(s) {
+  return /^AC[ow]AA[A-Za-z0-9_-]{6,}$/i.test(String(s || ''));
+}
+
 function flatten(data) {
   const f = {};
   const scalars = ['empresa', 'fecha', 'eyebrow', 'h1_pre', 'h1_company', 'h1_post', 'lead', 'proof'];
@@ -53,7 +74,10 @@ function flatten(data) {
     f[`card${n}_nombre`]    = c.nombre;
     f[`card${n}_cargo`]     = c.cargo;
     f[`card${n}_urn`]       = c.urn || c.slug;   // href: URN real; fallback slug
-    f[`card${n}_slug`]      = c.slug;            // texto visible
+    f[`card${n}_slug`]      = c.slug;            // (compat, ya no se usa en el template)
+    // Texto visible del link: slug limpio -> "linkedin.com/in/slug"; opaco/vacío -> label limpio
+    const vis = (c.slug && !_isOpaque(c.slug)) ? c.slug : '';
+    f[`card${n}_linktext`]  = vis ? ('linkedin.com/in/' + vis) : 'Ver perfil en LinkedIn ↗';
     f[`card${n}_ubicacion`] = c.ubicacion;
     f[`card${n}_grado`]     = c.grado;
     f[`card${n}_angulo`]    = c.angulo;
@@ -69,6 +93,9 @@ function renderReport(data, templatePath) {
   for (const k of Object.keys(flat)) {
     html = html.split('{{' + k + '}}').join(_esc(flat[k]));
   }
+  // Logo del repo: pisa el base64 embebido de la plantilla si el archivo existe.
+  const logo = _logoDataUri();
+  if (logo) html = html.replace(/src="data:image\/png;base64,[A-Za-z0-9+/=]+"/, 'src="' + logo + '"');
   // Seguridad: si el gen entregó menos items de los esperados (p.ej. 5 cards en vez de 6),
   // no dejes {{...}} crudos en el PDF. Logueá cuáles faltaron y blanqueá.
   const leftover = html.match(/\{\{[^}]+\}\}/g);

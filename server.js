@@ -545,15 +545,16 @@ Respondé EXCLUSIVAMENTE con JSON válido, sin markdown, sin texto extra:
 
 APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concretas.`;
 
-const SYSTEM_PROMPT_FIX = `Sos el generador del reporte GTM de IBT. Recibís un HTML existente y una lista de correcciones del juez. Aplicá las correcciones y devolvé SOLO el HTML completo corregido (<!DOCTYPE html> ... </html>), EXACTAMENTE 4 páginas A4, footer incluido, mismo design system CommerceGlass v8. Sin explicaciones, sin markdown.
+const SYSTEM_PROMPT_FIX = `Sos el corrector del reporte GTM de IBT. Recibís los DATOS del reporte en JSON y una lista de correcciones del juez. Aplicá SOLO las correcciones necesarias y devolvé el MISMO objeto JSON corregido, con la MISMA estructura y nombres de campo (sin HTML, sin markdown, sin texto alrededor). Mantené intactos los campos que el juez no observó.
 
 IMPORTANTE:
 - Si el juez detectó datos inventados de la empresa, USAR web_search para verificar y corregir.
-- Si el juez detectó CARGO/EMPRESA inventado de un decisor, volvé a llamar a get_contact_profile o search_sales_navigator_filtered para obtener el headline REAL, y usá ese cargo/empresa textual. Si el headline está sucio y no se entiende la empresa, mostrá el headline crudo o descartá ese perfil y buscá otro real.
-- Si el juez detectó "2do grado" hardcodeado, usá el grado de conexión real.
-- Si el juez detectó páginas extra (5+), eliminá las que no sean: 1 overview + 3 account cards = 4 páginas.
-- Si el juez detectó una cuenta que es proof point del cliente, reemplazala por otro perfil real.
-- NUNCA inventes datos. Si no podés verificar, usar formulación conservadora o descartar.`;
+- Si detectó CARGO/EMPRESA inventado de un decisor, volvé a llamar get_contact_profile o search_sales_navigator_filtered para el headline REAL y usá ese cargo/empresa textual. Si el headline está sucio, mostralo crudo o reemplazá ese perfil por otro real.
+- Si detectó "2do grado" hardcodeado, usá el grado de conexión real.
+- Si detectó una cuenta que es proof point/cliente del producto, reemplazala por otro perfil real.
+- Mantené las cantidades EXACTAS: ribbon 5, stats 4, icp 4, context 3, apertura 3, prioridades 4, cards 6.
+- En cada card, slug y urn deben apuntar a la MISMA persona.
+- NUNCA inventes datos. Si no podés verificar, usá formulación conservadora o descartá.`;
 
 // ---------------------------------------------------------------------------
 // Llamadas a Claude — CON PROMPT CACHING + logging de tokens
@@ -589,17 +590,47 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
 
   if (stopSequences.length > 0) body.stop_sequences = stopSequences;
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body)
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(JSON.stringify(data));
+  // Timeout + retry: un cuelgue transitorio de la API (UND_ERR_HEADERS_TIMEOUT,
+  // fetch failed, 429, 5xx) ya no mata el job. Hasta 3 intentos con backoff.
+  const MAX_INTENTOS = Number(process.env.CLAUDE_MAX_RETRIES) || 3;
+  const TIMEOUT_MS = Number(process.env.CLAUDE_TIMEOUT_MS) || 240000; // 4 min
+  let data, lastErr;
+  for (let intento = 1; intento <= MAX_INTENTOS; intento++) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body),
+        signal: ac.signal
+      });
+      clearTimeout(timer);
+      if (res.status === 429 || res.status >= 500) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status} ${txt.slice(0, 200)}`);
+      }
+      data = await res.json();
+      if (!res.ok) throw new Error(JSON.stringify(data));
+      break; // OK
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = e;
+      const transitorio = e.name === 'AbortError' ||
+        /UND_ERR|fetch failed|HTTP 429|HTTP 5\d\d|ECONNRESET|ETIMEDOUT|socket hang up|terminated/i.test(e.message || '');
+      if (intento < MAX_INTENTOS && transitorio) {
+        const espera = 2000 * intento;
+        console.warn(`[API] intento ${intento}/${MAX_INTENTOS} falló (${e.name === 'AbortError' ? 'timeout ' + TIMEOUT_MS + 'ms' : (e.message || '').slice(0, 80)}). Reintento en ${espera}ms...`);
+        await new Promise(r => setTimeout(r, espera));
+        continue;
+      }
+      throw e;
+    }
+  }
 
   // Acumular tokens para el log de costo (total + etapa actual)
   if (data.usage) {
@@ -731,9 +762,9 @@ async function runJudge(html, pageCount) {
   }
 }
 
-async function runFixer({ html, fixes, empresa, tools }) {
+async function runFixer({ data, fixes, empresa, tools }) {
   currentStage = 'fix';
-  console.log(`[FIX] Aplicando ${fixes.length} fixes...`);
+  console.log(`[FIX] Aplicando ${fixes.length} fixes (JSON)...`);
   const anthropicTools = [
     ...tools.map(t => ({
       name: t.name,
@@ -745,33 +776,33 @@ async function runFixer({ html, fixes, empresa, tools }) {
 
   const messages = [{
     role: 'user',
-    content: `Empresa: ${empresa}\n\nCorrecciones a aplicar del juez:\n- ${fixes.join('\n- ')}\n\nHTML actual:\n${html}\n\nAplicá los fixes (usando web_search o get_contact_profile si hay datos a verificar) y devolvé SOLO el HTML completo corregido con EXACTAMENTE 4 páginas.`
+    content: `Empresa: ${empresa}\n\nCorrecciones del juez:\n- ${fixes.join('\n- ')}\n\nDATOS actuales (JSON):\n${JSON.stringify(data)}\n\nAplicá los fixes (usando web_search o get_contact_profile si hay datos a verificar) y devolvé SOLO el objeto JSON corregido, con la misma estructura.`
   }];
 
   let mcpCallCount = 0;       // llamadas a IBT
   let webSearchCount = 0;     // búsquedas web REALES (server tool)
   while (true) {
-    const data = await callClaude({
+    const resp = await callClaude({
       model: MODEL_FIX,
       system: SYSTEM_PROMPT_FIX,
       messages,
       tools: anthropicTools,
-      stopSequences: ['</html>'],
-      maxTokens: 16000
+      stopSequences: [],
+      maxTokens: 8000          // JSON liviano (sin base64 ni CSS) → no más timeouts del fixer
     });
 
-    webSearchCount += contarYLoguearWebSearch(data, 'FIX');
+    webSearchCount += contarYLoguearWebSearch(resp, 'FIX');
 
-    messages.push({ role: 'assistant', content: data.content });
+    messages.push({ role: 'assistant', content: resp.content });
 
-    if (data.stop_reason === 'stop_sequence' || data.stop_reason === 'end_turn') {
+    if (resp.stop_reason === 'stop_sequence' || resp.stop_reason === 'end_turn') {
       console.log(`[FIX] Terminado. MCP calls: ${mcpCallCount} | web_search: ${webSearchCount}`);
-      return data.content.find(b => b.type === 'text')?.text;
+      return parseReporteJSON(resp.content.find(b => b.type === 'text')?.text);
     }
 
-    if (data.stop_reason === 'tool_use') {
+    if (resp.stop_reason === 'tool_use') {
       const toolResults = [];
-      for (const block of data.content) {
+      for (const block of resp.content) {
         if (block.type !== 'tool_use') continue;
         mcpCallCount++;
         const result = await callMCP(block.name, block.input);
@@ -789,7 +820,7 @@ async function runFixer({ html, fixes, empresa, tools }) {
     }
   }
   const lastAssistantMsg = messages.filter(m => m.role === 'assistant').pop();
-  return lastAssistantMsg?.content?.find(b => b.type === 'text')?.text || '';
+  return parseReporteJSON(lastAssistantMsg?.content?.find(b => b.type === 'text')?.text || '');
 }
 
 // ---------------------------------------------------------------------------
@@ -885,6 +916,71 @@ async function verificarLinks(html){
 }
 
 // ---------------------------------------------------------------------------
+// GATE data-based (NUEVO, reemplaza al de HTML): verifica los URN del JSON
+// contra el nombre real de cada card. Lee CACHEADO primero (no throttlea);
+// noCache solo de fallback, sin ráfaga. Corrige el urn dentro de los datos.
+// ---------------------------------------------------------------------------
+function _nombreApellido(nombre){
+  const t=_norm(nombre).split(' ').filter(x=>x.length>1);
+  return { first:t[0]||'', last:t[t.length-1]||'', tokens:t };
+}
+function _coincideNombre(a,b){
+  const x=_nombreApellido(a), y=_nombreApellido(b);
+  if(!x.tokens.length || !y.tokens.length) return false;
+  if(x.last && y.tokens.includes(x.last)) return true;
+  if(y.last && x.tokens.includes(y.last)) return true;
+  return x.tokens.filter(t=>y.tokens.includes(t)).length>=2;
+}
+async function _resolverNombre(urn){
+  try{ const n=_profileName(await callMCP('get_contact_profile',{publicIdOrUrl:urn})); if(n) return n; }catch{}
+  try{ return _profileName(await callMCP('get_contact_profile',{publicIdOrUrl:urn,noCache:true})); }catch{}
+  return '';
+}
+async function verificarLinksData(data){
+  const corregidos=[], noResueltos=[], gradosCorregidos=[], gradosMal=[];
+  const cards=Array.isArray(data.cards)?data.cards:[];
+  for(const card of cards){
+    const urn=(card.urn||card.slug||'').trim();
+    if(!urn){ noResueltos.push({nombre:card.nombre,motivo:'card sin urn/slug'}); continue; }
+
+    const realName=await _resolverNombre(urn);
+    if(!realName){ noResueltos.push({urn,nombre:card.nombre,motivo:'el URN no resuelve (API)'}); continue; }
+
+    let dist=null;
+    const ap=_nombreApellido(card.nombre);
+    if(_coincideNombre(card.nombre, realName)){
+      const cands=await _buscarPersona(ap.first,ap.last);
+      const me=cands.find(c=>c.id===urn);
+      if(me) dist=me.dist;
+    }else{
+      console.log(`[LINKS] Mismatch: card "${card.nombre}" pero el URN resuelve a "${realName}"`);
+      const cands=await _buscarPersona(ap.first,ap.last);
+      const empTok=_norm(card.empresa||'').split(' ')[0]||'';
+      const pick=cands.find(c=>_coincideNombre(card.nombre,c.name) && empTok && _norm(c.head).includes(empTok))
+               || cands.find(c=>_coincideNombre(card.nombre,c.name))
+               || null;
+      if(pick && pick.id!==urn){
+        corregidos.push({nombre:card.nombre,de:urn,a:pick.id,resolvieA:realName});
+        card.urn=pick.id; card.slug=pick.id;
+        dist=pick.dist;
+        console.log(`[LINKS] Corregido: ${card.nombre} -> ${pick.id}`);
+      }else{
+        noResueltos.push({urn,nombre:card.nombre,resuelveA:realName,motivo:'mismatch sin reemplazo confiable'});
+      }
+    }
+
+    const claimed=_gradoReclamado(card.grado||'');
+    if(dist && claimed && dist!==claimed){
+      gradosMal.push({nombre:card.nombre,dice:claimed,real:dist});
+      card.grado=_degOrdinal(dist, card.grado||'2do')+' grado';
+      gradosCorregidos.push({nombre:card.nombre,de:claimed,a:dist});
+      console.log(`[LINKS] Grado corregido: ${card.nombre} ${claimed} -> ${dist}`);
+    }
+  }
+  return {data,corregidos,noResueltos,gradosCorregidos,gradosMal};
+}
+
+// ---------------------------------------------------------------------------
 // HTML -> PDF
 // ---------------------------------------------------------------------------
 function limpiarHtml(html) {
@@ -934,16 +1030,16 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
 
     const tools = await listMCPTools();
 
-    const data = await runClaude({ email, dominio, empresa, nombre, tools });
-    let html = renderReport(data);            // datos JSON -> HTML con plantilla fija
-    let cleanHtml = limpiarHtml(html);
-    if (!cleanHtml) throw new Error('No se pudo renderizar el reporte');
+    let data = await runClaude({ email, dominio, empresa, nombre, tools });
 
-    // GATE de integridad de links (post-gen, antes del juez)
-    let linkCheck = await verificarLinks(cleanHtml);
-    cleanHtml = linkCheck.html;
+    // GATE data-based (post-gen, antes del juez): verifica/corrige URN sobre el JSON
+    let linkCheck = await verificarLinksData(data);
+    data = linkCheck.data;
     if (linkCheck.corregidos.length) console.log(`[LINKS] ${linkCheck.corregidos.length} link(s) corregido(s)`);
     if (linkCheck.noResueltos.length) console.warn(`[LINKS] ⚠️ ${linkCheck.noResueltos.length} link(s) NO resuelto(s):`, JSON.stringify(linkCheck.noResueltos));
+
+    let cleanHtml = limpiarHtml(renderReport(data));   // datos JSON -> HTML con plantilla fija
+    if (!cleanHtml) throw new Error('No se pudo renderizar el reporte');
 
     let pdfBuffer = await renderizarPdf(cleanHtml);
     let pageCount = await contarPaginas(pdfBuffer);
@@ -952,27 +1048,26 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
 
     if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
       console.log(`[Job ${jobId}] Juez rechazó ${judgeResult.score}/8 — aplicando fixes...`);
-      const fixedHtml = await runFixer({
-        html: cleanHtml,
-        fixes: judgeResult.fixes,
-        empresa,
-        tools
-      });
-      const cleanFixed = limpiarHtml(fixedHtml);
-      if (cleanFixed) {
-        cleanHtml = cleanFixed;
+      try {
+        const fixedData = await runFixer({ data, fixes: judgeResult.fixes, empresa, tools });
+        if (fixedData && Array.isArray(fixedData.cards)) {
+          data = fixedData;
 
-        // GATE de links otra vez (el fixer regenera todo el HTML)
-        linkCheck = await verificarLinks(cleanHtml);
-        cleanHtml = linkCheck.html;
-        if (linkCheck.corregidos.length) console.log(`[LINKS] post-fix: ${linkCheck.corregidos.length} corregido(s)`);
-        if (linkCheck.noResueltos.length) console.warn(`[LINKS] ⚠️ post-fix NO resuelto(s):`, JSON.stringify(linkCheck.noResueltos));
+          // GATE de links otra vez sobre los datos corregidos
+          linkCheck = await verificarLinksData(data);
+          data = linkCheck.data;
+          if (linkCheck.corregidos.length) console.log(`[LINKS] post-fix: ${linkCheck.corregidos.length} corregido(s)`);
+          if (linkCheck.noResueltos.length) console.warn(`[LINKS] ⚠️ post-fix NO resuelto(s):`, JSON.stringify(linkCheck.noResueltos));
 
-        pdfBuffer = await renderizarPdf(cleanHtml);
-        pageCount = await contarPaginas(pdfBuffer);
+          cleanHtml = limpiarHtml(renderReport(data));
+          pdfBuffer = await renderizarPdf(cleanHtml);
+          pageCount = await contarPaginas(pdfBuffer);
 
-        console.log(`[Job ${jobId}] Re-validando con el juez después de fixes...`);
-        judgeResult = await runJudge(cleanHtml, pageCount);
+          console.log(`[Job ${jobId}] Re-validando con el juez después de fixes...`);
+          judgeResult = await runJudge(cleanHtml, pageCount);
+        }
+      } catch (e) {
+        console.warn(`[FIX] Falló, conservo el reporte previo:`, e.message);
       }
     }
 
@@ -1047,30 +1142,35 @@ app.post('/generar-reporte', async (req, res) => {
   try {
     resetTokenStats();
     const tools = await listMCPTools();
-    let html = renderReport(await runClaude({ email, dominio, empresa: empresa || dominio, nombre: nombre || '', tools }));
-    let cleanHtml = limpiarHtml(html);
-    if (!cleanHtml) return res.status(500).json({ error: 'No se pudo renderizar el reporte' });
+    let data = await runClaude({ email, dominio, empresa: empresa || dominio, nombre: nombre || '', tools });
 
-    // GATE de integridad de links (post-gen, antes del juez)
-    let linkCheck = await verificarLinks(cleanHtml);
-    cleanHtml = linkCheck.html;
+    // GATE data-based (post-gen, antes del juez)
+    let linkCheck = await verificarLinksData(data);
+    data = linkCheck.data;
     if (linkCheck.corregidos.length) console.log(`[LINKS] ${linkCheck.corregidos.length} link(s) corregido(s)`);
     if (linkCheck.noResueltos.length) console.warn(`[LINKS] ⚠️ ${linkCheck.noResueltos.length} link(s) NO resuelto(s):`, JSON.stringify(linkCheck.noResueltos));
+
+    let cleanHtml = limpiarHtml(renderReport(data));
+    if (!cleanHtml) return res.status(500).json({ error: 'No se pudo renderizar el reporte' });
 
     let pdfBuffer = await renderizarPdf(cleanHtml);
     let pageCount = await contarPaginas(pdfBuffer);
     let judgeResult = await runJudge(cleanHtml, pageCount);
 
     if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
-      const fixedHtml = await runFixer({ html: cleanHtml, fixes: judgeResult.fixes, empresa: empresa || dominio, tools });
-      const cleanFixed = limpiarHtml(fixedHtml);
-      if (cleanFixed) {
-        cleanHtml = cleanFixed;
-        linkCheck = await verificarLinks(cleanHtml);
-        cleanHtml = linkCheck.html;
-        pdfBuffer = await renderizarPdf(cleanHtml);
-        pageCount = await contarPaginas(pdfBuffer);
-        judgeResult = await runJudge(cleanHtml, pageCount);
+      try {
+        const fixedData = await runFixer({ data, fixes: judgeResult.fixes, empresa: empresa || dominio, tools });
+        if (fixedData && Array.isArray(fixedData.cards)) {
+          data = fixedData;
+          linkCheck = await verificarLinksData(data);
+          data = linkCheck.data;
+          cleanHtml = limpiarHtml(renderReport(data));
+          pdfBuffer = await renderizarPdf(cleanHtml);
+          pageCount = await contarPaginas(pdfBuffer);
+          judgeResult = await runJudge(cleanHtml, pageCount);
+        }
+      } catch (e) {
+        console.warn(`[FIX] Falló, conservo el reporte previo:`, e.message);
       }
     }
 
