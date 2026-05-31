@@ -663,7 +663,7 @@ function parseReporteJSON(raw) {
   return JSON.parse(m[0]);
 }
 
-async function runClaude({ email, dominio, empresa, nombre, tools }) {
+async function runClaude({ email, dominio, empresa, nombre, tools, cliente }) {
   currentStage = 'gen';
   const anthropicTools = [
     ...tools.map(t => ({
@@ -674,9 +674,13 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
     WEB_SEARCH_TOOL
   ];
 
+  const bloqueCliente = (cliente && cliente.anclado)
+    ? `\n\nDATOS VERIFICADOS DEL CLIENTE (de IBT/LinkedIn — NO inventes otra empresa, usá ESTOS):\n- Empresa real: ${cliente.empresa}\n- Tamaño: ${cliente.headcount ?? 'desconocido'} empleados${cliente.tier ? ` (tier: ${cliente.tier})` : ''}\nUsá web_search SOLO para enriquecer qué hace/vende esta empresa, NO para re-identificarla.`
+    : '';
+
   const messages = [{
     role: 'user',
-    content: `Generá los DATOS del reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}\n\nSeguí el workflow completo. PRIMERO hacé research REAL con web_search sobre la empresa (fundación, modelo, stage, tracción) — PROHIBIDO inventar datos. Luego encontrá 6 cuentas con Sales Navigator. El cargo y empresa de cada decisor deben salir TEXTUAL del headline real — NUNCA inventes empresa/cargo para que encaje con el ICP. Devolvé SOLO el objeto JSON del schema (sin HTML, sin markdown, sin texto alrededor).`
+    content: `Generá los DATOS del reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}${bloqueCliente}\n\nSeguí el workflow completo. PRIMERO hacé research REAL con web_search sobre la empresa (fundación, modelo, stage, tracción) — PROHIBIDO inventar datos. Luego encontrá 6 cuentas con Sales Navigator. El cargo y empresa de cada decisor deben salir TEXTUAL del headline real — NUNCA inventes empresa/cargo para que encaje con el ICP. Devolvé SOLO el objeto JSON del schema (sin HTML, sin markdown, sin texto alrededor).`
   }];
 
   let mcpCallCount = 0;       // llamadas a IBT (client tools que puenteamos)
@@ -1034,15 +1038,81 @@ async function contarPaginas(pdfBuffer) {
 // ---------------------------------------------------------------------------
 // Pipeline
 // ---------------------------------------------------------------------------
-async function procesar(jobId, { email, dominio, empresa, nombre }) {
+// ---------------------------------------------------------------------------
+// Resolución de identidad del cliente (DETERMINÍSTICA, ancla en el perfil del chat)
+// Prioridad: profileId del chat (lo más confiable) -> dominio corporativo -> sin anclar.
+// NO inventa: si no puede anclar con confianza, marca anclado:false (n8n decide no mandar).
+// ---------------------------------------------------------------------------
+function _empresaDeHeadline(txt){let m=(txt||'').match(/@\s*([^·•|(\n]+)/);if(!m)m=(txt||'').match(/\bat\s+([^·•|(\n]+)/i);return m?m[1].trim():'';}
+function _empresaDeLookup(txt){const m=(txt||'').match(/Company:\s*(.+?)\s*(?:\[|—|\u2014|,|$)/i);return m?m[1].trim():'';}
+function _headcountDe(txt){const m=(txt||'').match(/([\d][\d.,]*)\s*employees/i);return m?(parseInt(m[1].replace(/[.,]/g,''),10)||null):null;}
+function _tier(h){if(h==null)return null;if(h<10)return'micro';if(h<50)return'chica';if(h<500)return'media';if(h<5000)return'grande';return'enterprise';}
+function _esEmailGratuito(d){return /(gmail|yahoo|hotmail|outlook|icloud|live|aol|proton|protonmail|gmx)\./i.test((d||'').trim());}
+function _mismaEmpresa(a,b){a=_norm(a);b=_norm(b);if(!a||!b)return false;if(a===b||a.includes(b)||b.includes(a))return true;const ta=new Set(a.split(' ').filter(w=>w.length>2));return b.split(' ').filter(w=>w.length>2).some(w=>ta.has(w));}
+
+async function resolverCliente({ profileId, dominio, empresa }) {
+  const dominioReal = !!(dominio && !_esEmailGratuito(dominio));
+
+  // Cruza un ancla ya resuelta contra el dominio corporativo (corroboración -> veracidad).
+  // 2 fuentes que coinciden = confianza ALTA; si discrepan, flag (NO rechaza).
+  async function corroborar(base) {
+    if (!dominioReal) return { ...base, confianza: base.confianza || 'media' };
+    try {
+      const txt = await callMCP('lookup_company', { companyUrlOrName: dominio });
+      const empD = _empresaDeLookup(txt), hcD = _headcountDe(txt);
+      if (empD && _mismaEmpresa(base.empresa, empD)) {
+        const hc = base.headcount ?? hcD;
+        console.log(`[CLIENTE] ✓ corroborado: perfil "${base.empresa}" == dominio "${empD}" -> confianza ALTA`);
+        return { ...base, headcount: hc, tier: _tier(hc), confianza: 'alta', corroborado: true };
+      }
+      if (empD) {
+        console.warn(`[CLIENTE] ⚠️ discrepancia: perfil="${base.empresa}" vs dominio="${empD}" -> confianza media + flag`);
+        return { ...base, confianza: 'media', discrepancia: { perfil: base.empresa, dominio: empD } };
+      }
+    } catch (e) { console.warn(`[CLIENTE] cruce con dominio falló:`, e.message); }
+    return { ...base, confianza: base.confianza || 'media' };
+  }
+
+  // 1) profileId del chat -> el perfil de la PERSONA dice dónde trabaja (ancla fuerte)
+  if (profileId != null && String(profileId).trim() !== '' && !isNaN(Number(profileId))) {
+    try {
+      const txt = await callMCP('get_contact_profile', { profileId: Number(profileId) });
+      const emp = _empresaDeHeadline(txt);
+      const hc = _headcountDe(txt);
+      if (emp) {
+        console.log(`[CLIENTE] anclado por profileId ${profileId} -> "${emp}" (${hc ?? '?'} empleados, tier ${_tier(hc)})`);
+        return await corroborar({ empresa: emp, dominio: dominio || '', headcount: hc, tier: _tier(hc), anclado: true, fuente: 'profile' });
+      }
+    } catch (e) { console.warn(`[CLIENTE] profileId ${profileId} no resolvió:`, e.message); }
+  }
+  // 2) dominio corporativo real -> lookup_company
+  if (dominio && !_esEmailGratuito(dominio)) {
+    try {
+      const txt = await callMCP('lookup_company', { companyUrlOrName: dominio });
+      const emp = _empresaDeLookup(txt) || empresa || dominio;
+      const hc = _headcountDe(txt);
+      console.log(`[CLIENTE] anclado por dominio ${dominio} -> "${emp}" (${hc ?? '?'} empleados, tier ${_tier(hc)})`);
+      return { empresa: emp, dominio, headcount: hc, tier: _tier(hc), anclado: true, fuente: 'dominio', confianza: 'media' };
+    } catch (e) { console.warn(`[CLIENTE] dominio ${dominio} no resolvió:`, e.message); }
+  }
+  // 3) sin ancla confiable (ej: email gratuito + empresa genérica). NO inventamos.
+  console.warn(`[CLIENTE] ⚠️ SIN ANCLAR (dominio="${dominio}", empresa="${empresa}") -> anclado:false`);
+  return { empresa: empresa || dominio || '', dominio: dominio || '', headcount: null, tier: null, anclado: false, fuente: 'sin_anclar', confianza: 'baja' };
+}
+
+async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
   try {
     console.log(`\n========== Job ${jobId} - Inicio ==========`);
-    console.log(`Empresa: ${empresa} | Email: ${email} | Dominio: ${dominio}`);
+    console.log(`Empresa: ${empresa} | Email: ${email} | Dominio: ${dominio} | profileId: ${profileId ?? '-'}`);
     resetTokenStats();
 
     const tools = await listMCPTools();
 
-    let data = await runClaude({ email, dominio, empresa, nombre, tools });
+    // Anclar la identidad del cliente ANTES de generar (perfil del chat -> empresa real + tamaño)
+    const cliente = await resolverCliente({ profileId, dominio, empresa });
+    const empresaFinal = cliente.empresa || empresa;
+
+    let data = await runClaude({ email, dominio, empresa: empresaFinal, nombre, tools, cliente });
 
     // GATE data-based (post-gen, antes del juez): verifica/corrige URN sobre el JSON
     let linkCheck = await verificarLinksData(data);
@@ -1061,7 +1131,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
     if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
       console.log(`[Job ${jobId}] Juez rechazó ${judgeResult.score}/8 — aplicando fixes...`);
       try {
-        const fixedData = await runFixer({ data, fixes: judgeResult.fixes, empresa, tools });
+        const fixedData = await runFixer({ data, fixes: judgeResult.fixes, empresa: empresaFinal, tools });
         if (fixedData && Array.isArray(fixedData.cards)) {
           data = fixedData;
 
@@ -1089,7 +1159,9 @@ async function procesar(jobId, { email, dominio, empresa, nombre }) {
     jobs.set(jobId, {
       status: 'ok',
       pdf_base64: pdfBuffer.toString('base64'),
-      empresa,
+      empresa: empresaFinal,
+      anclado: cliente.anclado,
+      cliente_resuelto: cliente,
       nombre,
       email,
       paginas: pageCount,
@@ -1131,14 +1203,14 @@ setInterval(() => {
 }, 30 * 60 * 1000);
 
 app.post('/generar', (req, res) => {
-  const { email, dominio, empresa, nombre } = req.body || {};
-  if (!empresa && !dominio) {
-    return res.status(400).json({ error: 'Falta empresa o dominio' });
+  const { email, dominio, empresa, nombre, profileId } = req.body || {};
+  if (!empresa && !dominio && !profileId) {
+    return res.status(400).json({ error: 'Falta empresa, dominio o profileId' });
   }
   const jobId = crypto.randomUUID();
   jobs.set(jobId, { status: 'processing', createdAt: Date.now() });
   res.status(202).json({ jobId, status: 'processing' });
-  procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '' });
+  procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId });
 });
 
 app.get('/resultado/:jobId', (req, res) => {
@@ -1148,13 +1220,15 @@ app.get('/resultado/:jobId', (req, res) => {
 });
 
 app.post('/generar-reporte', async (req, res) => {
-  const { email, dominio, empresa, nombre } = req.body || {};
+  const { email, dominio, empresa, nombre, profileId } = req.body || {};
   if (!email || !dominio) return res.status(400).json({ error: 'email y dominio son obligatorios' });
 
   try {
     resetTokenStats();
     const tools = await listMCPTools();
-    let data = await runClaude({ email, dominio, empresa: empresa || dominio, nombre: nombre || '', tools });
+    const cliente = await resolverCliente({ profileId, dominio, empresa: empresa || dominio });
+    const empresaFinal = cliente.empresa || empresa || dominio;
+    let data = await runClaude({ email, dominio, empresa: empresaFinal, nombre: nombre || '', tools, cliente });
 
     // GATE data-based (post-gen, antes del juez)
     let linkCheck = await verificarLinksData(data);
@@ -1171,7 +1245,7 @@ app.post('/generar-reporte', async (req, res) => {
 
     if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
       try {
-        const fixedData = await runFixer({ data, fixes: judgeResult.fixes, empresa: empresa || dominio, tools });
+        const fixedData = await runFixer({ data, fixes: judgeResult.fixes, empresa: empresaFinal, tools });
         if (fixedData && Array.isArray(fixedData.cards)) {
           data = fixedData;
           linkCheck = await verificarLinksData(data);
@@ -1191,7 +1265,9 @@ app.post('/generar-reporte', async (req, res) => {
     return res.json({
       status: 'ok',
       pdf_base64: pdfBuffer.toString('base64'),
-      empresa: empresa || dominio,
+      empresa: empresaFinal,
+      anclado: cliente.anclado,
+      cliente_resuelto: cliente,
       nombre: nombre || '',
       email,
       paginas: pageCount,
