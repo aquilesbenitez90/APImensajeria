@@ -948,6 +948,23 @@ function _rankSenioridad(head){
   return 2;
 }
 
+// Rank RELATIVO al cliente: lo "mejor" depende de a QUIÉN le vende el cliente.
+// `titulos` = títulos del comprador que define el PLAN (ej. agencia de marketing ->
+// cmo, head of marketing, brand manager...). Un decisor de ESA función va al tope;
+// un C-level genérico (CEO/dueño) sirve solo si la empresa es chica (lo refina el
+// tamaño + la IA); un senior de otra área (CTO/CFO/RRHH) va al fondo.
+function _rankFit(head, titulos){
+  const h=_norm(head);
+  const lista = Array.isArray(titulos) ? titulos : [];
+  const matchFuncion = lista.some(t=>{ const n=_norm(t); return n && n.length>=2 && h.includes(n); });
+  const sen=_rankSenioridad(head);
+  // El "mejor" es RELATIVO al cliente: SOLO el comprador que define el PLAN
+  // (titulos_objetivo) va al tope. Un C-level de otra área (CEO/CTO/CFO ajeno) NO
+  // recibe bonus — eso floteaba chiefs equivocados. Si para el ICP el comprador es
+  // el dueño/CEO (empresas chicas), el PLAN incluye "ceo/founder/owner" y matchea acá.
+  return (matchFuncion ? 100 : 10) + sen;
+}
+
 // FASE 2 — determinística, SIN IA. Pool real de candidatos desde Sales Nav.
 // Búsqueda AMPLIA (país + función, sin restringir grado ni apilar industrias): así
 // puebla de verdad (la restricción "2do grado" + industrias apiladas devolvía vacío).
@@ -971,18 +988,24 @@ async function sourceCandidates(plan, cliente){
   const icp = (plan && plan._plan) || {};
   const geografia = icp.geografia || 'Argentina';
   const funcion   = icp.funcion   || 'marketing';
+  if(!Array.isArray(icp.titulos_objetivo) || !icp.titulos_objetivo.length)
+    console.warn('[SOURCE] ⚠️ El PLAN no definió titulos_objetivo — el ranking por fit cae a seniority. Revisar el prompt PLAN.');
   let locId=null, fnId=null;
   try{ locId=(String(await callMCP('resolve_sales_navigator_id',{type:'LOCATION',keywords:geografia,limit:1})).match(/id="?([0-9]+)"?/)||[])[1]||null; }catch{}
   try{ fnId =(String(await callMCP('resolve_sales_navigator_id',{type:'FUNCTION',keywords:funcion,limit:3})).match(/id="?([A-Za-z0-9_]+)"?/)||[])[1]||null; }catch{}
 
-  const f1={ category:'people', profilesLimit:50 };
+  // El filtro `function` se IGNORA en esta cuenta (el cursor no lo persiste) -> la
+  // búsqueda volvía "cualquiera en el país". `keywords` SÍ se aplica, así que es el
+  // que trae de verdad a los de la función. Mandamos function igual por si algún día aplica.
+  const f1={ category:'people', profilesLimit:50, keywords: funcion };
   if(locId) f1.location={ include:[locId] };
-  if(fnId)  f1.function={ include:[fnId] }; else f1.keywords=funcion;
+  if(fnId)  f1.function={ include:[fnId] };
   let pool=[];
   try{ pool=_parsePeople(await callMCP('search_sales_navigator_filtered', f1)); }catch{}
-  // Segunda pasada por keywords si vino flojo.
+  // Segunda pasada con otra palabra clave del comprador si vino flojo.
   if(pool.length < 10){
-    const f2={ category:'people', profilesLimit:50, keywords:funcion };
+    const kw2 = (Array.isArray(icp.titulos_objetivo) && icp.titulos_objetivo[0]) || funcion;
+    const f2={ category:'people', profilesLimit:50, keywords: kw2 };
     if(locId) f2.location={ include:[locId] };
     try{ pool=pool.concat(_parsePeople(await callMCP('search_sales_navigator_filtered', f2))); }catch{}
   }
@@ -993,9 +1016,9 @@ async function sourceCandidates(plan, cliente){
     if(_rankSenioridad(p.head) < 1) continue;
     const emp=_empresaDeHeadline(p.head)||'';
     if(empCliente && emp && _mismaEmpresa(empCliente, emp)) continue;
-    out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, rank:_rankSenioridad(p.head) });
+    out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, icp.titulos_objetivo) });
   }
-  out.sort((a,b)=> (b.rank-a.rank) || (a.dist-b.dist));   // pre-orden: seniority + grado
+  out.sort((a,b)=> (b.fit-a.fit) || (a.dist-b.dist));   // pre-orden: FIT al comprador del cliente, luego grado
 
   // ENRIQUECER el tope del pool con el perfil real -> headcount (señal de empresa
   // ancla, para EMOCIÓN) + headline rico (material para el ángulo, para UTILIDAD).
@@ -1010,7 +1033,7 @@ async function sourceCandidates(plan, cliente){
       if(prof.headRich) c.headRich=prof.headRich;
     }catch{}
     const warmth = c.dist===1?2 : c.dist===2?1 : 0;
-    c.score = c.rank*2 + _sizeBoost(c.headcount, tamMin)*2 + warmth;
+    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*2 + warmth;   // fit manda; tamaño (ancla) y grado refinan
   }
   top.sort((a,b)=> (b.score-a.score) || (a.dist-b.dist));
   const final = top.concat(out.slice(K)).slice(0, 12);
@@ -1032,6 +1055,7 @@ Generás la PARTE 1 de un reporte de prospección GTM que IBT manda a un prospec
 - "fecha" = EXACTAMENTE la fecha de hoy que te paso en el mensaje (no inventes otra).
 - Datos de mercado (context): solo si salen de web_search; NO inventes porcentajes redondos.
 - El ICP card "Rol del decisor" y el bloque _plan.funcion deben describir al MISMO comprador.
+- _plan.titulos_objetivo es CRÍTICO: el sistema rankea los candidatos buscando estas palabras DENTRO del cargo. Poné palabras SUELTAS (no frases), ES+inglés+abreviaturas. Así matchea cualquier variante ("Marketing Director", "VP of Marketing", "Head of Growth" → con "marketing" y "growth" alcanza). Si faltan, el sistema trae el cargo equivocado (un CEO/CTO en vez del decisor del área). Pensá: ¿qué palabra está sí o sí en el título de quien COMPRA esto? Si el ICP apunta a empresas chicas donde el que compra es el dueño/CEO, incluí también "ceo, founder, owner, dueño, fundador" para que esos suban.
 
 ## Output — SOLO JSON (sin texto ni markdown alrededor)
 {
@@ -1048,7 +1072,7 @@ Generás la PARTE 1 de un reporte de prospección GTM que IBT manda a un prospec
   "context": [ "bullet 1", "bullet 2", "bullet 3" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
   "prioridades": [ "Alta — ...", "Media — ...", "...", "..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras (ej: marketing, ventas, customer experience, finanzas, recursos humanos)", "geografia": "País objetivo (ej: Argentina)", "industrias": ["industrias con fit"], "tamano_min": 0 }
+  "_plan": { "funcion": "función del comprador en 1-2 palabras (ej: marketing, ventas, customer experience, finanzas, recursos humanos)", "titulos_objetivo": ["PALABRAS SUELTAS (no frases) que aparecen en el cargo de quien COMPRA lo que vende el cliente, ES+EN+abreviaturas. ej. agencia de marketing: marketing, brand, growth, cmo, comunicacion, publicidad, demand. ej. ciberseguridad: seguridad, security, ciso, infosec. ej. ventas B2B: ventas, sales, comercial, revenue, cro"], "geografia": "País objetivo (ej: Argentina)", "industrias": ["industrias con fit"], "tamano_min": 0 }
 }
 CANTIDADES EXACTAS: ribbon 5, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`;
 
