@@ -425,8 +425,12 @@ REGLA DE COHERENCIA: las 6 cuentas son PROSPECTS — NUNCA incluir como cuenta t
 
 PROHIBIDO inventar URLs, nombres o slugs de LinkedIn. TODOS los perfiles DEBEN salir de la búsqueda real en Sales Navigator.
 
-Paso 3.1: Resolver IDs con resolve_sales_navigator_id (LOCATION, SALES_INDUSTRY, SENIORITY, FUNCTION).
-Paso 3.2: Buscar con search_sales_navigator_filtered (category people, degreeOfConnection ["2nd"], location/industry/seniority/function include, profilesLimit 20). Elegir EXACTAMENTE 6 por: seniority decisora, empresa ancla reconocible, fit con el pain del producto.
+Paso 3.1: La FUNCIÓN del decisor sale del ICP del cliente — lo que el cliente VENDE define a quién le vende (marketing, ventas, CX, finanzas, IT, RRHH, operaciones, etc.). NO asumas "marketing": derivala del "Rol del decisor" del ICP. Resolvé los IDs con resolve_sales_navigator_id (LOCATION, SALES_INDUSTRY, SENIORITY, FUNCTION).
+
+Paso 3.2: SOBRE-buscá y elegí de una lista REAL (no inventes para "llegar a 6"). Con search_sales_navigator_filtered (category people, degreeOfConnection ["2nd"]) traé MÁS de 6 candidatos reales (profilesLimit 20-25) y DESPUÉS quedate con los 6 mejores. Estrategia para NO obtener listas vacías (la causa #1 de que el modelo manotee):
+- Empezá AMPLIO: function + location + seniority (Director/VP/CxO). NO apiles 4-5 industrias juntas — eso devuelve vacío.
+- Si vuelve poco o vacío: primero sacá la industria, después bajá el seniority, después probá keywords del rol (español/inglés). Para una empresa ancla puntual: company (resuelto) + keywords del rol.
+- Elegí los 6 por: seniority decisora (no analistas junior), empresa ancla reconocible del ICP, y fit con el pain del cliente.
 
 Paso 3.3: ANTI-INVENCIÓN de cargo y empresa (CRÍTICO)
 - El cargo y la empresa de cada card se toman TEXTUALMENTE del headline del perfil. PROHIBIDO inventar/deducir/"completar" empresa o cargo que no aparezca literal en el headline.
@@ -438,9 +442,10 @@ Paso 3.3: ANTI-INVENCIÓN de cargo y empresa (CRÍTICO)
 Paso 3.4: Grado de conexión REAL
 - PROHIBIDO hardcodear "2do grado" en todas las cards. Usar el grado REAL que devuelve la búsqueda (1er/2do/3er). Si no está claro, usar el valor real o dejar el campo vacío.
 
-Paso 3.5: Link de cada perfil (slug + urn)
-- "slug" = el publicIdOrUrl que devuelve la búsqueda (es el texto visible del link).
-- "urn" = el mismo publicIdOrUrl, o el member id opaco (ACwAA...) si lo tenés. El sistema usa "urn" para el href y "slug" para el texto; AMBOS deben apuntar a la MISMA persona. Si dudás, poné el mismo valor en los dos.
+Paso 3.5: Link de cada perfil — el "urn" es el IDENTIFICADOR REAL que devuelve la búsqueda
+- "urn" = el id opaco que viene en CADA resultado del search (formato ACwAA...). Ese es el href real y SIEMPRE resuelve a la persona correcta. COPIALO TAL CUAL del resultado del search. PROHIBIDO construir un slug "nombre-apellido": eso da 404 o cae en otra persona.
+- "slug" = texto visible lindo (ej: nombre-apellido); es SOLO cosmético, no se usa para el link.
+- Si no tenés el id real de una persona, NO la incluyas — elegí otra que sí haya salido del search.
 
 ### 4. Qué llenar (contenido) — cantidades EXACTAS
 - ribbon: 5 chips de datos VERIFICADOS (Vertical, País, Fundada, Stage/Tracción, Modelo).
@@ -685,12 +690,19 @@ async function runClaude({ email, dominio, empresa, nombre, tools, cliente }) {
 
   let mcpCallCount = 0;       // llamadas a IBT (client tools que puenteamos)
   let webSearchCount = 0;     // búsquedas web REALES (server tool)
+  // Tope de iteraciones de tools: si el modelo "manotea" (ej: búsquedas Sales Nav
+  // que vuelven vacías y reintenta sin freno), cada vuelta es un round-trip caro
+  // re-leyendo todo el contexto. Al llegar al tope le apagamos las tools y lo
+  // forzamos a devolver el JSON con lo que tenga.
+  const MAX_TOOL_ITERS = parseInt(process.env.GEN_MAX_TOOL_ITERS || '14', 10);
+  let toolIters = 0;
+  let forzarCierre = false;
   while (true) {
     const data = await callClaude({
       model: MODEL_GEN,
       system: SYSTEM_PROMPT_JSON,
       messages,
-      tools: anthropicTools,
+      tools: forzarCierre ? [] : anthropicTools,
       stopSequences: [],
       maxTokens: 16000
     });
@@ -723,6 +735,18 @@ async function runClaude({ email, dominio, empresa, nombre, tools, cliente }) {
         });
       }
       if (toolResults.length > 0) {
+        toolIters++;
+        if (toolIters >= MAX_TOOL_ITERS) {
+          // Cortamos acá: agregamos la instrucción de cierre al MISMO mensaje de
+          // tool_results (es válido mezclar tool_result + text en un user msg) y en
+          // la próxima vuelta llamamos SIN tools para obligar a emitir el JSON.
+          forzarCierre = true;
+          toolResults.push({
+            type: 'text',
+            text: `LÍMITE de búsquedas alcanzado (${MAX_TOOL_ITERS} iteraciones). NO hagas más tool calls. Con la información que YA tenés, devolvé AHORA el objeto JSON final del reporte con los mejores perfiles que hayas conseguido. Si no llegaste a 6, devolvé los que tengas.`
+          });
+          console.warn(`[GEN] Tope de ${MAX_TOOL_ITERS} iteraciones de tools alcanzado -> forzando cierre (call SIN tools).`);
+        }
         messages.push({ role: 'user', content: toolResults });
       } else {
         break;
@@ -790,12 +814,16 @@ async function runFixer({ data, fixes, empresa, tools }) {
 
   let mcpCallCount = 0;       // llamadas a IBT
   let webSearchCount = 0;     // búsquedas web REALES (server tool)
+  // Mismo tope que el gen: el fixer también puede manotear con tools y encarecer.
+  const MAX_TOOL_ITERS = parseInt(process.env.FIX_MAX_TOOL_ITERS || '10', 10);
+  let toolIters = 0;
+  let forzarCierre = false;
   while (true) {
     const resp = await callClaude({
       model: MODEL_FIX,
       system: SYSTEM_PROMPT_FIX,
       messages,
-      tools: anthropicTools,
+      tools: forzarCierre ? [] : anthropicTools,
       stopSequences: [],
       maxTokens: 8000          // JSON liviano (sin base64 ni CSS) → no más timeouts del fixer
     });
@@ -822,6 +850,15 @@ async function runFixer({ data, fixes, empresa, tools }) {
         });
       }
       if (toolResults.length > 0) {
+        toolIters++;
+        if (toolIters >= MAX_TOOL_ITERS) {
+          forzarCierre = true;
+          toolResults.push({
+            type: 'text',
+            text: `LÍMITE de iteraciones del fixer alcanzado (${MAX_TOOL_ITERS}). NO hagas más tool calls. Devolvé AHORA el objeto JSON final corregido con la info que ya tenés.`
+          });
+          console.warn(`[FIX] Tope de ${MAX_TOOL_ITERS} iteraciones de tools alcanzado -> forzando cierre (call SIN tools).`);
+        }
         messages.push({ role: 'user', content: toolResults });
       } else {
         break;
@@ -949,51 +986,94 @@ async function _resolverNombre(urn){
   try{ return _profileName(await callMCP('get_contact_profile',{publicIdOrUrl:urn,noCache:true})); }catch{}
   return '';
 }
+// Headline limpio: saca el prefijo "Nombre [profileId: N] —" y el sufijo "(N employees, ...)".
+function _headlineLimpio(txt){
+  return String(txt||'').replace(/^[^—\n]*—\s*/,'').replace(/\s*\([^)]*\)\s*$/,'').trim();
+}
+// Resuelve un urn/slug al PERFIL real: nombre + empresa (del headline) + headline limpio.
+// Determinístico y cero tokens (llama a IBT directo). Cacheado primero, noCache de fallback.
+async function _resolverPerfil(urn){
+  for(const args of [{publicIdOrUrl:urn},{publicIdOrUrl:urn,noCache:true}]){
+    try{
+      const txt=await callMCP('get_contact_profile',args);
+      const name=_profileName(txt);
+      if(name) return { name, empresa:_empresaDeHeadline(txt), headline:_headlineLimpio(txt), txt:String(txt||'') };
+    }catch{}
+  }
+  return { name:'', empresa:'', headline:'', txt:'' };
+}
 async function verificarLinksData(data){
-  const corregidos=[], noResueltos=[], gradosCorregidos=[], gradosMal=[];
+  const corregidos=[], descartados=[], gradosCorregidos=[], gradosMal=[];
   const cards=Array.isArray(data.cards)?data.cards:[];
+  const validas=[];
+  // Slug COSMÉTICO para el texto visible (nombre-apellido). El href NO usa esto:
+  // usa el id opaco real. El texto es sólo la etiqueta linda "linkedin.com/in/...".
+  const _slugCosmetico=n=>_norm(n).split(' ').filter(Boolean).join('-');
   for(const card of cards){
-    // saneo invisibles ANTES de resolver (mutando el dato, así el render usa el urn limpio)
     if(card.urn)  card.urn  = _limpiarId(card.urn);
     if(card.slug) card.slug = _limpiarId(card.slug);
-    const urn=(card.urn||card.slug||'').trim();
-    if(!urn){ noResueltos.push({nombre:card.nombre,motivo:'card sin urn/slug'}); continue; }
-
-    const realName=await _resolverNombre(urn);
-    if(!realName){ noResueltos.push({urn,nombre:card.nombre,motivo:'el URN no resuelve (API)'}); continue; }
-
-    let dist=null;
     const ap=_nombreApellido(card.nombre);
-    if(_coincideNombre(card.nombre, realName)){
-      const cands=await _buscarPersona(ap.first,ap.last);
-      const me=cands.find(c=>c.id===urn);
-      if(me) dist=me.dist;
+    if(!ap.first && !ap.last){ descartados.push({nombre:card.nombre,motivo:'card sin nombre'}); continue; }
+
+    // 1) SEARCH-FIRST: buscamos a la persona por nombre. El search devuelve el id OPACO
+    //    real (ACwAA...) + headline + grado. Ese id es el href ground-truth: no se puede
+    //    alucinar como "nombre-apellido", y linkedin.com/in/ACwAA... siempre resuelve.
+    const cands=await _buscarPersona(ap.first, ap.last);
+    // 2) Elegimos el candidato que matchea NOMBRE + EMPRESA (descarta homónimos en otra empresa).
+    const pick=(cands||[]).find(c=>_coincideNombre(card.nombre,c.name)
+                          && _mismaEmpresa(card.empresa||'', _empresaDeHeadline(c.head||'')||c.head||''))||null;
+
+    let urnFinal=null, headReal=null, dist=null;
+    if(pick){
+      urnFinal=pick.id; headReal=pick.head; dist=pick.dist;
     }else{
-      console.log(`[LINKS] Mismatch: card "${card.nombre}" pero el URN resuelve a "${realName}"`);
-      const cands=await _buscarPersona(ap.first,ap.last);
-      const empTok=_norm(card.empresa||'').split(' ')[0]||'';
-      const pick=cands.find(c=>_coincideNombre(card.nombre,c.name) && empTok && _norm(c.head).includes(empTok))
-               || cands.find(c=>_coincideNombre(card.nombre,c.name))
-               || null;
-      if(pick && pick.id!==urn){
-        corregidos.push({nombre:card.nombre,de:urn,a:pick.id,resolvieA:realName});
-        card.urn=pick.id; card.slug=pick.id;
-        dist=pick.dist;
-        console.log(`[LINKS] Corregido: ${card.nombre} -> ${pick.id}`);
-      }else{
-        noResueltos.push({urn,nombre:card.nombre,resuelveA:realName,motivo:'mismatch sin reemplazo confiable'});
+      // 3) Fallback: el search no lo encontró, pero quizás el urn que trajo el gen YA es un id
+      //    real que resuelve a la persona+empresa correcta. Lo verificamos antes de descartar.
+      const urnGen=(card.urn||card.slug||'').trim();
+      if(urnGen){
+        const perfil=await _resolverPerfil(urnGen);
+        const empCardTok=_norm(card.empresa||'').split(' ').filter(w=>w.length>2);
+        const empOk=(perfil.empresa && _mismaEmpresa(card.empresa||'', perfil.empresa))
+                  || (empCardTok.length>0 && empCardTok.some(w=>_norm(perfil.txt).includes(w)));
+        if(perfil.name && _coincideNombre(card.nombre,perfil.name) && empOk){
+          urnFinal=urnGen; headReal=perfil.headline;
+          console.log(`[LINKS] Validado por urn del gen (search no lo encontró): ${card.nombre}`);
+        }
       }
     }
 
+    // 4) Sin id real verificado -> SE DESCARTA. Nunca un link muerto ni mal atribuido.
+    if(!urnFinal){
+      descartados.push({
+        nombre:card.nombre, empresa:card.empresa, urn:(card.urn||card.slug||''),
+        motivo:'sin id real que matchee nombre+empresa (link muerto o persona equivocada)'
+      });
+      continue;
+    }
+
+    // 5) HREF = id opaco/real verificado.  TEXTO = slug cosmético lindo (como ahora).
+    card.urn  = urnFinal;
+    card.slug = _slugCosmetico(card.nombre);
+    if(headReal){ const h=_headlineLimpio(headReal)||String(headReal).trim(); if(h) card.cargo=h; }
+    corregidos.push({nombre:card.nombre, href:urnFinal});
+    console.log(`[LINKS] OK: ${card.nombre} -> href ${urnFinal}`);
+
+    // 6) Grado real desde el candidato del search.
     const claimed=_gradoReclamado(card.grado||'');
     if(dist && claimed && dist!==claimed){
       gradosMal.push({nombre:card.nombre,dice:claimed,real:dist});
       card.grado=_degOrdinal(dist, card.grado||'2do')+' grado';
       gradosCorregidos.push({nombre:card.nombre,de:claimed,a:dist});
-      console.log(`[LINKS] Grado corregido: ${card.nombre} ${claimed} -> ${dist}`);
+    }else if(dist && !claimed){
+      card.grado=_degOrdinal(dist,'2do')+' grado';
     }
+
+    validas.push(card);
   }
-  return {data,corregidos,noResueltos,gradosCorregidos,gradosMal};
+  data.cards=validas;   // SOLO las cards verificadas (con href real) llegan al render
+  if(descartados.length) console.warn(`[LINKS] ⚠️ ${descartados.length} card(s) descartada(s):`, JSON.stringify(descartados));
+  // noResueltos se mantiene como ALIAS de descartados para no romper el mapeo de n8n.
+  return {data,corregidos,noResueltos:descartados,descartados,gradosCorregidos,gradosMal};
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,6 +1233,16 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
       }
     }
 
+    // Veredicto de integridad: cuántas cards quedaron VERIFICADAS. Si no llega a 6,
+    // el reporte NO es apto para envío automático (el sourcing debe traer 6 reales).
+    const MIN_CARDS_OK = parseInt(process.env.MIN_CARDS_OK || '6', 10);
+    const descartadas = linkCheck.descartados || [];
+    const cardsValidas = Array.isArray(data.cards) ? data.cards.length : 0;
+    const aptoEnvio = cardsValidas >= MIN_CARDS_OK;
+    console.log(aptoEnvio
+      ? `[INTEGRIDAD] OK: ${cardsValidas} cards verificadas.`
+      : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} cards verificadas, ${descartadas.length} descartada(s).`);
+
     // Log de tokens/costo del reporte completo
     logTokenCost(`Job ${jobId}`);
 
@@ -1162,6 +1252,9 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
       empresa: empresaFinal,
       anclado: cliente.anclado,
       cliente_resuelto: cliente,
+      apto_envio: aptoEnvio,
+      cards_validas: cardsValidas,
+      cards_descartadas: descartadas,
       nombre,
       email,
       paginas: pageCount,
@@ -1260,6 +1353,14 @@ app.post('/generar-reporte', async (req, res) => {
       }
     }
 
+    const MIN_CARDS_OK = parseInt(process.env.MIN_CARDS_OK || '6', 10);
+    const descartadas = linkCheck.descartados || [];
+    const cardsValidas = Array.isArray(data.cards) ? data.cards.length : 0;
+    const aptoEnvio = cardsValidas >= MIN_CARDS_OK;
+    console.log(aptoEnvio
+      ? `[INTEGRIDAD] OK: ${cardsValidas} cards verificadas.`
+      : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} cards verificadas, ${descartadas.length} descartada(s).`);
+
     logTokenCost('generar-reporte');
 
     return res.json({
@@ -1268,6 +1369,9 @@ app.post('/generar-reporte', async (req, res) => {
       empresa: empresaFinal,
       anclado: cliente.anclado,
       cliente_resuelto: cliente,
+      apto_envio: aptoEnvio,
+      cards_validas: cardsValidas,
+      cards_descartadas: descartadas,
       nombre: nombre || '',
       email,
       paginas: pageCount,
