@@ -748,77 +748,12 @@ async function _resolverPerfil(urn){
   return { name:'', empresa:'', headline:'', txt:'' };
 }
 async function verificarLinksData(data){
-  const corregidos=[], descartados=[], gradosCorregidos=[], gradosMal=[];
-  const cards=Array.isArray(data.cards)?data.cards:[];
-  const validas=[];
-  // Slug COSMÉTICO para el texto visible (nombre-apellido). El href NO usa esto:
-  // usa el id opaco real. El texto es sólo la etiqueta linda "linkedin.com/in/...".
-  const _slugCosmetico=n=>_norm(n).split(' ').filter(Boolean).join('-');
-  for(const card of cards){
-    if(card.urn)  card.urn  = _limpiarId(card.urn);
-    if(card.slug) card.slug = _limpiarId(card.slug);
-    const ap=_nombreApellido(card.nombre);
-    if(!ap.first && !ap.last){ descartados.push({nombre:card.nombre,motivo:'card sin nombre'}); continue; }
-
-    // 1) SEARCH-FIRST: buscamos a la persona por nombre. El search devuelve el id OPACO
-    //    real (ACwAA...) + headline + grado. Ese id es el href ground-truth: no se puede
-    //    alucinar como "nombre-apellido", y linkedin.com/in/ACwAA... siempre resuelve.
-    const cands=await _buscarPersona(ap.first, ap.last);
-    // 2) Elegimos el candidato que matchea NOMBRE + EMPRESA (descarta homónimos en otra empresa).
-    const pick=(cands||[]).find(c=>_coincideNombre(card.nombre,c.name)
-                          && _mismaEmpresa(card.empresa||'', _empresaDeHeadline(c.head||'')||c.head||''))||null;
-
-    let urnFinal=null, headReal=null, dist=null;
-    if(pick){
-      urnFinal=pick.id; headReal=pick.head; dist=pick.dist;
-    }else{
-      // 3) Fallback: el search no lo encontró, pero quizás el urn que trajo el gen YA es un id
-      //    real que resuelve a la persona+empresa correcta. Lo verificamos antes de descartar.
-      const urnGen=(card.urn||card.slug||'').trim();
-      if(urnGen){
-        const perfil=await _resolverPerfil(urnGen);
-        const empCardTok=_norm(card.empresa||'').split(' ').filter(w=>w.length>2);
-        const empOk=(perfil.empresa && _mismaEmpresa(card.empresa||'', perfil.empresa))
-                  || (empCardTok.length>0 && empCardTok.some(w=>_norm(perfil.txt).includes(w)));
-        if(perfil.name && _coincideNombre(card.nombre,perfil.name) && empOk){
-          urnFinal=urnGen; headReal=perfil.headline;
-          console.log(`[LINKS] Validado por urn del gen (search no lo encontró): ${card.nombre}`);
-        }
-      }
-    }
-
-    // 4) Sin id real verificado -> SE DESCARTA. Nunca un link muerto ni mal atribuido.
-    if(!urnFinal){
-      descartados.push({
-        nombre:card.nombre, empresa:card.empresa, urn:(card.urn||card.slug||''),
-        motivo:'sin id real que matchee nombre+empresa (link muerto o persona equivocada)'
-      });
-      continue;
-    }
-
-    // 5) HREF = id opaco/real verificado.  TEXTO = slug cosmético lindo (como ahora).
-    card.urn  = urnFinal;
-    card.slug = _slugCosmetico(card.nombre);
-    if(headReal){ const h=_headlineLimpio(headReal)||String(headReal).trim(); if(h) card.cargo=h; }
-    corregidos.push({nombre:card.nombre, href:urnFinal});
-    console.log(`[LINKS] OK: ${card.nombre} -> href ${urnFinal}`);
-
-    // 6) Grado real desde el candidato del search.
-    const claimed=_gradoReclamado(card.grado||'');
-    if(dist && claimed && dist!==claimed){
-      gradosMal.push({nombre:card.nombre,dice:claimed,real:dist});
-      card.grado=_degOrdinal(dist, card.grado||'2do')+' grado';
-      gradosCorregidos.push({nombre:card.nombre,de:claimed,a:dist});
-    }else if(dist && !claimed){
-      card.grado=_degOrdinal(dist,'2do')+' grado';
-    }
-
-    validas.push(card);
-  }
-  data.cards=validas;   // SOLO las cards verificadas (con href real) llegan al render
-  if(descartados.length) console.warn(`[LINKS] ⚠️ ${descartados.length} card(s) descartada(s):`, JSON.stringify(descartados));
-  // noResueltos se mantiene como ALIAS de descartados para no romper el mapeo de n8n.
-  return {data,corregidos,noResueltos:descartados,descartados,gradosCorregidos,gradosMal};
+  // NUEVA ARQUITECTURA: cada card ya trae su urn REAL (el id opaco del pool, que vino
+  // de la búsqueda — ground-truth). Re-buscar por nombre acá reasignaba HOMÓNIMOS
+  // equivocados (ej: "Sofia Costa" de Radio Victoria -> otra "Sofia Costa" de PwC).
+  // Como el urn ya es correcto, este gate NO re-busca ni sobrescribe identidad: pasa
+  // los datos tal cual. Se conserva la firma para no romper call sites ni el mapeo n8n.
+  return { data, corregidos:[], noResueltos:[], descartados:[], gradosCorregidos:[], gradosMal:[] };
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,6 +1062,10 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 
 ## Reglas DURAS
 - Elegí SOLO ids que estén en la lista. PROHIBIDO inventar una persona, un id, un cargo o una empresa.
+- LOS 6 ids tienen que ser DISTINTOS. Prohibido repetir la misma persona dos veces. Cada uno es una cuenta única.
+- CADA uno DEBE tener angulo y hook NO vacíos. Nunca dejes un angulo o un hook en blanco.
+- PROHIBIDO copiar/pegar un ángulo o hook de una persona a otra. El ángulo y el hook de cada id tienen que hablar SOLO de ESA persona y ESA empresa. Antes de cerrar, revisá que el nombre y la empresa que mencionás en cada ángulo sean los de ESE id (un error típico es dejar el texto de otra cuenta).
+- El hook DEBE empezar nombrando a la persona por su PRIMER NOMBRE (ej: "Clara, ..."). Si la card es de Clara, el hook arranca con "Clara"; nunca con el nombre de otra persona.
 - El ángulo (3-4 oraciones) es ESPECÍFICO de esa persona/empresa: usá su cargo, empresa y —si está— el "perfil" REALES + lo que ofrece el cliente. Cuanto más uses su propuesta de valor/contexto real del perfil, mejor el ángulo. Prohibido inventar datos que no estén en lo que te paso. Cada ángulo 100% único — nada de frases genéricas repetidas.
 - NUNCA menciones el grado de conexión (1er/2do/3er grado) en el ángulo ni en el hook. El grado lo muestra la tarjeta aparte; si lo escribís y no coincide, queda una contradicción. No hables de "conexión de 1er grado" ni nada por el estilo.
 - El hook: UNA sola oración de apertura entre comillas, lista para copiar y mandar.
@@ -1155,10 +1094,20 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
 // el id elegido + ángulo + hook. Imposible que una card apunte a alguien inexistente.
 function armarReporte(plan, seleccion, pool){
   const byId = new Map(pool.map(p=>[p.id, p]));
-  const cards=[];
+  const cards=[]; const usados=new Set();
   for(const s of (seleccion||[])){
     const p = byId.get(s.id);
-    if(!p) { console.warn(`[SELECT] id fuera del pool, ignorado: ${s.id}`); continue; }
+    if(!p){ console.warn(`[SELECT] id fuera del pool, ignorado: ${s.id}`); continue; }
+    if(usados.has(s.id)){ console.warn(`[SELECT] id DUPLICADO, ignorado: ${p.name}`); continue; }
+    const angulo=String(s.angulo||'').trim(), hook=String(s.hook||'').trim();
+    if(!angulo || !hook){ console.warn(`[SELECT] card sin ángulo/hook, descartada: ${p.name}`); continue; }
+    // Anti-cruce: el hook DEBE mencionar a la persona de esta card. Si no, el ángulo
+    // se copió de otra cuenta (ej: card de Clara con hook que dice "Gabriel"). Se cae.
+    const primerNombre=_norm(p.name).split(' ')[0];
+    if(primerNombre && primerNombre.length>=3 && !_norm(hook).includes(primerNombre)){
+      console.warn(`[SELECT] hook no menciona a ${p.name} (posible cruce de ángulos), descartada.`); continue;
+    }
+    usados.add(s.id);
     const cargoLimpio = String(p.head||'').split('@')[0].split('|')[0].trim() || _headlineLimpio(p.head) || p.head;
     cards.push({
       empresa: p.empresa || _empresaDeHeadline(p.head) || '',
@@ -1167,10 +1116,11 @@ function armarReporte(plan, seleccion, pool){
       urn: p.id, slug: _slugCos(p.name),
       ubicacion: p.loc || ((plan._plan && plan._plan.geografia) || ''),
       grado: _degOrdinal(p.dist===9?3:p.dist, '2do') + ' grado',
-      angulo: s.angulo || '', hook: s.hook || ''
+      angulo, hook
     });
   }
   const { _plan, ...base } = plan;
+  if(!base.empresa) base.empresa = base.h1_company || '';   // título/headers/footers usan {{empresa}} = cliente
   return { ...base, cards };
 }
 
