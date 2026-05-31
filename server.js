@@ -929,6 +929,22 @@ function _rankSenioridad(head){
 // FASE 2 — determinística, SIN IA. Pool real de candidatos desde Sales Nav.
 // Búsqueda AMPLIA (país + función, sin restringir grado ni apilar industrias): así
 // puebla de verdad (la restricción "2do grado" + industrias apiladas devolvía vacío).
+// Parsea get_contact_profile -> headcount (señal de empresa ancla) + headline rico.
+// Formato: "Profile: NAME [profileId: N] — HEADLINE (?, NNN employees, LOC)"
+function _parseProfile(res){
+  const s=String(res||'');
+  const hc=(s.match(/(\d[\d,]*)\s+employees/)||[])[1];
+  const headRich=((s.match(/—\s*(.+?)\s*\(\s*(?:\?|\d)/)||[])[1]||'').trim();
+  return { headcount: hc?parseInt(hc.replace(/,/g,''),10):null, headRich };
+}
+// Boost por tamaño de empresa. Si el ICP define tamano_min, es RELATIVO al ICP
+// (no "más grande = mejor", que rompería la utilidad si el ICP son PyMEs).
+function _sizeBoost(hc, tamMin){
+  if(hc==null) return 0;
+  if(tamMin && tamMin>0) return hc>=tamMin ? 2 : (hc>=tamMin*0.5 ? 1 : 0);
+  return hc>=1000?3 : hc>=200?2 : hc>=50?1 : 0;
+}
+
 async function sourceCandidates(plan, cliente){
   const icp = (plan && plan._plan) || {};
   const geografia = icp.geografia || 'Argentina';
@@ -957,9 +973,27 @@ async function sourceCandidates(plan, cliente){
     if(empCliente && emp && _mismaEmpresa(empCliente, emp)) continue;
     out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, rank:_rankSenioridad(p.head) });
   }
-  out.sort((a,b)=> (b.rank-a.rank) || (a.dist-b.dist));   // decisores y grado más cálido primero
-  console.log(`[SOURCE] Pool real: ${out.length} candidatos (loc=${locId||'?'}, fn=${fnId||funcion}).`);
-  return out.slice(0, 40);
+  out.sort((a,b)=> (b.rank-a.rank) || (a.dist-b.dist));   // pre-orden: seniority + grado
+
+  // ENRIQUECER el tope del pool con el perfil real -> headcount (señal de empresa
+  // ancla, para EMOCIÓN) + headline rico (material para el ángulo, para UTILIDAD).
+  // Infra gratis (IBT). Acotado a K llamadas. El sesgo a ancla queda en el CÓDIGO.
+  const K = parseInt(process.env.SOURCE_ENRICH_TOP || '14', 10);
+  const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
+  const top = out.slice(0, K);
+  for(const c of top){
+    try{
+      const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id }));
+      if(prof.headcount!=null) c.headcount=prof.headcount;
+      if(prof.headRich) c.headRich=prof.headRich;
+    }catch{}
+    const warmth = c.dist===1?2 : c.dist===2?1 : 0;
+    c.score = c.rank*2 + _sizeBoost(c.headcount, tamMin)*2 + warmth;
+  }
+  top.sort((a,b)=> (b.score-a.score) || (a.dist-b.dist));
+  const final = top.concat(out.slice(K)).slice(0, 12);
+  console.log(`[SOURCE] Pool: ${out.length} reales | enriquecidos ${top.length} | devueltos ${final.length} (loc=${locId||'?'}, fn=${fnId||funcion}, tamMin=${tamMin||'-'}).`);
+  return final;
 }
 
 // FASE 1 — IA: research del cliente (web_search) + ICP + contenido de página 1.
@@ -1026,14 +1060,14 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 
 ## Cómo elegir (en este orden)
 1. Decisor real: CMO/VP/Head/Director/Gerente de la función — NO analistas ni juniors.
-2. Empresa ancla: reconocible, del tamaño/industria del ICP. Mejor marcas grandes que startups desconocidas.
+2. Empresa ANCLA con fit de ICP: usá los "empleados" que te muestro. Preferí empresas reconocibles y del tamaño que le sirve al cliente. Una marca grande y conocida emociona al prospecto; una startup de 8 personas desconocida, no. Pero si el ICP del cliente son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real, no el tamaño por el tamaño.
 3. Diversidad: no repitas la misma empresa salvo que valga mucho.
 4. Grado más cálido primero (1er/2do).
 
 ## Reglas DURAS
 - Elegí SOLO ids que estén en la lista. PROHIBIDO inventar una persona, un id, un cargo o una empresa.
-- El ángulo (3-4 oraciones) es ESPECÍFICO de esa persona/empresa: usá su cargo y empresa REALES + lo que ofrece el cliente. Prohibido inventar datos de su empresa que no estén en el cargo. Cada ángulo 100% único — nada de frases genéricas repetidas.
-- El hook: UNA sola oración de apertura entre comillas.
+- El ángulo (3-4 oraciones) es ESPECÍFICO de esa persona/empresa: usá su cargo, empresa y —si está— el "perfil" REALES + lo que ofrece el cliente. Cuanto más uses su propuesta de valor/contexto real del perfil, mejor el ángulo. Prohibido inventar datos que no estén en lo que te paso. Cada ángulo 100% único — nada de frases genéricas repetidas.
+- El hook: UNA sola oración de apertura entre comillas, lista para copiar y mandar.
 
 ## Output — SOLO JSON (sin texto alrededor)
 { "seleccion": [ {"id":"<id EXACTO de la lista>", "angulo":"...", "hook":"\\"...\\""} ] }
@@ -1041,7 +1075,11 @@ EXACTAMENTE 6 elementos. NADA fuera del objeto JSON.`;
 
 async function runSelectWrite({ cliente, plan, pool, fixes }){
   currentStage = 'gen';
-  const lista = pool.map((p,i)=>`${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'} | grado ${p.dist===9?'fuera de red':p.dist+'°'}`).join('\n');
+  const lista = pool.map((p,i)=>{
+    const tam = p.headcount!=null ? ` (~${p.headcount} empleados)` : '';
+    const ctx = (p.headRich && p.headRich!==p.head) ? ` | perfil: ${p.headRich}` : '';
+    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}`;
+  }).join('\n');
   const ctx = `Cliente: ${(cliente&&cliente.empresa)||plan.h1_company||''}. Qué ofrece / proof: ${String(plan.proof||plan.lead||'').slice(0,500)}. Función del comprador: ${(plan._plan&&plan._plan.funcion)||''}.`;
   const fixBloque = (fixes&&fixes.length) ? `\n\nCORRECCIONES del juez (aplicalas re-eligiendo o reescribiendo):\n- ${fixes.join('\n- ')}` : '';
   const messages = [{ role:'user', content:`${ctx}\n\nLISTA REAL DE CANDIDATOS (elegí 6 de ACÁ, por id EXACTO):\n${lista}${fixBloque}\n\nDevolvé SOLO el JSON {"seleccion":[...]} con EXACTAMENTE 6.` }];
