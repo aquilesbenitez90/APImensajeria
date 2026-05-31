@@ -984,12 +984,25 @@ function _sizeBoost(hc, tamMin){
   return hc>=1000?3 : hc>=200?2 : hc>=50?1 : 0;
 }
 
+// El país, la función y los títulos del comprador SALEN del cliente (los define el
+// PLAN según qué hace la empresa). Si el PLAN no los definió, NO adivinamos —
+// "marketing en Argentina" para un cliente que no tiene nada que ver es peor que no
+// mandar nada. Abortamos el reporte con un error claro.
+function validarPlan(plan){
+  const p = (plan && plan._plan) || {};
+  const faltan = [];
+  if(!p.funcion   || !String(p.funcion).trim())   faltan.push('funcion');
+  if(!p.geografia || !String(p.geografia).trim()) faltan.push('geografia');
+  if(!Array.isArray(p.titulos_objetivo) || !p.titulos_objetivo.length) faltan.push('titulos_objetivo');
+  if(faltan.length) throw new Error(`PLAN incompleto: falta ${faltan.join(', ')} — no se genera el reporte (no se asume función ni país por defecto).`);
+  return plan;
+}
+
 async function sourceCandidates(plan, cliente){
-  const icp = (plan && plan._plan) || {};
-  const geografia = icp.geografia || 'Argentina';
-  const funcion   = icp.funcion   || 'marketing';
-  if(!Array.isArray(icp.titulos_objetivo) || !icp.titulos_objetivo.length)
-    console.warn('[SOURCE] ⚠️ El PLAN no definió titulos_objetivo — el ranking por fit cae a seniority. Revisar el prompt PLAN.');
+  validarPlan(plan);                 // sin función/país/títulos NO seguimos
+  const icp = plan._plan;
+  const geografia = icp.geografia;   // del cliente, no hay default
+  const funcion   = icp.funcion;     // del cliente, no hay default
   let locId=null, fnId=null;
   try{ locId=(String(await callMCP('resolve_sales_navigator_id',{type:'LOCATION',keywords:geografia,limit:1})).match(/id="?([0-9]+)"?/)||[])[1]||null; }catch{}
   try{ fnId =(String(await callMCP('resolve_sales_navigator_id',{type:'FUNCTION',keywords:funcion,limit:3})).match(/id="?([A-Za-z0-9_]+)"?/)||[])[1]||null; }catch{}
