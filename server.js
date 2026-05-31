@@ -385,122 +385,8 @@ Footer:
 - EXACTAMENTE 4 divs .page`;
 
 // ===========================================================================
-// PROMPT DE GENERACIÓN — devuelve SOLO JSON (la IA YA NO arma HTML).
-// El diseño vive en template.html; el HTML lo arma render.js. Esto baja el
-// output del gen de ~12k tokens a ~1-2k. Conserva TODAS las reglas de
-// veracidad del skill (research web, anti-invención de cargo/empresa, grado
-// real, anti-patterns). Solo se eliminó el design system y el HTML.
+// JUEZ de calidad — evalúa el HTML renderizado y devuelve veredicto + fixes.
 // ===========================================================================
-const SYSTEM_PROMPT_JSON = `# IBT GTM Report — generador de DATOS (JSON)
-
-Generás los DATOS de un reporte GTM que IBT manda a prospectos: identificás 6 decisores reales en LinkedIn que encajan con el ICP del cliente. NO generás HTML, CSS ni diseño — devolvés EXCLUSIVAMENTE un objeto JSON con los datos. El sistema arma el HTML con una plantilla fija y el PDF con Puppeteer.
-
----
-
-## Workflow
-
-### 1. Research REAL de la empresa con web_search (OBLIGATORIO)
-
-REGLA CRÍTICA: PROHIBIDO inventar o asumir datos de la empresa. TODOS los datos del overview (año de fundación, tracción, modelo de negocio, stage, número de clientes/productos, funding) deben salir de búsquedas reales con la tool web_search.
-
-Pasos obligatorios:
-- Buscar el nombre de la empresa + "fundada" o "founded" → confirmar año de fundación
-- Buscar el nombre + "funding" o "seed" o "Series A" → confirmar stage real
-- Buscar el nombre + "crunchbase" o "linkedin" → confirmar modelo de negocio
-- Buscar noticias recientes (último año) sobre la empresa
-
-PROHIBIDO escribir el reporte sin tener al menos 3 fuentes web verificables sobre la empresa.
-
-Si la información es ambigua o no se puede confirmar:
-- Usar fórmulas conservadoras ("startup en etapa temprana", "company builder")
-- NO inventar números específicos (NUNCA "+30 productos", "Series A", "$X ARR" si no está confirmado)
-- En duda → usar formulación genérica verificada en lugar de número específico inventado
-
-### 2. Definir el ICP del cliente
-A partir del research VERIFICADO (no asumido): tamaño de empresa target, rol del decisor, industrias con fit claro según lo que la empresa REALMENTE hace, país(es) de outreach.
-REGLA: el ICP debe alinearse con el modelo de negocio REAL verificado.
-REGLA DE COHERENCIA: las 6 cuentas son PROSPECTS — NUNCA incluir como cuenta target a una empresa que ya es proof point o cliente conocido del producto.
-
-### 3. Buscar 6 perfiles REALES en Sales Navigator
-
-PROHIBIDO inventar URLs, nombres o slugs de LinkedIn. TODOS los perfiles DEBEN salir de la búsqueda real en Sales Navigator.
-
-Paso 3.1: La FUNCIÓN del decisor sale del ICP del cliente — lo que el cliente VENDE define a quién le vende (marketing, ventas, CX, finanzas, IT, RRHH, operaciones, etc.). NO asumas "marketing": derivala del "Rol del decisor" del ICP. Resolvé los IDs con resolve_sales_navigator_id (LOCATION, SALES_INDUSTRY, SENIORITY, FUNCTION).
-
-Paso 3.2: SOBRE-buscá y elegí de una lista REAL (no inventes para "llegar a 6"). Con search_sales_navigator_filtered (category people, degreeOfConnection ["2nd"]) traé MÁS de 6 candidatos reales (profilesLimit 20-25) y DESPUÉS quedate con los 6 mejores. Estrategia para NO obtener listas vacías (la causa #1 de que el modelo manotee):
-- Empezá AMPLIO: function + location + seniority (Director/VP/CxO). NO apiles 4-5 industrias juntas — eso devuelve vacío.
-- Si vuelve poco o vacío: primero sacá la industria, después bajá el seniority, después probá keywords del rol (español/inglés). Para una empresa ancla puntual: company (resuelto) + keywords del rol.
-- Elegí los 6 por: seniority decisora (no analistas junior), empresa ancla reconocible del ICP, y fit con el pain del cliente.
-
-Paso 3.3: ANTI-INVENCIÓN de cargo y empresa (CRÍTICO)
-- El cargo y la empresa de cada card se toman TEXTUALMENTE del headline del perfil. PROHIBIDO inventar/deducir/"completar" empresa o cargo que no aparezca literal en el headline.
-- Headline limpio "Rol @ Empresa" → usar ese rol y empresa.
-- Headline sucio (español con "en", pipes "|" o "||", sin "@" claro) → NO adivinar; mostrar el headline tal cual o solo el primer rol. NUNCA fabricar startup ni título "Founder/CEO" para que encaje con el ICP.
-- Si no podés determinar con certeza cargo+empresa → DESCARTAR ese perfil y elegir otro con headline claro.
-- PROHIBIDO forzar a una persona dentro del ICP distorsionando su cargo. Mejor un perfil real que encaje que uno distorsionado.
-
-Paso 3.4: Grado de conexión REAL
-- PROHIBIDO hardcodear "2do grado" en todas las cards. Usar el grado REAL que devuelve la búsqueda (1er/2do/3er). Si no está claro, usar el valor real o dejar el campo vacío.
-
-Paso 3.5: Link de cada perfil — el "urn" es el IDENTIFICADOR REAL que devuelve la búsqueda
-- "urn" = el id opaco que viene en CADA resultado del search (formato ACwAA...). Ese es el href real y SIEMPRE resuelve a la persona correcta. COPIALO TAL CUAL del resultado del search. PROHIBIDO construir un slug "nombre-apellido": eso da 404 o cae en otra persona.
-- "slug" = texto visible lindo (ej: nombre-apellido); es SOLO cosmético, no se usa para el link.
-- Si no tenés el id real de una persona, NO la incluyas — elegí otra que sí haya salido del search.
-
-### 4. Qué llenar (contenido) — cantidades EXACTAS
-- ribbon: 5 chips de datos VERIFICADOS (Vertical, País, Fundada, Stage/Tracción, Modelo).
-- stats: 4 (sugerido: año fundación · "6"/"Cuentas priorizadas" · métrica clave VERIFICADA · meta comercial).
-- icp: 4 tarjetas (Rol del decisor, Tamaño de empresa, Geografía, Vertical/industria).
-- context: 3 bullets de mercado con datos verificados.
-- apertura: 3 hooks de apertura para LinkedIn.
-- prioridades: 4 chips de prioridad de abordaje.
-- cards: 6 decisores (ver schema). El ángulo (3-4 oraciones) y el hook (1 oración entre comillas) se basan en datos REALES del headline/perfil — PROHIBIDO inventar contexto de la empresa de la persona si no lo verificaste. Cada card 100% única.
-
-## Anti-patterns
-- Datos inventados de la empresa → SIEMPRE web_search antes del overview.
-- Cargo/empresa inventado de un decisor → TEXTUAL del headline; si está sucio, no adivinar; si no se entiende, descartar.
-- Forzar a una persona dentro del ICP distorsionando su cargo → descartar y elegir otra.
-- "2do grado" hardcodeado → usar el grado REAL.
-- Año de fundación, stage o métricas asumidas sin búsqueda web → PROHIBIDO.
-- Empresa proof point/cliente del producto como cuenta target → excluirla.
-- Copy-paste de ángulos entre cards. Datos rotos: [INSERT], TODO, undefined, lorem ipsum.
-
----
-
-## Output FINAL — SOLO JSON
-Devolvé EXCLUSIVAMENTE un objeto JSON válido, sin texto antes ni después, sin markdown, sin comillas triples. Estructura EXACTA (respetá los nombres de campo y las cantidades):
-
-{
-  "empresa": "Nombre de la empresa cliente",
-  "fecha": "Mes Año (ej: Mayo 2025)",
-  "eyebrow": "Reporte de prospección GTM · ... (línea corta uppercase)",
-  "h1_pre": "6 [tipo de cuenta] para escalar",
-  "h1_company": "Nombre Empresa (va resaltado)",
-  "h1_post": "en [País]",
-  "lead": "2-3 oraciones que anclan el proof point REAL verificado del cliente.",
-  "proof": "El proof point / origen del cliente (texto del box PROOF).",
-  "ribbon": [ {"label":"Vertical","value":"..."}, {"label":"País","value":"..."}, {"label":"Fundada","value":"..."}, {"label":"Stage","value":"..."}, {"label":"Modelo","value":"..."} ],
-  "stats": [ {"num":"2023","label":"Año fundación"}, {"num":"6","label":"Cuentas priorizadas"}, {"num":"...","label":"..."}, {"num":"...","label":"..."} ],
-  "icp": [ {"title":"Rol del decisor","desc":"..."}, {"title":"Tamaño de empresa","desc":"..."}, {"title":"Geografía","desc":"..."}, {"title":"Vertical / industria","desc":"..."} ],
-  "context": [ "bullet 1", "bullet 2", "bullet 3" ],
-  "apertura": [ "hook 1", "hook 2", "hook 3" ],
-  "prioridades": [ "Alta — ...", "Media — ...", "...", "..." ],
-  "cards": [
-    {
-      "empresa": "Empresa TEXTUAL del headline",
-      "nombre": "Nombre completo del decisor",
-      "cargo": "Rol @ Empresa TEXTUAL del headline",
-      "slug": "publicIdOrUrl (texto visible del link)",
-      "urn": "publicIdOrUrl o member id ACwAA... (href)",
-      "ubicacion": "Ciudad / País real",
-      "grado": "2do grado (REAL: 1er/2do/3er)",
-      "angulo": "3-4 oraciones específicas basadas en el cargo/empresa REAL.",
-      "hook": "\\"Una oración de apertura entre comillas.\\""
-    }
-  ]
-}
-
-CANTIDADES EXACTAS: ribbon 5, stats 4, icp 4, context 3, apertura 3, prioridades 4, cards 6. Ni más ni menos. NADA fuera del objeto JSON.`;
 
 const SYSTEM_PROMPT_JUDGE = `Sos un juez de control de calidad EXTREMADAMENTE ESTRICTO para reportes GTM de IBT.
 
@@ -668,95 +554,6 @@ function parseReporteJSON(raw) {
   return JSON.parse(m[0]);
 }
 
-async function runClaude({ email, dominio, empresa, nombre, tools, cliente }) {
-  currentStage = 'gen';
-  const anthropicTools = [
-    ...tools.map(t => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.inputSchema
-    })),
-    WEB_SEARCH_TOOL
-  ];
-
-  const bloqueCliente = (cliente && cliente.anclado)
-    ? `\n\nDATOS VERIFICADOS DEL CLIENTE (de IBT/LinkedIn — NO inventes otra empresa, usá ESTOS):\n- Empresa real: ${cliente.empresa}\n- Tamaño: ${cliente.headcount ?? 'desconocido'} empleados${cliente.tier ? ` (tier: ${cliente.tier})` : ''}\nUsá web_search SOLO para enriquecer qué hace/vende esta empresa, NO para re-identificarla.`
-    : '';
-
-  const messages = [{
-    role: 'user',
-    content: `Generá los DATOS del reporte GTM para este prospecto:\n- Nombre: ${nombre}\n- Empresa: ${empresa}\n- Email: ${email}\n- Dominio: ${dominio}${bloqueCliente}\n\nSeguí el workflow completo. PRIMERO hacé research REAL con web_search sobre la empresa (fundación, modelo, stage, tracción) — PROHIBIDO inventar datos. Luego encontrá 6 cuentas con Sales Navigator. El cargo y empresa de cada decisor deben salir TEXTUAL del headline real — NUNCA inventes empresa/cargo para que encaje con el ICP. Devolvé SOLO el objeto JSON del schema (sin HTML, sin markdown, sin texto alrededor).`
-  }];
-
-  let mcpCallCount = 0;       // llamadas a IBT (client tools que puenteamos)
-  let webSearchCount = 0;     // búsquedas web REALES (server tool)
-  // Tope de iteraciones de tools: si el modelo "manotea" (ej: búsquedas Sales Nav
-  // que vuelven vacías y reintenta sin freno), cada vuelta es un round-trip caro
-  // re-leyendo todo el contexto. Al llegar al tope le apagamos las tools y lo
-  // forzamos a devolver el JSON con lo que tenga.
-  const MAX_TOOL_ITERS = parseInt(process.env.GEN_MAX_TOOL_ITERS || '14', 10);
-  let toolIters = 0;
-  let forzarCierre = false;
-  while (true) {
-    const data = await callClaude({
-      model: MODEL_GEN,
-      system: SYSTEM_PROMPT_JSON,
-      messages,
-      tools: forzarCierre ? [] : anthropicTools,
-      stopSequences: [],
-      maxTokens: 16000
-    });
-
-    // Conteo + log REAL de web_search (server tool). Ver contarYLoguearWebSearch.
-    webSearchCount += contarYLoguearWebSearch(data, 'GEN');
-
-    messages.push({ role: 'assistant', content: data.content });
-
-    if (data.stop_reason === 'stop_sequence' || data.stop_reason === 'end_turn') {
-      console.log(`[GEN] Generación terminada. MCP calls: ${mcpCallCount} | web_search: ${webSearchCount}`);
-      if (webSearchCount === 0) {
-        console.warn(`[GEN] WARNING: 0 búsquedas web reales. Datos de la empresa NO verificados contra internet.`);
-      }
-      return parseReporteJSON(data.content.find(b => b.type === 'text')?.text);
-    }
-
-    if (data.stop_reason === 'tool_use') {
-      const toolResults = [];
-      for (const block of data.content) {
-        // Solo procesamos client tools (IBT). Los server tools (web_search) ya
-        // los ejecutó la API y NO aparecen como bloques `tool_use`.
-        if (block.type !== 'tool_use') continue;
-        mcpCallCount++;
-        const result = await callMCP(block.name, block.input);
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: result
-        });
-      }
-      if (toolResults.length > 0) {
-        toolIters++;
-        if (toolIters >= MAX_TOOL_ITERS) {
-          // Cortamos acá: agregamos la instrucción de cierre al MISMO mensaje de
-          // tool_results (es válido mezclar tool_result + text en un user msg) y en
-          // la próxima vuelta llamamos SIN tools para obligar a emitir el JSON.
-          forzarCierre = true;
-          toolResults.push({
-            type: 'text',
-            text: `LÍMITE de búsquedas alcanzado (${MAX_TOOL_ITERS} iteraciones). NO hagas más tool calls. Con la información que YA tenés, devolvé AHORA el objeto JSON final del reporte con los mejores perfiles que hayas conseguido. Si no llegaste a 6, devolvé los que tengas.`
-          });
-          console.warn(`[GEN] Tope de ${MAX_TOOL_ITERS} iteraciones de tools alcanzado -> forzando cierre (call SIN tools).`);
-        }
-        messages.push({ role: 'user', content: toolResults });
-      } else {
-        break;
-      }
-    }
-  }
-  const lastAssistantMsg = messages.filter(m => m.role === 'assistant').pop();
-  return parseReporteJSON(lastAssistantMsg?.content?.find(b => b.type === 'text')?.text || '');
-}
-
 async function runJudge(html, pageCount) {
   currentStage = 'judge';
   console.log(`[JUDGE] Evaluando reporte (${pageCount} páginas)...`);
@@ -793,80 +590,6 @@ async function runJudge(html, pageCount) {
     console.error('[JUDGE] No se pudo parsear, aprobando por defecto:', e.message);
     return { veredicto: 'APROBADO', score: 0, fixes: [] };
   }
-}
-
-async function runFixer({ data, fixes, empresa, tools }) {
-  currentStage = 'fix';
-  console.log(`[FIX] Aplicando ${fixes.length} fixes (JSON)...`);
-  const anthropicTools = [
-    ...tools.map(t => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.inputSchema
-    })),
-    WEB_SEARCH_TOOL
-  ];
-
-  const messages = [{
-    role: 'user',
-    content: `Empresa: ${empresa}\n\nCorrecciones del juez:\n- ${fixes.join('\n- ')}\n\nDATOS actuales (JSON):\n${JSON.stringify(data)}\n\nAplicá los fixes (usando web_search o get_contact_profile si hay datos a verificar) y devolvé SOLO el objeto JSON corregido, con la misma estructura.`
-  }];
-
-  let mcpCallCount = 0;       // llamadas a IBT
-  let webSearchCount = 0;     // búsquedas web REALES (server tool)
-  // Mismo tope que el gen: el fixer también puede manotear con tools y encarecer.
-  const MAX_TOOL_ITERS = parseInt(process.env.FIX_MAX_TOOL_ITERS || '10', 10);
-  let toolIters = 0;
-  let forzarCierre = false;
-  while (true) {
-    const resp = await callClaude({
-      model: MODEL_FIX,
-      system: SYSTEM_PROMPT_FIX,
-      messages,
-      tools: forzarCierre ? [] : anthropicTools,
-      stopSequences: [],
-      maxTokens: 8000          // JSON liviano (sin base64 ni CSS) → no más timeouts del fixer
-    });
-
-    webSearchCount += contarYLoguearWebSearch(resp, 'FIX');
-
-    messages.push({ role: 'assistant', content: resp.content });
-
-    if (resp.stop_reason === 'stop_sequence' || resp.stop_reason === 'end_turn') {
-      console.log(`[FIX] Terminado. MCP calls: ${mcpCallCount} | web_search: ${webSearchCount}`);
-      return parseReporteJSON(resp.content.find(b => b.type === 'text')?.text);
-    }
-
-    if (resp.stop_reason === 'tool_use') {
-      const toolResults = [];
-      for (const block of resp.content) {
-        if (block.type !== 'tool_use') continue;
-        mcpCallCount++;
-        const result = await callMCP(block.name, block.input);
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: result
-        });
-      }
-      if (toolResults.length > 0) {
-        toolIters++;
-        if (toolIters >= MAX_TOOL_ITERS) {
-          forzarCierre = true;
-          toolResults.push({
-            type: 'text',
-            text: `LÍMITE de iteraciones del fixer alcanzado (${MAX_TOOL_ITERS}). NO hagas más tool calls. Devolvé AHORA el objeto JSON final corregido con la info que ya tenés.`
-          });
-          console.warn(`[FIX] Tope de ${MAX_TOOL_ITERS} iteraciones de tools alcanzado -> forzando cierre (call SIN tools).`);
-        }
-        messages.push({ role: 'user', content: toolResults });
-      } else {
-        break;
-      }
-    }
-  }
-  const lastAssistantMsg = messages.filter(m => m.role === 'assistant').pop();
-  return parseReporteJSON(lastAssistantMsg?.content?.find(b => b.type === 'text')?.text || '');
 }
 
 // ---------------------------------------------------------------------------
@@ -1180,21 +903,202 @@ async function resolverCliente({ profileId, dominio, empresa }) {
   return { empresa: empresa || dominio || '', dominio: dominio || '', headcount: null, tier: null, anclado: false, fuente: 'sin_anclar', confianza: 'baja' };
 }
 
+// ===========================================================================
+// PIPELINE FULL (3 fases). Principio: la IA aporta CRITERIO + REDACCIÓN; los
+// HECHOS (quién existe, su id real, su cargo) los trae el CÓDIGO desde Sales Nav.
+// La IA elige de una lista REAL -> es imposible inventar una persona o un link.
+//   Fase 1 (runPlan, IA):   research del cliente + ICP + contenido de página 1.
+//   Fase 2 (sourceCandidates, CÓDIGO): pool real de candidatos desde Sales Nav.
+//   Fase 3 (runSelectWrite, IA): elige los 6 mejores del pool + escribe ángulos.
+// ===========================================================================
+
+function _parsePeople(res){
+  return [...String(res||'').matchAll(/id=([A-Za-z0-9_\-]+)\s+"([^"]+)"\s+(.*?)\s*\(DISTANCE_(\d|OUT_OF_NETWORK)[^,)]*(?:,\s*([^)]+))?\)/g)]
+    .map(x=>({ id:x[1], name:x[2], head:(x[3]||'').trim(), dist: x[4]==='OUT_OF_NETWORK'?9:parseInt(x[4],10), loc:(x[5]||'').trim() }));
+}
+function _slugCos(n){ return _norm(n).split(' ').filter(Boolean).join('-'); }
+function _rankSenioridad(head){
+  const h=_norm(head);
+  if(/\b(cmo|cto|cfo|ciso|chro|coo|cro|ceo|chief|c level|vp|vice president|vicepresidente)\b/.test(h)) return 5;
+  if(/\b(director|directora|head|jefe|jefa)\b/.test(h)) return 4;
+  if(/\b(gerente|manager|lead|leader|lider|owner|founder|co-founder)\b/.test(h)) return 3;
+  if(/\b(analyst|analista|trainee|intern|becari|pasant|junior|assistant|asistente|associate)\b/.test(h)) return 0;
+  return 2;
+}
+
+// FASE 2 — determinística, SIN IA. Pool real de candidatos desde Sales Nav.
+// Búsqueda AMPLIA (país + función, sin restringir grado ni apilar industrias): así
+// puebla de verdad (la restricción "2do grado" + industrias apiladas devolvía vacío).
+async function sourceCandidates(plan, cliente){
+  const icp = (plan && plan._plan) || {};
+  const geografia = icp.geografia || 'Argentina';
+  const funcion   = icp.funcion   || 'marketing';
+  let locId=null, fnId=null;
+  try{ locId=(String(await callMCP('resolve_sales_navigator_id',{type:'LOCATION',keywords:geografia,limit:1})).match(/id="?([0-9]+)"?/)||[])[1]||null; }catch{}
+  try{ fnId =(String(await callMCP('resolve_sales_navigator_id',{type:'FUNCTION',keywords:funcion,limit:3})).match(/id="?([A-Za-z0-9_]+)"?/)||[])[1]||null; }catch{}
+
+  const f1={ category:'people', profilesLimit:50 };
+  if(locId) f1.location={ include:[locId] };
+  if(fnId)  f1.function={ include:[fnId] }; else f1.keywords=funcion;
+  let pool=[];
+  try{ pool=_parsePeople(await callMCP('search_sales_navigator_filtered', f1)); }catch{}
+  // Segunda pasada por keywords si vino flojo.
+  if(pool.length < 10){
+    const f2={ category:'people', profilesLimit:50, keywords:funcion };
+    if(locId) f2.location={ include:[locId] };
+    try{ pool=pool.concat(_parsePeople(await callMCP('search_sales_navigator_filtered', f2))); }catch{}
+  }
+  // Dedup + sacar juniors puros + no targetear al propio cliente.
+  const vistos=new Set(); const out=[]; const empCliente=_norm((cliente&&cliente.empresa)||'');
+  for(const p of pool){
+    if(!p.id || vistos.has(p.id)) continue; vistos.add(p.id);
+    if(_rankSenioridad(p.head) < 1) continue;
+    const emp=_empresaDeHeadline(p.head)||'';
+    if(empCliente && emp && _mismaEmpresa(empCliente, emp)) continue;
+    out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, rank:_rankSenioridad(p.head) });
+  }
+  out.sort((a,b)=> (b.rank-a.rank) || (a.dist-b.dist));   // decisores y grado más cálido primero
+  console.log(`[SOURCE] Pool real: ${out.length} candidatos (loc=${locId||'?'}, fn=${fnId||funcion}).`);
+  return out.slice(0, 40);
+}
+
+// FASE 1 — IA: research del cliente (web_search) + ICP + contenido de página 1.
+const SYSTEM_PROMPT_PLAN = `# IBT GTM — Fase PLAN (research + ICP + página 1)
+
+Generás la PARTE 1 de un reporte de prospección GTM que IBT manda a un prospecto. NO elegís personas todavía: eso lo hace el sistema. Vos investigás al cliente y definís a QUIÉN hay que buscar.
+
+## Qué hacer
+1. Research REAL del cliente con web_search: qué hace/vende, modelo de negocio, país, año de fundación, stage, tracción/proof point. PROHIBIDO inventar — si no lo verificás, no lo afirmes.
+2. Definí el ICP del COMPRADOR del cliente: la función/área del decisor depende de lo que el cliente VENDE (una agencia de marketing vende a marketing; una de ciberseguridad a un CISO; una fintech B2B a finanzas). Pensá a quién le compra el producto.
+3. Escribí TODO el contenido de página 1 (ribbon, stats, icp, contexto, aperturas, prioridades, lead, proof, h1).
+
+## Reglas
+- "fecha" = EXACTAMENTE la fecha de hoy que te paso en el mensaje (no inventes otra).
+- Datos de mercado (context): solo si salen de web_search; NO inventes porcentajes redondos.
+- El ICP card "Rol del decisor" y el bloque _plan.funcion deben describir al MISMO comprador.
+
+## Output — SOLO JSON (sin texto ni markdown alrededor)
+{
+  "fecha": "Mes Año (la de hoy)",
+  "eyebrow": "Reporte de prospección GTM · ... (uppercase corto)",
+  "h1_pre": "6 [tipo de cuenta] para escalar",
+  "h1_company": "Nombre del cliente (resaltado)",
+  "h1_post": "en [País]",
+  "lead": "2-3 oraciones que anclan el proof point REAL del cliente.",
+  "proof": "El proof point / origen del cliente (texto del box PROOF).",
+  "ribbon": [ {"label":"Vertical","value":"..."}, {"label":"País","value":"..."}, {"label":"Fundada","value":"..."}, {"label":"Stage","value":"..."}, {"label":"Modelo","value":"..."} ],
+  "stats": [ {"num":"...","label":"..."}, {"num":"6","label":"Cuentas priorizadas"}, {"num":"...","label":"..."}, {"num":"...","label":"..."} ],
+  "icp": [ {"title":"Rol del decisor","desc":"..."}, {"title":"Tamaño de empresa","desc":"..."}, {"title":"Geografía","desc":"..."}, {"title":"Vertical / industria","desc":"..."} ],
+  "context": [ "bullet 1", "bullet 2", "bullet 3" ],
+  "apertura": [ "hook 1", "hook 2", "hook 3" ],
+  "prioridades": [ "Alta — ...", "Media — ...", "...", "..." ],
+  "_plan": { "funcion": "función del comprador en 1-2 palabras (ej: marketing, ventas, customer experience, finanzas, recursos humanos)", "geografia": "País objetivo (ej: Argentina)", "industrias": ["industrias con fit"], "tamano_min": 0 }
+}
+CANTIDADES EXACTAS: ribbon 5, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`;
+
+async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
+  currentStage = 'gen';
+  const bloqueCliente = (cliente && cliente.anclado)
+    ? `\n\nDATOS VERIFICADOS DEL CLIENTE (NO inventes otra empresa, usá ESTOS): Empresa: ${cliente.empresa}; Tamaño: ${cliente.headcount ?? '?'} empleados${cliente.tier ? ` (tier ${cliente.tier})` : ''}.`
+    : '';
+  const messages = [{ role:'user', content:`Cliente a analizar:\n- Empresa: ${empresa}\n- Dominio: ${dominio}\n- Email contacto: ${email}\n- Nombre contacto: ${nombre}${bloqueCliente}\n\nFecha de hoy (usala en "fecha"): ${fechaHoy}\n\nInvestigá la empresa con web_search y devolvé SOLO el JSON del schema.` }];
+  const MAX = parseInt(process.env.PLAN_MAX_TOOL_ITERS || '8', 10);
+  let it=0, cerrar=false;
+  while(true){
+    const data = await callClaude({ model:MODEL_GEN, system:SYSTEM_PROMPT_PLAN, messages, tools: cerrar?[]:[WEB_SEARCH_TOOL], maxTokens:8000 });
+    contarYLoguearWebSearch(data, 'PLAN');
+    messages.push({ role:'assistant', content:data.content });
+    if(data.stop_reason==='end_turn' || data.stop_reason==='stop_sequence')
+      return parseReporteJSON(data.content.find(b=>b.type==='text')?.text);
+    if(data.stop_reason==='tool_use'){
+      const tr=[]; for(const b of data.content){ if(b.type!=='tool_use') continue; tr.push({type:'tool_result',tool_use_id:b.id,content:await callMCP(b.name,b.input)}); }
+      it++; if(it>=MAX) cerrar=true;
+      if(tr.length){ if(cerrar) tr.push({type:'text',text:'Suficiente research. Devolvé YA el JSON.'}); messages.push({role:'user',content:tr}); }
+      else return parseReporteJSON(messages.filter(m=>m.role==='assistant').pop()?.content?.find(b=>b.type==='text')?.text||'');
+    }
+  }
+}
+
+// FASE 3 — IA: elige los 6 MEJORES del pool REAL + escribe ángulo/hook. Sin tools.
+const SYSTEM_PROMPT_SELECT = `# IBT GTM — Fase SELECT (elegir 6 + escribir)
+
+Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo textual, empresa y grado de conexión) y el contexto del cliente. Elegís los 6 MEJORES decisores y escribís, para cada uno, un ángulo y un hook.
+
+## Cómo elegir (en este orden)
+1. Decisor real: CMO/VP/Head/Director/Gerente de la función — NO analistas ni juniors.
+2. Empresa ancla: reconocible, del tamaño/industria del ICP. Mejor marcas grandes que startups desconocidas.
+3. Diversidad: no repitas la misma empresa salvo que valga mucho.
+4. Grado más cálido primero (1er/2do).
+
+## Reglas DURAS
+- Elegí SOLO ids que estén en la lista. PROHIBIDO inventar una persona, un id, un cargo o una empresa.
+- El ángulo (3-4 oraciones) es ESPECÍFICO de esa persona/empresa: usá su cargo y empresa REALES + lo que ofrece el cliente. Prohibido inventar datos de su empresa que no estén en el cargo. Cada ángulo 100% único — nada de frases genéricas repetidas.
+- El hook: UNA sola oración de apertura entre comillas.
+
+## Output — SOLO JSON (sin texto alrededor)
+{ "seleccion": [ {"id":"<id EXACTO de la lista>", "angulo":"...", "hook":"\\"...\\""} ] }
+EXACTAMENTE 6 elementos. NADA fuera del objeto JSON.`;
+
+async function runSelectWrite({ cliente, plan, pool, fixes }){
+  currentStage = 'gen';
+  const lista = pool.map((p,i)=>`${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'} | grado ${p.dist===9?'fuera de red':p.dist+'°'}`).join('\n');
+  const ctx = `Cliente: ${(cliente&&cliente.empresa)||plan.h1_company||''}. Qué ofrece / proof: ${String(plan.proof||plan.lead||'').slice(0,500)}. Función del comprador: ${(plan._plan&&plan._plan.funcion)||''}.`;
+  const fixBloque = (fixes&&fixes.length) ? `\n\nCORRECCIONES del juez (aplicalas re-eligiendo o reescribiendo):\n- ${fixes.join('\n- ')}` : '';
+  const messages = [{ role:'user', content:`${ctx}\n\nLISTA REAL DE CANDIDATOS (elegí 6 de ACÁ, por id EXACTO):\n${lista}${fixBloque}\n\nDevolvé SOLO el JSON {"seleccion":[...]} con EXACTAMENTE 6.` }];
+  const data = await callClaude({ model:MODEL_GEN, system:SYSTEM_PROMPT_SELECT, messages, tools:[], maxTokens:6000 });
+  const j = parseReporteJSON(data.content.find(b=>b.type==='text')?.text);
+  return Array.isArray(j && j.seleccion) ? j.seleccion : [];
+}
+
+// Ensamblado: los HECHOS de cada card salen del pool (código); la IA solo aportó
+// el id elegido + ángulo + hook. Imposible que una card apunte a alguien inexistente.
+function armarReporte(plan, seleccion, pool){
+  const byId = new Map(pool.map(p=>[p.id, p]));
+  const cards=[];
+  for(const s of (seleccion||[])){
+    const p = byId.get(s.id);
+    if(!p) { console.warn(`[SELECT] id fuera del pool, ignorado: ${s.id}`); continue; }
+    const cargoLimpio = String(p.head||'').split('@')[0].split('|')[0].trim() || _headlineLimpio(p.head) || p.head;
+    cards.push({
+      empresa: p.empresa || _empresaDeHeadline(p.head) || '',
+      nombre: p.name,
+      cargo: cargoLimpio,
+      urn: p.id, slug: _slugCos(p.name),
+      ubicacion: p.loc || ((plan._plan && plan._plan.geografia) || ''),
+      grado: _degOrdinal(p.dist===9?3:p.dist, '2do') + ' grado',
+      angulo: s.angulo || '', hook: s.hook || ''
+    });
+  }
+  const { _plan, ...base } = plan;
+  return { ...base, cards };
+}
+
+// Fecha real del server (arregla la fecha "stale" del header).
+function _fechaHoy(){
+  const meses=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+  const d=new Date(); return `${meses[d.getMonth()]} ${d.getFullYear()}`;
+}
+
 async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
   try {
     console.log(`\n========== Job ${jobId} - Inicio ==========`);
     console.log(`Empresa: ${empresa} | Email: ${email} | Dominio: ${dominio} | profileId: ${profileId ?? '-'}`);
     resetTokenStats();
 
-    const tools = await listMCPTools();
-
     // Anclar la identidad del cliente ANTES de generar (perfil del chat -> empresa real + tamaño)
     const cliente = await resolverCliente({ profileId, dominio, empresa });
     const empresaFinal = cliente.empresa || empresa;
 
-    let data = await runClaude({ email, dominio, empresa: empresaFinal, nombre, tools, cliente });
+    // FASE 1: research del cliente + ICP + página 1 (IA, 1 call con web_search)
+    const fechaHoy = _fechaHoy();
+    const plan = await runPlan({ empresa: empresaFinal, dominio, email, nombre, cliente, fechaHoy });
+    // FASE 2: pool REAL de candidatos desde Sales Nav (código, sin IA)
+    const pool = await sourceCandidates(plan, cliente);
+    // FASE 3: la IA elige 6 del pool real + escribe ángulos (1 call, sin tools)
+    let seleccion = await runSelectWrite({ cliente, plan, pool });
+    let data = armarReporte(plan, seleccion, pool);
 
-    // GATE data-based (post-gen, antes del juez): verifica/corrige URN sobre el JSON
+    // GATE data-based (red de seguridad: las cards ya salen del pool con id real)
     let linkCheck = await verificarLinksData(data);
     data = linkCheck.data;
     if (linkCheck.corregidos.length) console.log(`[LINKS] ${linkCheck.corregidos.length} link(s) corregido(s)`);
@@ -1211,8 +1115,9 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
     if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
       console.log(`[Job ${jobId}] Juez rechazó ${judgeResult.score}/8 — aplicando fixes...`);
       try {
-        const fixedData = await runFixer({ data, fixes: judgeResult.fixes, empresa: empresaFinal, tools });
-        if (fixedData && Array.isArray(fixedData.cards)) {
+        seleccion = await runSelectWrite({ cliente, plan, pool, fixes: judgeResult.fixes });
+        const fixedData = armarReporte(plan, seleccion, pool);
+        if (fixedData && Array.isArray(fixedData.cards) && fixedData.cards.length) {
           data = fixedData;
 
           // GATE de links otra vez sobre los datos corregidos
@@ -1318,12 +1223,15 @@ app.post('/generar-reporte', async (req, res) => {
 
   try {
     resetTokenStats();
-    const tools = await listMCPTools();
     const cliente = await resolverCliente({ profileId, dominio, empresa: empresa || dominio });
     const empresaFinal = cliente.empresa || empresa || dominio;
-    let data = await runClaude({ email, dominio, empresa: empresaFinal, nombre: nombre || '', tools, cliente });
+    const fechaHoy = _fechaHoy();
+    const plan = await runPlan({ empresa: empresaFinal, dominio, email, nombre: nombre || '', cliente, fechaHoy });
+    const pool = await sourceCandidates(plan, cliente);
+    let seleccion = await runSelectWrite({ cliente, plan, pool });
+    let data = armarReporte(plan, seleccion, pool);
 
-    // GATE data-based (post-gen, antes del juez)
+    // GATE data-based (red de seguridad)
     let linkCheck = await verificarLinksData(data);
     data = linkCheck.data;
     if (linkCheck.corregidos.length) console.log(`[LINKS] ${linkCheck.corregidos.length} link(s) corregido(s)`);
@@ -1338,8 +1246,9 @@ app.post('/generar-reporte', async (req, res) => {
 
     if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
       try {
-        const fixedData = await runFixer({ data, fixes: judgeResult.fixes, empresa: empresaFinal, tools });
-        if (fixedData && Array.isArray(fixedData.cards)) {
+        seleccion = await runSelectWrite({ cliente, plan, pool, fixes: judgeResult.fixes });
+        const fixedData = armarReporte(plan, seleccion, pool);
+        if (fixedData && Array.isArray(fixedData.cards) && fixedData.cards.length) {
           data = fixedData;
           linkCheck = await verificarLinksData(data);
           data = linkCheck.data;
