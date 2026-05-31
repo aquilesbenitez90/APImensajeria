@@ -546,12 +546,34 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
 }
 
 // Extrae el objeto JSON que devuelve el gen (tolera fences/markdown y texto suelto).
+// Extrae el objeto JSON por balance de llaves, respetando strings/escapes.
+// Así ignora cualquier prosa/markdown que el modelo agregue DESPUÉS del objeto
+// (ej: "*Nota: ...") que rompía el JSON.parse.
+function _extraerJSON(t){
+  const i = t.indexOf('{'); if(i<0) return null;
+  let depth=0, inStr=false, esc=false;
+  for(let j=i;j<t.length;j++){
+    const c=t[j];
+    if(inStr){ if(esc) esc=false; else if(c==='\\') esc=true; else if(c==='"') inStr=false; continue; }
+    if(c==='"') inStr=true; else if(c==='{') depth++; else if(c==='}'){ depth--; if(depth===0) return t.slice(i,j+1); }
+  }
+  return t.slice(i);
+}
 function parseReporteJSON(raw) {
   if (!raw || !raw.trim()) throw new Error('El generador devolvió vacío (sin JSON)');
   const t = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
-  const m = t.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error('El generador no devolvió un JSON parseable');
-  return JSON.parse(m[0]);
+  const block = _extraerJSON(t);
+  if (!block) throw new Error('El generador no devolvió un JSON parseable');
+  // Intentos en capas: crudo -> sin markdown bold -> sin comentarios -> sin trailing commas.
+  const intentos = [
+    block,
+    block.replace(/\*\*/g, ''),
+    block.replace(/\*\*/g, '').replace(/\/\*[\s\S]*?\*\//g, ''),
+    block.replace(/\*\*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/,\s*([}\]])/g, '$1')
+  ];
+  let lastErr;
+  for (const cand of intentos) { try { return JSON.parse(cand); } catch (e) { lastErr = e; } }
+  throw new Error('JSON inválido tras limpieza: ' + (lastErr && lastErr.message));
 }
 
 async function runJudge(html, pageCount) {
@@ -1059,15 +1081,19 @@ const SYSTEM_PROMPT_SELECT = `# IBT GTM — Fase SELECT (elegir 6 + escribir)
 Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo textual, empresa y grado de conexión) y el contexto del cliente. Elegís los 6 MEJORES decisores y escribís, para cada uno, un ángulo y un hook.
 
 ## Cómo elegir (en este orden)
-1. Decisor real: CMO/VP/Head/Director/Gerente de la función — NO analistas ni juniors.
-2. Empresa ANCLA con fit de ICP: usá los "empleados" que te muestro. Preferí empresas reconocibles y del tamaño que le sirve al cliente. Una marca grande y conocida emociona al prospecto; una startup de 8 personas desconocida, no. Pero si el ICP del cliente son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real, no el tamaño por el tamaño.
-3. Diversidad: no repitas la misma empresa salvo que valga mucho.
-4. Grado más cálido primero (1er/2do).
+1. FIT de función: el cargo tiene que ser CLARAMENTE del rol que compra lo del cliente (ej: si la función es marketing → CMO/VP/Head/Director/Gerente de Marketing o Growth). Un "CEO" o "Dueño" de una empresa chica puede servir porque ahí decide marketing; pero un C-level de un rubro que NO tiene que ver (ej: un CEO inmobiliario en una búsqueda de marketing) NO va, aunque sea senior. Ante la duda de fit, descartalo.
+2. Decisor real: nada de analistas, trainees ni juniors.
+3. Empresa ANCLA con fit de ICP: usá los "empleados" que te muestro. Preferí empresas reconocibles y del tamaño que le sirve al cliente. Una marca grande y conocida emociona al prospecto; una startup de 8 personas desconocida, no. Pero si el ICP del cliente son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real, no el tamaño por el tamaño.
+4. Coherencia / credibilidad: si una combinación cargo+empresa+ubicación se ve rara o confusa (nombres que no cierran con la geografía, datos contradictorios), no la elijas — genera desconfianza en el prospecto.
+5. Diversidad: no repitas la misma empresa salvo que valga mucho.
+6. Grado más cálido primero (1er/2do).
 
 ## Reglas DURAS
 - Elegí SOLO ids que estén en la lista. PROHIBIDO inventar una persona, un id, un cargo o una empresa.
 - El ángulo (3-4 oraciones) es ESPECÍFICO de esa persona/empresa: usá su cargo, empresa y —si está— el "perfil" REALES + lo que ofrece el cliente. Cuanto más uses su propuesta de valor/contexto real del perfil, mejor el ángulo. Prohibido inventar datos que no estén en lo que te paso. Cada ángulo 100% único — nada de frases genéricas repetidas.
+- NUNCA menciones el grado de conexión (1er/2do/3er grado) en el ángulo ni en el hook. El grado lo muestra la tarjeta aparte; si lo escribís y no coincide, queda una contradicción. No hables de "conexión de 1er grado" ni nada por el estilo.
 - El hook: UNA sola oración de apertura entre comillas, lista para copiar y mandar.
+- Texto plano: NADA de markdown (sin **negritas**, sin asteriscos, sin comentarios). Solo el objeto JSON.
 
 ## Output — SOLO JSON (sin texto alrededor)
 { "seleccion": [ {"id":"<id EXACTO de la lista>", "angulo":"...", "hook":"\\"...\\""} ] }
