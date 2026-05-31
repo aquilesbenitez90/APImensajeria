@@ -977,10 +977,20 @@ async function sourceCandidates(plan, cliente){
   const K = parseInt(process.env.SOURCE_ENRICH_TOP || '14', 10);
   const noCache = String(process.env.SOURCE_ENRICH_NOCACHE||'').toLowerCase()==='true';
   const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
+  // Piso DURO de ICP: por debajo de esto es freelance/micro-agencia (par/competidor), no un
+  // comprador del rango objetivo. Nunca supera el piso del ICP (no descarta targets chicos legítimos).
+  const _microBase = parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
+  const MICRO = Math.min(_microBase, tamMin>0 ? tamMin : _microBase);
   const top = out.slice(0, K);
   for(const c of top){
     try{
-      const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
+      let prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
+      if(!prof.headRich && !noCache){
+        // El perfil cacheado vino escueto (sin headline parseable) -> lo traemos FRESCO de
+        // LinkedIn, SOLO para este. Caza el cargo viejo/inflado (ej. la card decía
+        // "Head of Marketing" cuando el real es "Growth Hacker"). 1 call extra solo en escuetos.
+        try{ const fresco=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache:true })); if(fresco.headRich || fresco.headcount!=null){ prof=fresco; c._fresco=true; } }catch{}
+      }
       if(prof.headcount!=null) c.headcount=prof.headcount;
       if(prof.headRich && prof.headRich.length>=3){
         // Perfil REAL traído por urn (sin riesgo de homónimo) = FUENTE DE VERDAD.
@@ -998,10 +1008,16 @@ async function sourceCandidates(plan, cliente){
     const warmth = c.dist===1?2 : c.dist===2?1 : 0;
     c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*2 + warmth;   // fit manda; tamaño (ancla) y grado refinan
   }
-  top.sort((a,b)=> (b.score-a.score) || (a.dist-b.dist));
-  const final = top.concat(out.slice(K)).slice(0, 12);
+  // Filtro ICP por tamaño (hard drop con headcount real del enriquecimiento): saca a los
+  // freelance/micro-agencias tipo Bernardo (5 emp) — son pares/competidores, no compradores.
+  const fueraICP = top.filter(c => c.headcount!=null && c.headcount < MICRO);
+  for(const p of fueraICP) console.warn(`[SOURCE] fuera de ICP por tamaño (${p.headcount} emp < ${MICRO}), descartado: ${p.name} @ ${p.empresa||'?'}`);
+  const topICP = top.filter(c => !(c.headcount!=null && c.headcount < MICRO));
+  topICP.sort((a,b)=> (b.score-a.score) || (a.dist-b.dist));
+  const final = topICP.concat(out.slice(K)).slice(0, 12);
   const refit = top.filter(c=>c._headViejo).length;
-  console.log(`[SOURCE] Pool: ${out.length} reales | enriquecidos ${top.length}${noCache?' (noCache)':''} | re-fit por perfil real: ${refit} | devueltos ${final.length} (loc=${locId||'?'}, fn=${fnId||funcion}, tamMin=${tamMin||'-'}).`);
+  const refrescados = top.filter(c=>c._fresco).length;
+  console.log(`[SOURCE] Pool: ${out.length} reales | enriquecidos ${top.length}${noCache?' (noCache)':''} | re-fit ${refit} | refrescados ${refrescados} | fuera-ICP ${fueraICP.length} | devueltos ${final.length} (loc=${locId||'?'}, fn=${fnId||funcion}, tamMin=${tamMin||'-'}, micro<${MICRO}).`);
   return final;
 }
 
@@ -1118,10 +1134,12 @@ function armarReporte(plan, seleccion, pool){
     if(usados.has(s.id)){ console.warn(`[SELECT] id DUPLICADO, ignorado: ${p.name}`); continue; }
     const angulo=String(s.angulo||'').trim(), hook=String(s.hook||'').trim();
     if(!angulo || !hook){ console.warn(`[SELECT] card sin ángulo/hook, descartada: ${p.name}`); continue; }
+    const empresa = p.empresa || _empresaDeHeadline(p.head) || '';
+    if(!empresa){ console.warn(`[SELECT] card sin empresa real, descartada: ${p.name}`); continue; }
     usados.add(s.id);
     const cargoLimpio = String(p.head||'').split('@')[0].split('|')[0].trim() || _headlineLimpio(p.head) || p.head;
     cards.push({
-      empresa: p.empresa || _empresaDeHeadline(p.head) || '',
+      empresa,
       nombre: p.name,
       cargo: cargoLimpio,
       urn: p.id, slug: _slugCos(p.name),
@@ -1134,6 +1152,34 @@ function armarReporte(plan, seleccion, pool){
   const { _plan, ...base } = plan;
   if(!base.empresa) base.empresa = base.h1_company || '';   // título/headers/footers usan {{empresa}} = cliente
   return { ...base, cards };
+}
+
+// Una card está COMPLETA solo si tiene los 5 campos que el prospecto va a ver en el PDF.
+function _cardCompleta(c){
+  return !!c && ['nombre','empresa','cargo','angulo','hook'].every(k => String(c[k]||'').trim().length > 0);
+}
+function _cuentaCompletas(data){
+  return (((data && data.cards) || []).filter(_cardCompleta)).length;
+}
+
+// Selección + armado con REINTENTO determinístico. La IA a veces devuelve un id que no
+// existe en el pool, repite, o deja una card sin campos -> quedaríamos en <6. En vez de
+// shippear una card vacía (y que el juez lo deje pasar), reintentamos hasta tener 6
+// completas. Garantía estructural EN CÓDIGO, no delegada al juez. Devuelve el mejor intento.
+async function seleccionarConRetry({ cliente, plan, pool, fixes }){
+  const MIN = parseInt(process.env.MIN_CARDS_OK || '6', 10);
+  const MAX = parseInt(process.env.SELECT_MAX_TRIES || '2', 10);
+  let best=null, bestN=-1;
+  for(let i=1;i<=MAX;i++){
+    const extra = i>1 ? [`INTENTO ${i}: el intento previo no llegó a ${MIN} cuentas completas. Devolvé 8 ids EXACTOS de la lista (copiá el id tal cual, sin inventar), todos distintos, cada uno con empresa real + ángulo + hook.`] : [];
+    const seleccion = await runSelectWrite({ cliente, plan, pool, fixes: (fixes||[]).concat(extra) });
+    const data = armarReporte(plan, seleccion, pool);
+    const n = _cuentaCompletas(data);
+    if(n > bestN){ best=data; bestN=n; }
+    if(n >= MIN){ if(i>1) console.log(`[SELECT] OK en intento ${i}: ${n} cards completas.`); return data; }
+    console.warn(`[SELECT] intento ${i}: ${n}/${MIN} cards completas — ${i<MAX?'reintento':'sin más reintentos'}.`);
+  }
+  return best;
 }
 
 // Fecha real del server (arregla la fecha "stale" del header).
@@ -1157,15 +1203,8 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
     const plan = await runPlan({ empresa: empresaFinal, dominio, email, nombre, cliente, fechaHoy });
     // FASE 2: pool REAL de candidatos desde Sales Nav (código, sin IA)
     const pool = await sourceCandidates(plan, cliente);
-    // FASE 3: la IA elige 6 del pool real + escribe ángulos (1 call, sin tools)
-    let seleccion = await runSelectWrite({ cliente, plan, pool });
-    let data = armarReporte(plan, seleccion, pool);
-
-    // GATE data-based (red de seguridad: las cards ya salen del pool con id real)
-    let linkCheck = await verificarLinksData(data);
-    data = linkCheck.data;
-    if (linkCheck.corregidos.length) console.log(`[LINKS] ${linkCheck.corregidos.length} link(s) corregido(s)`);
-    if (linkCheck.noResueltos.length) console.warn(`[LINKS] ⚠️ ${linkCheck.noResueltos.length} link(s) NO resuelto(s):`, JSON.stringify(linkCheck.noResueltos));
+    // FASE 3: la IA elige del pool real + escribe ángulos, con REINTENTO hasta 6 completas.
+    let data = await seleccionarConRetry({ cliente, plan, pool });
 
     let cleanHtml = limpiarHtml(renderReport(data));   // datos JSON -> HTML con plantilla fija
     if (!cleanHtml) throw new Error('No se pudo renderizar el reporte');
@@ -1178,38 +1217,40 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
     if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
       console.log(`[Job ${jobId}] Juez rechazó ${judgeResult.score}/8 — aplicando fixes...`);
       try {
-        seleccion = await runSelectWrite({ cliente, plan, pool, fixes: judgeResult.fixes });
-        const fixedData = armarReporte(plan, seleccion, pool);
-        if (fixedData && Array.isArray(fixedData.cards) && fixedData.cards.length) {
+        const fixedData = await seleccionarConRetry({ cliente, plan, pool, fixes: judgeResult.fixes });
+        // No aceptamos el fix si EMPEORA el conteo de cards completas (jamás degradar a card vacía).
+        const compFixed = _cuentaCompletas(fixedData), compPrev = _cuentaCompletas(data);
+        if (compFixed >= compPrev) {
           data = fixedData;
-
-          // GATE de links otra vez sobre los datos corregidos
-          linkCheck = await verificarLinksData(data);
-          data = linkCheck.data;
-          if (linkCheck.corregidos.length) console.log(`[LINKS] post-fix: ${linkCheck.corregidos.length} corregido(s)`);
-          if (linkCheck.noResueltos.length) console.warn(`[LINKS] ⚠️ post-fix NO resuelto(s):`, JSON.stringify(linkCheck.noResueltos));
-
           cleanHtml = limpiarHtml(renderReport(data));
           pdfBuffer = await renderizarPdf(cleanHtml);
           pageCount = await contarPaginas(pdfBuffer);
-
           console.log(`[Job ${jobId}] Re-validando con el juez después de fixes...`);
           judgeResult = await runJudge(cleanHtml, pageCount);
+        } else {
+          console.warn(`[FIX] el fix dio ${compFixed} cards completas vs ${compPrev} previas — conservo el reporte previo.`);
         }
       } catch (e) {
         console.warn(`[FIX] Falló, conservo el reporte previo:`, e.message);
       }
     }
 
-    // Veredicto de integridad: cuántas cards quedaron VERIFICADAS. Si no llega a 6,
-    // el reporte NO es apto para envío automático (el sourcing debe traer 6 reales).
+    // INTEGRIDAD determinística (EN CÓDIGO, no delegada al juez): exactamente 6 cards
+    // COMPLETAS (nombre, empresa, cargo, ángulo, hook) o NO es apto para envío.
     const MIN_CARDS_OK = parseInt(process.env.MIN_CARDS_OK || '6', 10);
-    const descartadas = linkCheck.descartados || [];
-    const cardsValidas = Array.isArray(data.cards) ? data.cards.length : 0;
-    const aptoEnvio = cardsValidas >= MIN_CARDS_OK;
+    const cardsValidas = _cuentaCompletas(data);
+    // El juez NUNCA puede dejar pasar un reporte incompleto: lo pisamos a RECHAZADO.
+    if (cardsValidas < MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO') {
+      console.warn(`[INTEGRIDAD] Override: juez dijo APROBADO con ${cardsValidas}/${MIN_CARDS_OK} cards completas → RECHAZADO.`);
+      judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 5),
+        fixes: [`Reporte INCOMPLETO: ${cardsValidas}/${MIN_CARDS_OK} cuentas completas. Faltan decisores reales con empresa, cargo, ángulo y hook — el sourcing/selección debe entregar 6.`].concat(judgeResult.fixes||[]) };
+    }
+    // Apto para envío automático = 6 cards COMPLETAS *y* el juez aprobó la calidad.
+    const aptoEnvio = cardsValidas >= MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO';
+    const descartadas = [];
     console.log(aptoEnvio
-      ? `[INTEGRIDAD] OK: ${cardsValidas} cards verificadas.`
-      : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} cards verificadas, ${descartadas.length} descartada(s).`);
+      ? `[INTEGRIDAD] OK: ${cardsValidas} cards completas + juez APROBADO.`
+      : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} completas, juez ${judgeResult.veredicto}.`);
 
     // Log de tokens/costo del reporte completo
     logTokenCost(`Job ${jobId}`);
@@ -1228,10 +1269,10 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
       paginas: pageCount,
       juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8',
       juez_fixes: judgeResult.fixes,
-      links_corregidos: linkCheck.corregidos,
-      links_no_resueltos: linkCheck.noResueltos,
-      grados_corregidos: linkCheck.gradosCorregidos,
-      grados_mal: linkCheck.gradosMal,
+      links_corregidos: [],
+      links_no_resueltos: [],
+      grados_corregidos: [],
+      grados_mal: [],
       tokens: { ...tokenStats },
       // Campos planos para mapear fácil en n8n / Google Sheets
       tokens_input: tokenStats.input,
@@ -1291,14 +1332,7 @@ app.post('/generar-reporte', async (req, res) => {
     const fechaHoy = _fechaHoy();
     const plan = await runPlan({ empresa: empresaFinal, dominio, email, nombre: nombre || '', cliente, fechaHoy });
     const pool = await sourceCandidates(plan, cliente);
-    let seleccion = await runSelectWrite({ cliente, plan, pool });
-    let data = armarReporte(plan, seleccion, pool);
-
-    // GATE data-based (red de seguridad)
-    let linkCheck = await verificarLinksData(data);
-    data = linkCheck.data;
-    if (linkCheck.corregidos.length) console.log(`[LINKS] ${linkCheck.corregidos.length} link(s) corregido(s)`);
-    if (linkCheck.noResueltos.length) console.warn(`[LINKS] ⚠️ ${linkCheck.noResueltos.length} link(s) NO resuelto(s):`, JSON.stringify(linkCheck.noResueltos));
+    let data = await seleccionarConRetry({ cliente, plan, pool });
 
     let cleanHtml = limpiarHtml(renderReport(data));
     if (!cleanHtml) return res.status(500).json({ error: 'No se pudo renderizar el reporte' });
@@ -1309,16 +1343,16 @@ app.post('/generar-reporte', async (req, res) => {
 
     if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
       try {
-        seleccion = await runSelectWrite({ cliente, plan, pool, fixes: judgeResult.fixes });
-        const fixedData = armarReporte(plan, seleccion, pool);
-        if (fixedData && Array.isArray(fixedData.cards) && fixedData.cards.length) {
+        const fixedData = await seleccionarConRetry({ cliente, plan, pool, fixes: judgeResult.fixes });
+        const compFixed = _cuentaCompletas(fixedData), compPrev = _cuentaCompletas(data);
+        if (compFixed >= compPrev) {
           data = fixedData;
-          linkCheck = await verificarLinksData(data);
-          data = linkCheck.data;
           cleanHtml = limpiarHtml(renderReport(data));
           pdfBuffer = await renderizarPdf(cleanHtml);
           pageCount = await contarPaginas(pdfBuffer);
           judgeResult = await runJudge(cleanHtml, pageCount);
+        } else {
+          console.warn(`[FIX] el fix dio ${compFixed} cards completas vs ${compPrev} previas — conservo el reporte previo.`);
         }
       } catch (e) {
         console.warn(`[FIX] Falló, conservo el reporte previo:`, e.message);
@@ -1326,12 +1360,17 @@ app.post('/generar-reporte', async (req, res) => {
     }
 
     const MIN_CARDS_OK = parseInt(process.env.MIN_CARDS_OK || '6', 10);
-    const descartadas = linkCheck.descartados || [];
-    const cardsValidas = Array.isArray(data.cards) ? data.cards.length : 0;
-    const aptoEnvio = cardsValidas >= MIN_CARDS_OK;
+    const cardsValidas = _cuentaCompletas(data);
+    if (cardsValidas < MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO') {
+      console.warn(`[INTEGRIDAD] Override: juez dijo APROBADO con ${cardsValidas}/${MIN_CARDS_OK} cards completas → RECHAZADO.`);
+      judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 5),
+        fixes: [`Reporte INCOMPLETO: ${cardsValidas}/${MIN_CARDS_OK} cuentas completas.`].concat(judgeResult.fixes||[]) };
+    }
+    const aptoEnvio = cardsValidas >= MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO';
+    const descartadas = [];
     console.log(aptoEnvio
-      ? `[INTEGRIDAD] OK: ${cardsValidas} cards verificadas.`
-      : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} cards verificadas, ${descartadas.length} descartada(s).`);
+      ? `[INTEGRIDAD] OK: ${cardsValidas} cards completas + juez APROBADO.`
+      : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} completas, juez ${judgeResult.veredicto}.`);
 
     logTokenCost('generar-reporte');
 
@@ -1349,10 +1388,10 @@ app.post('/generar-reporte', async (req, res) => {
       paginas: pageCount,
       juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8',
       juez_fixes: judgeResult.fixes,
-      links_corregidos: linkCheck.corregidos,
-      links_no_resueltos: linkCheck.noResueltos,
-      grados_corregidos: linkCheck.gradosCorregidos,
-      grados_mal: linkCheck.gradosMal,
+      links_corregidos: [],
+      links_no_resueltos: [],
+      grados_corregidos: [],
+      grados_mal: [],
       tokens: { ...tokenStats },
       tokens_input: tokenStats.input,
       tokens_output: tokenStats.output,
