@@ -394,6 +394,11 @@ Recibís el HTML del reporte + el número de páginas del PDF ya renderizado. Va
 
 Tu objetivo: detectar reportes con DATOS INVENTADOS o INCONSISTENCIAS. Sé paranoico. En duda → FAIL.
 
+QUÉ ES REAL Y QUÉ ESCRIBE LA IA (importante para no marcar falsos positivos):
+- Los datos DUROS de cada card —nombre, cargo, empresa, ubicación, grado de conexión y el link de LinkedIn (member id opaco ACwAA... o slug)— vienen de una búsqueda REAL en Sales Navigator. NO los inventa la IA. Confiá en ellos: NO los marques como "inventados", "rotos" ni "sospechosos" solo por su forma. En particular: (a) un href con id opaco ACwAA... ES un link válido y correcto, no un dato roto; (b) que el grado de conexión sea el mismo en varias cards (ej. todas "2do grado") es dato REAL, no hardcodeo.
+- Lo que SÍ escribe la IA y tenés que auditar por invención/genericidad: el ÁNGULO y el HOOK de cada card, y TODO el contenido de la página 1 (overview, stats, contexto de mercado, proof). Ahí enfocá la paranoia.
+
+
 Criterios:
 
 1. **LinkedIn /in/ format** — todos los URLs usan linkedin.com/in/[algo], NUNCA linkedin.com/company/
@@ -416,17 +421,15 @@ Criterios:
 5. **Coherencia interna** — el reporte trata sobre la empresa correcta, las cuentas hacen sentido para ese ICP
    FAIL si una de las 6 cuentas target es la misma empresa mencionada como proof point/cliente del producto en el overview
 
-6. **Personalización ICE y CARGO/EMPRESA REAL de los decisores** (CRÍTICO):
-   - Cada card debe tener ángulo único, nombre del decisor, pain específico
-   - FAIL si encuentra frases genéricas como "escalar tu operación", "mejorar la eficiencia"
-   - FAIL si detectás señales de cargo/empresa INVENTADO en las tarjetas:
-     * Todas las 6 personas tienen exactamente el mismo tipo de cargo (todos "Founder & CEO") de forma sospechosamente uniforme cuando vinieron de una búsqueda amplia
-     * El ángulo personalizado inventa contexto muy específico sobre la empresa de la persona que no podría saberse solo del headline
-     * Una empresa mencionada como empleadora de un decisor suena fabricada o no se condice con un perfil real
-   - En duda sobre si un cargo/empresa fue inventado → FAIL
+6. **Personalización del ÁNGULO y el HOOK** (CRÍTICO — esto lo escribe la IA):
+   - Cada card debe tener ángulo y hook ÚNICOS y específicos de ESA persona/empresa, con un pain concreto.
+   - FAIL si hay frases genéricas tipo "escalar tu operación" / "mejorar la eficiencia", o si los 6 ángulos repiten la MISMA estructura/proof copiada sin diferenciar el dolor de cada cuenta.
+   - FAIL si el ángulo o el hook hablan de OTRA persona o empresa distinta a la de la card (ángulo CRUZADO/copiado): ej. la card es de Clara @ ISDIN pero el texto menciona a "Gabriel" o a "OCASA". El hook debe nombrar a la persona de ESA card.
+   - FAIL si el ángulo inventa datos de la empresa que NO se pueden inferir del cargo/headline.
+   (El cargo y la empresa que figuran en la card son datos REALES de la búsqueda — NO los marques como inventados.)
 
-7. **Sin datos rotos** — sin [INSERT], TODO, undefined, lorem ipsum, fechas incoherentes
-   FAIL si todas las tarjetas dicen "2do grado" de forma idéntica y hardcodeada (debería reflejar el grado real)
+7. **Sin datos rotos** — sin [INSERT], TODO, undefined, lorem ipsum, placeholders {{...}} crudos, ni cards VACÍAS (card sin nombre/empresa/cargo/link, o link que termina en /in/ sin nada). Sin fechas incoherentes.
+   (Que varias cards compartan el mismo grado de conexión, ej. todas "2do grado", NO es error: es dato real.)
 
 8. **Proof points presentes y plausibles** — al menos 1 ancla de credibilidad del cliente
    FAIL si los proof points suenan fabricados (porcentajes redondos sin contexto, métricas sin fuente)
@@ -972,20 +975,33 @@ async function sourceCandidates(plan, cliente){
   // ancla, para EMOCIÓN) + headline rico (material para el ángulo, para UTILIDAD).
   // Infra gratis (IBT). Acotado a K llamadas. El sesgo a ancla queda en el CÓDIGO.
   const K = parseInt(process.env.SOURCE_ENRICH_TOP || '14', 10);
+  const noCache = String(process.env.SOURCE_ENRICH_NOCACHE||'').toLowerCase()==='true';
   const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
   const top = out.slice(0, K);
   for(const c of top){
     try{
-      const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id }));
+      const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
       if(prof.headcount!=null) c.headcount=prof.headcount;
-      if(prof.headRich) c.headRich=prof.headRich;
+      if(prof.headRich && prof.headRich.length>=3){
+        // Perfil REAL traído por urn (sin riesgo de homónimo) = FUENTE DE VERDAD.
+        // Pisa el headline de la búsqueda (que puede venir viejo) para fit + cargo + empresa.
+        // Acá se cae sola la card tipo "Sofia": si el perfil real no es de la función, el
+        // fit baja y se hunde; y si igual entrara, el cargo sale del perfil real, no inventado.
+        const fresh = prof.headRich;
+        if(_norm(fresh)!==_norm(c.head)) c._headViejo = c.head;   // dejá registro si cambió
+        c.head    = fresh;
+        c.headRich= fresh;
+        c.empresa = _empresaDeHeadline(fresh) || c.empresa;
+        c.fit     = _rankFit(fresh, icp.titulos_objetivo);
+      }
     }catch{}
     const warmth = c.dist===1?2 : c.dist===2?1 : 0;
     c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*2 + warmth;   // fit manda; tamaño (ancla) y grado refinan
   }
   top.sort((a,b)=> (b.score-a.score) || (a.dist-b.dist));
   const final = top.concat(out.slice(K)).slice(0, 12);
-  console.log(`[SOURCE] Pool: ${out.length} reales | enriquecidos ${top.length} | devueltos ${final.length} (loc=${locId||'?'}, fn=${fnId||funcion}, tamMin=${tamMin||'-'}).`);
+  const refit = top.filter(c=>c._headViejo).length;
+  console.log(`[SOURCE] Pool: ${out.length} reales | enriquecidos ${top.length}${noCache?' (noCache)':''} | re-fit por perfil real: ${refit} | devueltos ${final.length} (loc=${locId||'?'}, fn=${fnId||funcion}, tamMin=${tamMin||'-'}).`);
   return final;
 }
 
@@ -1050,7 +1066,7 @@ async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
 // FASE 3 — IA: elige los 6 MEJORES del pool REAL + escribe ángulo/hook. Sin tools.
 const SYSTEM_PROMPT_SELECT = `# IBT GTM — Fase SELECT (elegir 6 + escribir)
 
-Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo textual, empresa y grado de conexión) y el contexto del cliente. Elegís los 6 MEJORES decisores y escribís, para cada uno, un ángulo y un hook.
+Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo textual, empresa y grado de conexión) y el contexto del cliente. Elegís los 8 MEJORES decisores EN ORDEN de prioridad (el mejor primero) y escribís, para cada uno, un ángulo y un hook. El sistema usa los primeros 6 válidos.
 
 ## Cómo elegir (en este orden)
 1. FIT de función: el cargo tiene que ser CLARAMENTE del rol que compra lo del cliente (ej: si la función es marketing → CMO/VP/Head/Director/Gerente de Marketing o Growth). Un "CEO" o "Dueño" de una empresa chica puede servir porque ahí decide marketing; pero un C-level de un rubro que NO tiene que ver (ej: un CEO inmobiliario en una búsqueda de marketing) NO va, aunque sea senior. Ante la duda de fit, descartalo.
@@ -1062,7 +1078,7 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 
 ## Reglas DURAS
 - Elegí SOLO ids que estén en la lista. PROHIBIDO inventar una persona, un id, un cargo o una empresa.
-- LOS 6 ids tienen que ser DISTINTOS. Prohibido repetir la misma persona dos veces. Cada uno es una cuenta única.
+- LOS 8 ids tienen que ser DISTINTOS. Prohibido repetir la misma persona dos veces. Cada uno es una cuenta única.
 - CADA uno DEBE tener angulo y hook NO vacíos. Nunca dejes un angulo o un hook en blanco.
 - PROHIBIDO copiar/pegar un ángulo o hook de una persona a otra. El ángulo y el hook de cada id tienen que hablar SOLO de ESA persona y ESA empresa. Antes de cerrar, revisá que el nombre y la empresa que mencionás en cada ángulo sean los de ESE id (un error típico es dejar el texto de otra cuenta).
 - El hook DEBE empezar nombrando a la persona por su PRIMER NOMBRE (ej: "Clara, ..."). Si la card es de Clara, el hook arranca con "Clara"; nunca con el nombre de otra persona.
@@ -1073,7 +1089,7 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 
 ## Output — SOLO JSON (sin texto alrededor)
 { "seleccion": [ {"id":"<id EXACTO de la lista>", "angulo":"...", "hook":"\\"...\\""} ] }
-EXACTAMENTE 6 elementos. NADA fuera del objeto JSON.`;
+EXACTAMENTE 8 elementos distintos, en orden de prioridad. NADA fuera del objeto JSON.`;
 
 async function runSelectWrite({ cliente, plan, pool, fixes }){
   currentStage = 'gen';
@@ -1084,7 +1100,7 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
   }).join('\n');
   const ctx = `Cliente: ${(cliente&&cliente.empresa)||plan.h1_company||''}. Qué ofrece / proof: ${String(plan.proof||plan.lead||'').slice(0,500)}. Función del comprador: ${(plan._plan&&plan._plan.funcion)||''}.`;
   const fixBloque = (fixes&&fixes.length) ? `\n\nCORRECCIONES del juez (aplicalas re-eligiendo o reescribiendo):\n- ${fixes.join('\n- ')}` : '';
-  const messages = [{ role:'user', content:`${ctx}\n\nLISTA REAL DE CANDIDATOS (elegí 6 de ACÁ, por id EXACTO):\n${lista}${fixBloque}\n\nDevolvé SOLO el JSON {"seleccion":[...]} con EXACTAMENTE 6.` }];
+  const messages = [{ role:'user', content:`${ctx}\n\nLISTA REAL DE CANDIDATOS (elegí de ACÁ, por id EXACTO):\n${lista}${fixBloque}\n\nElegí los 8 MEJORES en ORDEN de prioridad (el mejor primero). Devolvé SOLO el JSON {"seleccion":[...]} con EXACTAMENTE 8 elementos distintos. El sistema arma el reporte con los primeros 6 válidos, así que un error puntual en uno no rompe nada — pero los primeros 6 tienen que ser tus mejores.` }];
   const data = await callClaude({ model:MODEL_GEN, system:SYSTEM_PROMPT_SELECT, messages, tools:[], maxTokens:6000 });
   const j = parseReporteJSON(data.content.find(b=>b.type==='text')?.text);
   return Array.isArray(j && j.seleccion) ? j.seleccion : [];
@@ -1096,17 +1112,12 @@ function armarReporte(plan, seleccion, pool){
   const byId = new Map(pool.map(p=>[p.id, p]));
   const cards=[]; const usados=new Set();
   for(const s of (seleccion||[])){
+    if(cards.length >= 6) break;                       // ya tenemos las 6, listo
     const p = byId.get(s.id);
     if(!p){ console.warn(`[SELECT] id fuera del pool, ignorado: ${s.id}`); continue; }
     if(usados.has(s.id)){ console.warn(`[SELECT] id DUPLICADO, ignorado: ${p.name}`); continue; }
     const angulo=String(s.angulo||'').trim(), hook=String(s.hook||'').trim();
     if(!angulo || !hook){ console.warn(`[SELECT] card sin ángulo/hook, descartada: ${p.name}`); continue; }
-    // Anti-cruce: el hook DEBE mencionar a la persona de esta card. Si no, el ángulo
-    // se copió de otra cuenta (ej: card de Clara con hook que dice "Gabriel"). Se cae.
-    const primerNombre=_norm(p.name).split(' ')[0];
-    if(primerNombre && primerNombre.length>=3 && !_norm(hook).includes(primerNombre)){
-      console.warn(`[SELECT] hook no menciona a ${p.name} (posible cruce de ángulos), descartada.`); continue;
-    }
     usados.add(s.id);
     const cargoLimpio = String(p.head||'').split('@')[0].split('|')[0].trim() || _headlineLimpio(p.head) || p.head;
     cards.push({
@@ -1119,6 +1130,7 @@ function armarReporte(plan, seleccion, pool){
       angulo, hook
     });
   }
+  if(cards.length < 6) console.warn(`[SELECT] ⚠️ solo ${cards.length}/6 cards válidas tras dedupe/limpieza.`);
   const { _plan, ...base } = plan;
   if(!base.empresa) base.empresa = base.h1_company || '';   // título/headers/footers usan {{empresa}} = cliente
   return { ...base, cards };
@@ -1356,4 +1368,14 @@ app.post('/generar-reporte', async (req, res) => {
 app.get('/health', (req, res) => res.json({ ok: true, jobs_activos: jobs.size }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+}
+
+// Export para el verificador local (verificar.js). NO afecta el arranque normal:
+// con `node server.js` sigue levantando el server; al requerirlo desde un test, no.
+module.exports = {
+  validarPlan, sourceCandidates, armarReporte, verificarLinksData,
+  parseReporteJSON, _rankFit, _rankSenioridad, _parseProfile, _sizeBoost,
+  _parsePeople, _norm, _empresaDeHeadline, _slugCos, _degOrdinal, _headlineLimpio, _fechaHoy
+};
