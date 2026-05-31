@@ -732,12 +732,17 @@ async function runClaude({ email, dominio, empresa, nombre, tools }) {
 async function runJudge(html, pageCount) {
   currentStage = 'judge';
   console.log(`[JUDGE] Evaluando reporte (${pageCount} páginas)...`);
+  // El juez evalúa contenido y estructura — NO necesita el logo base64 ni el CSS,
+  // que tokenizan carísimo. Se los saco para no inflar el costo del juez.
+  const htmlLite = String(html || '')
+    .replace(/src="data:image\/[a-z]+;base64,[A-Za-z0-9+/=]+"/gi, 'src="[LOGO]"')
+    .replace(/<style>[\s\S]*?<\/style>/i, '<style>/* css omitido para el juez */</style>');
   const data = await callClaude({
     model: MODEL_JUDGE,
     system: SYSTEM_PROMPT_JUDGE,
     messages: [{
       role: 'user',
-      content: `Páginas del PDF renderizado: ${pageCount}\n\nHTML del reporte:\n${html}`
+      content: `Páginas del PDF renderizado: ${pageCount}\n\nHTML del reporte:\n${htmlLite}`
     }],
     maxTokens: 2000
   });
@@ -931,6 +936,10 @@ function _coincideNombre(a,b){
   if(y.last && x.tokens.includes(y.last)) return true;
   return x.tokens.filter(t=>y.tokens.includes(t)).length>=2;
 }
+// Saca caracteres invisibles (zero-width, soft hyphen) y espacios que el modelo
+// a veces inyecta en un urn/slug y rompen el link. Determinístico.
+function _limpiarId(s){ return String(s||'').replace(/[\u200B-\u200D\uFEFF\u00AD\s]/g,'').trim(); }
+
 async function _resolverNombre(urn){
   try{ const n=_profileName(await callMCP('get_contact_profile',{publicIdOrUrl:urn})); if(n) return n; }catch{}
   try{ return _profileName(await callMCP('get_contact_profile',{publicIdOrUrl:urn,noCache:true})); }catch{}
@@ -940,6 +949,9 @@ async function verificarLinksData(data){
   const corregidos=[], noResueltos=[], gradosCorregidos=[], gradosMal=[];
   const cards=Array.isArray(data.cards)?data.cards:[];
   for(const card of cards){
+    // saneo invisibles ANTES de resolver (mutando el dato, así el render usa el urn limpio)
+    if(card.urn)  card.urn  = _limpiarId(card.urn);
+    if(card.slug) card.slug = _limpiarId(card.slug);
     const urn=(card.urn||card.slug||'').trim();
     if(!urn){ noResueltos.push({nombre:card.nombre,motivo:'card sin urn/slug'}); continue; }
 

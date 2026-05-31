@@ -69,14 +69,17 @@ function flatten(data) {
 
   (data.cards || []).forEach((c, i) => {
     const n = i + 1;
+    // saneo invisibles (zero-width, etc.) que rompen el link aunque no se vean
+    const urn  = String(c.urn  || '').replace(/[\u200B-\u200D\uFEFF\u00AD\s]/g, '');
+    const slug = String(c.slug || '').replace(/[\u200B-\u200D\uFEFF\u00AD\s]/g, '');
     f[`card${n}_empresa`]   = c.empresa;
     f[`card${n}_initials`]  = _initials(c.nombre);
     f[`card${n}_nombre`]    = c.nombre;
     f[`card${n}_cargo`]     = c.cargo;
-    f[`card${n}_urn`]       = c.urn || c.slug;   // href: URN real; fallback slug
-    f[`card${n}_slug`]      = c.slug;            // (compat, ya no se usa en el template)
+    f[`card${n}_urn`]       = urn || slug;   // href: URN real; fallback slug
+    f[`card${n}_slug`]      = slug;          // (compat, ya no se usa en el template)
     // Texto visible del link: slug limpio -> "linkedin.com/in/slug"; opaco/vacío -> label limpio
-    const vis = (c.slug && !_isOpaque(c.slug)) ? c.slug : '';
+    const vis = (slug && !_isOpaque(slug)) ? slug : '';
     f[`card${n}_linktext`]  = vis ? ('linkedin.com/in/' + vis) : 'Ver perfil en LinkedIn ↗';
     f[`card${n}_ubicacion`] = c.ubicacion;
     f[`card${n}_grado`]     = c.grado;
