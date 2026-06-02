@@ -1187,6 +1187,12 @@ function _fechaHoy(){
   const meses=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
   const d=new Date(); return `${meses[d.getMonth()]} ${d.getFullYear()}`;
 }
+// Nombre profesional del PDF que ve el prospecto en el adjunto.
+// Saca caracteres ilegales para nombres de archivo. n8n usa este campo.
+function _nombreArchivoPDF(empresa){
+  const limpia = String(empresa||'Empresa').replace(/[\\/:*?"<>|]/g,'').replace(/\s+/g,' ').trim() || 'Empresa';
+  return `Análisis de Mercado - ${limpia}.pdf`;
+}
 
 async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
   try {
