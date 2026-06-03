@@ -502,29 +502,50 @@ function validarPlan(plan){
 async function sourceCandidates(plan, cliente){
   validarPlan(plan);
   const icp = plan._plan;
-  const geografia = icp.geografia;            // país del cliente (prioritario)
+  const geografia = icp.geografia;            // país principal (manda)
   const funcion   = icp.funcion;
-  const homeGeo   = _norm(geografia||'');      // para priorizar el país del cliente
-  // país del cliente PRIMERO + solo países donde el cliente PUEDE prestar servicio hoy
-  const geos = (Array.isArray(icp.geografias) && icp.geografias.length ? icp.geografias : [geografia]).filter(Boolean).slice(0, 6);
-  const locIds = [];
-  for(const g of geos){
-    try{ const id=(String(await callMCP('resolve_sales_navigator_id',{type:'LOCATION',keywords:g,limit:1})).match(/id="?([0-9]+)"?/)||[])[1]; if(id && !locIds.includes(id)) locIds.push(id); }catch{}
+  const homeGeo   = _norm(geografia||'');
+
+  // Secundarias = SOLO donde el cliente opera de verdad, sin el país principal.
+  const todas = (Array.isArray(icp.geografias) && icp.geografias.length ? icp.geografias : [geografia]).filter(Boolean);
+  const secundarias = todas.filter(g => _norm(g) !== homeGeo).slice(0, 5);
+
+  // Keyword limpio: hasta 4 títulos objetivo (palabras sueltas), NO el string con barras.
+  const kw = (Array.isArray(icp.titulos_objetivo) && icp.titulos_objetivo.length)
+    ? icp.titulos_objetivo.filter(t=>String(t||'').trim().length>=3).slice(0,4).join(' ')
+    : String(funcion||'').replace(/[\/|]+/g,' ').replace(/\s+/g,' ').trim();
+
+  async function locId(nombrePais){
+    try{ return (String(await callMCP('resolve_sales_navigator_id',{type:'LOCATION',keywords:nombrePais,limit:1})).match(/id="?([0-9]+)"?/)||[])[1] || null; }catch{ return null; }
   }
   let fnId=null;
-  try{ fnId =(String(await callMCP('resolve_sales_navigator_id',{type:'FUNCTION',keywords:funcion,limit:3})).match(/id="?([A-Za-z0-9_]+)"?/)||[])[1]||null; }catch{}
+  try{ fnId=(String(await callMCP('resolve_sales_navigator_id',{type:'FUNCTION',keywords:funcion,limit:3})).match(/id="?([A-Za-z0-9_]+)"?/)||[])[1]||null; }catch{}
 
-  const f1={ category:'people', profilesLimit:50, keywords: funcion };
-  if(locIds.length) f1.location={ include: locIds };
-  if(fnId)  f1.function={ include:[fnId] };
-  let pool=[];
-  try{ pool=_parsePeople(await callMCP('search_sales_navigator_filtered', f1)); }catch{}
-  if(pool.length < 10){
-    const kw2 = (Array.isArray(icp.titulos_objetivo) && icp.titulos_objetivo[0]) || funcion;
-    const f2={ category:'people', profilesLimit:50, keywords: kw2 };
-    if(locIds.length) f2.location={ include: locIds };
-    try{ pool=pool.concat(_parsePeople(await callMCP('search_sales_navigator_filtered', f2))); }catch{}
+  async function buscar(locIds){
+    const f={ category:'people', profilesLimit:50, keywords: kw };
+    if(locIds && locIds.length) f.location={ include: locIds };
+    if(fnId) f.function={ include:[fnId] };
+    try{ return _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{ return []; }
   }
+
+  // 1) PAÍS PRINCIPAL PRIMERO.
+  const homeId = await locId(geografia);
+  let pool = await buscar(homeId ? [homeId] : null);
+  const homeBuenos = pool.filter(p => _rankSenioridad(p.head) >= 2 && _norm(p.loc||'').includes(homeGeo)).length;
+  console.log(`[SOURCE] país principal "${geografia}": ${pool.length} perfiles (${homeBuenos} decisores válidos).`);
+
+  // 2) Solo si el principal no alcanza, sumar secundarias donde el cliente SÍ opera.
+  const HOME_MIN = parseInt(process.env.SOURCE_HOME_MIN || String(NUM_CUENTAS + 2), 10);
+  if(homeBuenos < HOME_MIN && secundarias.length){
+    const secIds = [];
+    for(const g of secundarias){ const id = await locId(g); if(id) secIds.push(id); }
+    if(secIds.length){
+      const extra = await buscar(secIds);
+      console.log(`[SOURCE] principal insuficiente (${homeBuenos}<${HOME_MIN}) -> secundarias [${secundarias.join(', ')}]: +${extra.length}.`);
+      pool = pool.concat(extra);
+    }
+  }
+
   const vistos=new Set(); const out=[]; const empCliente=_norm((cliente&&cliente.empresa)||'');
   for(const p of pool){
     if(!p.id || vistos.has(p.id)) continue; vistos.add(p.id);
@@ -534,7 +555,6 @@ async function sourceCandidates(plan, cliente){
     const cerca = homeGeo && _norm(p.loc||'').includes(homeGeo) ? 1 : 0;
     out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, icp.titulos_objetivo) });
   }
-  // EL PAÍS DEL CLIENTE MANDA: primero los de su país (por fit), después el resto de LatAm.
   out.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (a.dist-b.dist));
 
   const K = parseInt(process.env.SOURCE_ENRICH_TOP || '14', 10);
@@ -553,10 +573,9 @@ async function sourceCandidates(plan, cliente){
       if(prof.headRich && prof.headRich.length>=3){
         const fresh = prof.headRich;
         if(_norm(fresh)!==_norm(c.head)) c._headViejo = c.head;
-        c.head    = fresh;
-        c.headRich= fresh;
-        c.empresa = _empresaDeHeadline(fresh) || c.empresa;
-        c.fit     = _rankFit(fresh, icp.titulos_objetivo);
+        c.head=fresh; c.headRich=fresh;
+        c.empresa=_empresaDeHeadline(fresh) || c.empresa;
+        c.fit=_rankFit(fresh, icp.titulos_objetivo);
       }
     }catch{}
     c.cerca  = homeGeo && _norm(c.loc||'').includes(homeGeo) ? 1 : 0;
@@ -564,15 +583,12 @@ async function sourceCandidates(plan, cliente){
     c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*2 + warmth;
   }
   const fueraICP = top.filter(c => c.headcount!=null && c.headcount < MICRO);
-  for(const p of fueraICP) console.warn(`[SOURCE] fuera de ICP por tamaño (${p.headcount} emp < ${MICRO}), descartado: ${p.name} @ ${p.empresa||'?'}`);
+  for(const p of fueraICP) console.warn(`[SOURCE] fuera de ICP por tamaño (${p.headcount}<${MICRO}): ${p.name} @ ${p.empresa||'?'}`);
   const topICP = top.filter(c => !(c.headcount!=null && c.headcount < MICRO));
-  // país del cliente primero, después score; los de otros países solo rellenan
   topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.score-a.score) || (a.dist-b.dist));
   const final = topICP.concat(out.slice(K)).slice(0, 12);
   const enCasa = final.filter(c=>c.cerca).length;
-  const refit = top.filter(c=>c._headViejo).length;
-  const refrescados = top.filter(c=>c._fresco).length;
-  console.log(`[SOURCE] Pool: ${out.length} reales (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length}${noCache?' (noCache)':''} | re-fit ${refit} | refrescados ${refrescados} | fuera-ICP ${fueraICP.length} | devueltos ${final.length} (${enCasa} en ${geografia}) (loc=${locIds.join('+')||'?'}, fn=${fnId||funcion}, tamMin=${tamMin||'-'}, micro<${MICRO}).`);
+  console.log(`[SOURCE] Pool: ${out.length} reales (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-ICP ${fueraICP.length} | devueltos ${final.length} (${enCasa} en ${geografia}) (kw="${kw}", fn=${fnId||'-'}, micro<${MICRO}).`);
   return final;
 }
 
@@ -698,22 +714,33 @@ function armarReporte(plan, seleccion, pool){
     if(!angulo || !hook){ console.warn(`[SELECT] card sin ángulo/hook, descartada: ${p.name}`); continue; }
     const empresa = p.empresa || _empresaDeHeadline(p.head) || '';
     if(!empresa){ console.warn(`[SELECT] card sin empresa real, descartada: ${p.name}`); continue; }
+
+    // --- GUARD ANTI-MEZCLA ---
+    const primerNombre = (_norm(p.name).split(' ')[0]) || '';
+    const hookN = _norm(hook), angN = _norm(angulo), empN = _norm(empresa);
+    const hookNombra = primerNombre.length >= 3 && hookN.includes(primerNombre);
+    const empTokens = empN.split(' ').filter(w => w.length >= 4);
+    const angCoherente = (primerNombre.length >= 3 && angN.includes(primerNombre)) || empTokens.some(w => angN.includes(w));
+    if(!hookNombra || !angCoherente){
+      console.warn(`[SELECT] card DESCARTADA por MEZCLA (no corresponde a ${p.name} @ ${empresa}) | hook="${hook.slice(0,70)}"`);
+      continue;
+    }
+    // --- fin guard ---
+
     const empKey = _empKey(empresa);
-    if(empKey && usadasEmp.has(empKey)){ console.warn(`[SELECT] empresa DUPLICADA, card ignorada: ${p.name} @ ${empresa}`); continue; }
+    if(empKey && usadasEmp.has(empKey)){ console.warn(`[SELECT] empresa DUPLICADA, ignorada: ${p.name} @ ${empresa}`); continue; }
     usados.add(s.id);
     if(empKey) usadasEmp.add(empKey);
     const cargoLimpio = String(p.head||'').split('@')[0].split('|')[0].trim() || _headlineLimpio(p.head) || p.head;
     cards.push({
-      empresa,
-      nombre: p.name,
-      cargo: cargoLimpio,
+      empresa, nombre: p.name, cargo: cargoLimpio,
       urn: p.id, slug: _slugCos(p.name),
       ubicacion: p.loc || ((plan._plan && plan._plan.geografia) || ''),
       grado: _degOrdinal(p.dist===9?3:p.dist, '2do') + ' grado',
       angulo, hook
     });
   }
-  if(cards.length < NUM_CUENTAS) console.warn(`[SELECT] ⚠️ solo ${cards.length}/${NUM_CUENTAS} cards válidas tras dedupe/limpieza.`);
+  if(cards.length < NUM_CUENTAS) console.warn(`[SELECT] ⚠️ solo ${cards.length}/${NUM_CUENTAS} cards válidas tras dedupe/guard.`);
   const { _plan, ...base } = plan;
   if(!base.empresa) base.empresa = base.h1_company || '';
   return { ...base, cards };
