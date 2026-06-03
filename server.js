@@ -1,6 +1,13 @@
 /**
  * IBT GTM Report — server.js v7.1
  *
+ * FIX v7.1.1 (este archivo): empresa "?" en las cards. Cuando el perfil CACHEADO
+ *   de IBT viene con "@ ?" (empresa sin resolver en la DB), el enrich pisaba la
+ *   empresa REAL que ya traía la búsqueda (ej. "Comercial Nutresa") con "?".
+ *   Arreglado en DOS lugares, sin tocar nada más de la lógica:
+ *     - _empresaDeHeadline: ahora ignora "?" (no es una empresa).
+ *     - _parseProfile: limpia el sufijo "@ ?" del headline enriquecido.
+ *
  * Cambios v7.1 respecto a v7 (SOLO logging, lógica de negocio IDÉNTICA):
  *   - FIX DE LOGGING DE web_search: web_search es un SERVER TOOL de Anthropic.
  *     La API lo ejecuta sola y devuelve bloques `server_tool_use` +
@@ -806,7 +813,9 @@ async function contarPaginas(pdfBuffer) {
 // Prioridad: profileId del chat (lo más confiable) -> dominio corporativo -> sin anclar.
 // NO inventa: si no puede anclar con confianza, marca anclado:false (n8n decide no mandar).
 // ---------------------------------------------------------------------------
-function _empresaDeHeadline(txt){let m=(txt||'').match(/@\s*([^·•|(\n]+)/);if(!m)m=(txt||'').match(/\bat\s+([^·•|(\n]+)/i);return m?m[1].trim():'';}
+// FIX v7.1.1: "?" NO es una empresa. El perfil cacheado de IBT a veces trae "@ ?"
+// (empresa sin resolver en la DB) y eso pisaba la empresa real de la búsqueda.
+function _empresaDeHeadline(txt){let m=(txt||'').match(/@\s*([^·•|(\n]+)/);if(!m)m=(txt||'').match(/\bat\s+([^·•|(\n]+)/i);const e=m?m[1].trim():'';return e==='?'?'':e;}
 function _empresaDeLookup(txt){const m=(txt||'').match(/Company:\s*(.+?)\s*(?:\[|—|\u2014|,|$)/i);return m?m[1].trim():'';}
 function _headcountDe(txt){const m=(txt||'').match(/([\d][\d.,]*)\s*employees/i);return m?(parseInt(m[1].replace(/[.,]/g,''),10)||null):null;}
 function _tier(h){if(h==null)return null;if(h<10)return'micro';if(h<50)return'chica';if(h<500)return'media';if(h<5000)return'grande';return'enterprise';}
@@ -908,10 +917,13 @@ function _rankFit(head, titulos){
 // puebla de verdad (la restricción "2do grado" + industrias apiladas devolvía vacío).
 // Parsea get_contact_profile -> headcount (señal de empresa ancla) + headline rico.
 // Formato: "Profile: NAME [profileId: N] — HEADLINE (?, NNN employees, LOC)"
+// FIX v7.1.1: limpia el sufijo "@ ?" (empresa sin resolver en la DB) del headline
+// enriquecido, para que no termine pisando la empresa REAL de la búsqueda con "?".
 function _parseProfile(res){
   const s=String(res||'');
   const hc=(s.match(/(\d[\d,]*)\s+employees/)||[])[1];
-  const headRich=((s.match(/—\s*(.+?)\s*\(\s*(?:\?|\d)/)||[])[1]||'').trim();
+  let headRich=((s.match(/—\s*(.+?)\s*\(\s*(?:\?|\d)/)||[])[1]||'').trim();
+  headRich=headRich.replace(/\s*@\s*\?\s*$/,'').trim();   // "@ ?" = empresa sin resolver en la DB, no es dato
   return { headcount: hc?parseInt(hc.replace(/,/g,''),10):null, headRich };
 }
 // Boost por tamaño de empresa. Si el ICP define tamano_min, es RELATIVO al ICP
