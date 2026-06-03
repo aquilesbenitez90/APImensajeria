@@ -521,28 +521,45 @@ async function sourceCandidates(plan, cliente){
   let fnId=null;
   try{ fnId=(String(await callMCP('resolve_sales_navigator_id',{type:'FUNCTION',keywords:funcion,limit:3})).match(/id="?([A-Za-z0-9_]+)"?/)||[])[1]||null; }catch{}
 
-  async function buscar(locIds){
+  // INDUSTRIAS ANCLA: resolvemos las verticales del ICP a IDs de Sales Navigator.
+  // Con esto la búsqueda trae decisores EN aseguradoras/retailers/inmobiliarias (cuentas "wow"),
+  // no admins de cualquier empresa que tenga el título.
+  const indIds=[];
+  for(const ind of (Array.isArray(icp.industrias)?icp.industrias:[]).slice(0,6)){
+    try{ const id=(String(await callMCP('resolve_sales_navigator_id',{type:'SALES_INDUSTRY',keywords:ind,limit:1})).match(/id="?([0-9]+)"?/)||[])[1]; if(id && !indIds.includes(id)) indIds.push(id); }catch{}
+  }
+
+  async function buscar(locIds, conIndustria){
     const f={ category:'people', profilesLimit:50, keywords: kw };
     if(locIds && locIds.length) f.location={ include: locIds };
     if(fnId) f.function={ include:[fnId] };
+    if(conIndustria && indIds.length) f.industry={ include: indIds };
     try{ return _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{ return []; }
   }
 
-  // 1) PAÍS PRINCIPAL PRIMERO.
+  const _validosHome = arr => arr.filter(p => _rankSenioridad(p.head) >= 2 && _norm(p.loc||'').includes(homeGeo)).length;
   const homeId = await locId(geografia);
-  let pool = await buscar(homeId ? [homeId] : null);
-  const homeBuenos = pool.filter(p => _rankSenioridad(p.head) >= 2 && _norm(p.loc||'').includes(homeGeo)).length;
-  console.log(`[SOURCE] país principal "${geografia}": ${pool.length} perfiles (${homeBuenos} decisores válidos).`);
-
-  // 2) Solo si el principal no alcanza, sumar secundarias donde el cliente SÍ opera.
+  const homeLoc = homeId ? [homeId] : null;
   const HOME_MIN = parseInt(process.env.SOURCE_HOME_MIN || String(NUM_CUENTAS + 2), 10);
-  if(homeBuenos < HOME_MIN && secundarias.length){
-    const secIds = [];
-    for(const g of secundarias){ const id = await locId(g); if(id) secIds.push(id); }
+
+  // 1) PAÍS PRINCIPAL + INDUSTRIAS ANCLA (lo que impacta al prospecto).
+  let pool = await buscar(homeLoc, true);
+  console.log(`[SOURCE] principal "${geografia}" + industrias [${(icp.industrias||[]).join(', ')||'-'}]: ${pool.length} perfiles (${_validosHome(pool)} válidos).`);
+
+  // 2) si la industria estricta dejó poco, mismo país SIN industria (recall).
+  if(_validosHome(pool) < HOME_MIN){
+    const extra = await buscar(homeLoc, false);
+    pool = pool.concat(extra);
+    console.log(`[SOURCE] industria estricta floja -> ${geografia} sin industria: total ${pool.length} (${_validosHome(pool)} válidos).`);
+  }
+
+  // 3) recién si el principal no alcanza, secundarias donde el cliente SÍ opera.
+  if(_validosHome(pool) < HOME_MIN && secundarias.length){
+    const secIds=[]; for(const g of secundarias){ const id=await locId(g); if(id) secIds.push(id); }
     if(secIds.length){
-      const extra = await buscar(secIds);
-      console.log(`[SOURCE] principal insuficiente (${homeBuenos}<${HOME_MIN}) -> secundarias [${secundarias.join(', ')}]: +${extra.length}.`);
+      const extra = await buscar(secIds, indIds.length>0);
       pool = pool.concat(extra);
+      console.log(`[SOURCE] principal insuficiente -> secundarias [${secundarias.join(', ')}]: +${extra.length}.`);
     }
   }
 
@@ -560,8 +577,9 @@ async function sourceCandidates(plan, cliente){
   const K = parseInt(process.env.SOURCE_ENRICH_TOP || '14', 10);
   const noCache = String(process.env.SOURCE_ENRICH_NOCACHE||'').toLowerCase()==='true';
   const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
-  const _microBase = parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
-  const MICRO = Math.min(_microBase, tamMin>0 ? tamMin : _microBase);
+  // PISO de tamaño: si el ICP define tamano_min (medianas/grandes), es el piso real.
+  // Así una empresa de 26 personas NO entra cuando el ICP pide empresas ancla.
+  const PISO = tamMin > 0 ? tamMin : parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
   const top = out.slice(0, K);
   for(const c of top){
     try{
@@ -580,15 +598,18 @@ async function sourceCandidates(plan, cliente){
     }catch{}
     c.cerca  = homeGeo && _norm(c.loc||'').includes(homeGeo) ? 1 : 0;
     const warmth = c.dist===1?2 : c.dist===2?1 : 0;
-    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*2 + warmth;
+    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + warmth + c.cerca;
   }
-  const fueraICP = top.filter(c => c.headcount!=null && c.headcount < MICRO);
-  for(const p of fueraICP) console.warn(`[SOURCE] fuera de ICP por tamaño (${p.headcount}<${MICRO}): ${p.name} @ ${p.empresa||'?'}`);
-  const topICP = top.filter(c => !(c.headcount!=null && c.headcount < MICRO));
+  // Descarte por tamaño contra el PISO del ICP, SIN vaciar el pool.
+  const cumplen = top.filter(c => !(c.headcount!=null && c.headcount < PISO));
+  const fueraPorTam = top.filter(c => c.headcount!=null && c.headcount < PISO);
+  for(const p of fueraPorTam) console.warn(`[SOURCE] fuera de ICP por tamaño (${p.headcount}<${PISO}): ${p.name} @ ${p.empresa||'?'}`);
+  const topICP = (cumplen.length >= NUM_CUENTAS) ? cumplen : top;
+  if(cumplen.length < NUM_CUENTAS) console.warn(`[SOURCE] piso ${PISO} dejó solo ${cumplen.length}/${NUM_CUENTAS} -> relajo el piso para no quedar corto.`);
   topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.score-a.score) || (a.dist-b.dist));
   const final = topICP.concat(out.slice(K)).slice(0, 12);
   const enCasa = final.filter(c=>c.cerca).length;
-  console.log(`[SOURCE] Pool: ${out.length} reales (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-ICP ${fueraICP.length} | devueltos ${final.length} (${enCasa} en ${geografia}) (kw="${kw}", fn=${fnId||'-'}, micro<${MICRO}).`);
+  console.log(`[SOURCE] Pool: ${out.length} reales (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraPorTam.length} | devueltos ${final.length} (${enCasa} en ${geografia}) (kw="${kw}", ind=[${indIds.join('+')||'-'}], fn=${fnId||'-'}, piso<${PISO}).`);
   return final;
 }
 
@@ -604,11 +625,14 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 
 ## Reglas
 - "fecha" = EXACTAMENTE la fecha de hoy que te paso en el mensaje (no inventes otra).
-- VERACIDAD (CRÍTICO): PROHIBIDO inventar métricas o datos duros (tiempos de respuesta, %, cantidades, "60 minutos", premios) en lead, proof, context, apertura o stats si no salen de web_search o de un dato real verificado. Los hooks de apertura NO pueden incluir números no verificados. Ante la duda, no lo pongas.
+- VERACIDAD (CRÍTICO): PROHIBIDO inventar métricas o datos duros. Esto incluye específicamente: cantidad de categorías/tipos de servicio (ej. "+300 categorías"), totales acumulados (ej. "+470.000 servicios"), tiempos de respuesta ("60 minutos"), %, premios, año de fundación o stage. Si un número NO sale textual de web_search o de una fuente verificable, NO lo pongas en ningún lado (lead, proof, context, apertura, stats, ribbon). Ante la duda, usá una formulación cualitativa SIN número ("amplia cobertura", "varias categorías de servicio"). Es preferible un reporte sin números a uno con números inventados.
+- STATS: que los 4 chips sean datos verificables o estructurales (ej: la cantidad ${N} de cuentas priorizadas, países de operación reales, año de fundación SOLO si lo verificaste). NUNCA rellenes un stat con un número inventado para que "quede lindo".
 - El ICP card "Rol del decisor" y el bloque _plan.funcion deben describir al MISMO comprador.
-- TÍTULO (H1): el protagonista es el CLIENTE y las cuentas son VALOR PARA ÉL. Construilo como "${N} clientes potenciales para [Cliente] en [País/Región]" → h1_pre="${N} clientes potenciales para", h1_company=nombre del cliente (lo resaltado), h1_post="en [País o región]". PROHIBIDO "para escalar" ni poner el tipo de cuenta antes que el cliente.
+- TÍTULO (H1): el CLIENTE va PRIMERO y resaltado. h1_pre = "" (vacío); h1_company = nombre del cliente (lo resaltado, va primero); h1_post = "— ${N} clientes potenciales en [País o región]". PROHIBIDO "para escalar".
 - IDIOMA: TODO en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.
-- GEOGRAFÍA (CRÍTICO): "geografia" = país del cliente (prioritario). "geografias" = país del cliente PRIMERO + SOLO los demás países donde el cliente HOY ya puede prestar el servicio / vender de verdad (sus países de operación actuales). PROHIBIDO incluir mercados de "expansión futura", aspiracionales o donde el cliente todavía NO opera: si hoy no puede entregar ahí, NO lo pongas. Excepción: si el cliente vende algo digital/remoto que sirve a toda LatAm, ahí sí listá varios. El sistema prioriza fuerte el país del cliente; los demás solo rellenan.
+- GEOGRAFÍA (CRÍTICO): "geografia" = país del cliente (prioritario). "geografias" = país del cliente PRIMERO + SOLO los demás países donde el cliente HOY ya puede prestar el servicio de verdad (sus países de operación actuales). PROHIBIDO mercados de expansión futura o donde el cliente todavía NO opera. El sistema prioriza fuerte el país del cliente; los demás solo rellenan.
+- INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar las VERTICALES ANCLA reales donde están los compradores del cliente (las mismas que marcás ALTA en "prioridades"). El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Construcción", "Banca"). NO pongas el rubro del propio cliente ni industrias genéricas.
+- TAMAÑO (para que salgan empresas ANCLA, no micro-empresas): "tamano_min" tiene que ser un número real de empleados que refleje el ICP. Si el ICP son empresas medianas y grandes / marcas ancla, poné un piso alto (ej: 200). Poné un piso bajo (20-50) SOLO si el ICP son genuinamente PyMEs/micro. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva.
 - LARGO (para que el overview entre en 1 página): lead = MÁX 2 oraciones; proof = MÁX 2 oraciones; cada bullet de context = 1 oración corta (máx ~140 caracteres). Sé conciso.
 - _plan.titulos_objetivo es CRÍTICO: el sistema rankea buscando estas palabras DENTRO del cargo. Palabras SUELTAS (no frases), ES+inglés+abreviaturas. Si el ICP apunta a empresas chicas donde compra el dueño/CEO, incluí "ceo, founder, owner, dueño, fundador".
 
@@ -616,9 +640,9 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 {
   "fecha": "Mes Año (la de hoy)",
   "eyebrow": "Análisis de mercado · ... (uppercase corto)",
-  "h1_pre": "${N} clientes potenciales para",
-  "h1_company": "Nombre del cliente (resaltado)",
-  "h1_post": "en [País o región]",
+  "h1_pre": "",
+  "h1_company": "Nombre del cliente (resaltado, va primero)",
+  "h1_post": "— ${N} clientes potenciales en [País o región]",
   "lead": "Máx 2 oraciones anclando el proof point REAL del cliente.",
   "proof": "El proof point / origen del cliente (máx 2 oraciones).",
   "ribbon": [ {"label":"Vertical","value":"..."}, {"label":"País","value":"..."}, {"label":"Fundada","value":"..."}, {"label":"Stage","value":"..."}, {"label":"Modelo","value":"..."} ],
@@ -627,7 +651,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "context": [ "bullet 1 (corto)", "bullet 2 (corto)", "bullet 3 (corto)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
   "prioridades": [ "Alta — ...", "Media — ...", "...", "..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA, ES+EN+abreviaturas"], "geografia": "País del cliente (prioritario, ej: Colombia)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera/puede prestar"], "industrias": ["industrias con fit"], "tamano_min": 0 }
+  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA, ES+EN+abreviaturas"], "geografia": "País del cliente (prioritario, ej: Colombia)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA reales y reconocibles, ej: Seguros, Comercio al por menor, Inmobiliario, Construcción"], "tamano_min": 200 }
 }
 CANTIDADES EXACTAS: ribbon 5, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
@@ -715,7 +739,7 @@ function armarReporte(plan, seleccion, pool){
     const empresa = p.empresa || _empresaDeHeadline(p.head) || '';
     if(!empresa){ console.warn(`[SELECT] card sin empresa real, descartada: ${p.name}`); continue; }
 
-    // --- GUARD ANTI-MEZCLA ---
+    // --- GUARD ANTI-MEZCLA: el ángulo/hook tienen que ser de ESTA persona/empresa ---
     const primerNombre = (_norm(p.name).split(' ')[0]) || '';
     const hookN = _norm(hook), angN = _norm(angulo), empN = _norm(empresa);
     const hookNombra = primerNombre.length >= 3 && hookN.includes(primerNombre);
