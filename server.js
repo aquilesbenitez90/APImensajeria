@@ -625,7 +625,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 
 ## Reglas
 - "fecha" = EXACTAMENTE la fecha de hoy que te paso en el mensaje (no inventes otra).
-- VERACIDAD (CRÍTICO): PROHIBIDO inventar métricas o datos duros. Esto incluye específicamente: cantidad de categorías/tipos de servicio (ej. "+300 categorías"), totales acumulados (ej. "+470.000 servicios"), tiempos de respuesta ("60 minutos"), %, premios, año de fundación o stage. Si un número NO sale textual de web_search o de una fuente verificable, NO lo pongas en ningún lado (lead, proof, context, apertura, stats, ribbon). Ante la duda, usá una formulación cualitativa SIN número ("amplia cobertura", "varias categorías de servicio"). Es preferible un reporte sin números a uno con números inventados.
+- VERACIDAD (CRÍTICO): PROHIBIDO inventar métricas o datos duros. Esto incluye específicamente: cantidad de categorías/tipos de servicio (ej. "+300 categorías"), totales acumulados (ej. "+470.000 servicios"), tiempos de respuesta ("60 minutos"), %, premios, año de fundación o stage. Si un número NO sale textual de web_search o de una fuente verificable, NO lo pongas en ningún lado (lead, proof, context, apertura, stats, ribbon). Ante la duda, usá una formulación cualitativa SIN número ("amplia cobertura", "varias categorías de servicio"). Es preferible un reporte sin números a uno con números inventados. REGLA DE ORO: antes de cerrar, releé CADA número que escribiste; si no podés señalar la fuente exacta de web_search de donde salió, BORRALO o pasalo a texto cualitativo. El invento más común y MÁS GRAVE es "+300 tipos de servicio" o "+X servicios/clientes": NO lo escribas jamás si no lo viste en una fuente.
 - STATS: que los 4 chips sean datos verificables o estructurales (ej: la cantidad ${N} de cuentas priorizadas, países de operación reales, año de fundación SOLO si lo verificaste). NUNCA rellenes un stat con un número inventado para que "quede lindo". Preferí stats que IMPACTEN y sean verificables (ciudades/países de cobertura, años en el mercado, la cantidad ${N} de cuentas). EVITÁ stats que subvendan al cliente, como su propia cantidad de empleados si es baja.
 - El ICP card "Rol del decisor" y el bloque _plan.funcion deben describir al MISMO comprador.
 - TÍTULO (H1): el CLIENTE va PRIMERO y resaltado. h1_pre = "" (vacío); h1_company = nombre del cliente (lo resaltado, va primero); h1_post = "· ${N} clientes potenciales en [País o región]" (separador "·", NUNCA un guion). PROHIBIDO "para escalar".
@@ -652,7 +652,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "context": [ "bullet 1 (corto)", "bullet 2 (corto)", "bullet 3 (corto)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
   "prioridades": [ "Alta: ...", "Media: ...", "...", "..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA, ES+EN+abreviaturas"], "geografia": "País del cliente (prioritario, ej: Colombia)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA reales y reconocibles, ej: Seguros, Comercio al por menor, Inmobiliario, Construcción"], "tamano_min": 200 }
+  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA, ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA reales y reconocibles, ej: Seguros, Comercio al por menor, Inmobiliario, Construcción"], "tamano_min": 200 }
 }
 CANTIDADES EXACTAS: ribbon 5, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
@@ -685,7 +685,7 @@ function _promptSelect(pedir, usar){ return `# IBT GTM — Fase SELECT (elegir +
 Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo textual, empresa, país y grado de conexión) y el contexto del cliente. Elegís los ${pedir} MEJORES decisores EN ORDEN de prioridad (el mejor primero) y escribís, para cada uno, un ángulo y un hook. El sistema usa los primeros ${usar} válidos.
 
 ## Cómo elegir (en este orden)
-1. FIT de función: el cargo tiene que ser CLARAMENTE del rol que compra lo del cliente. Si NO es claramente del área (ej. un "Project Manager", "Analyst" o "Coordinator" genérico sin facilities/operaciones/mantenimiento/marketing/etc. explícito), NO lo elijas aunque la empresa sea atractiva. Un "CEO/Dueño" de empresa chica sí sirve porque ahí decide.
+1. FIT de función (LO MÁS IMPORTANTE): el cargo tiene que ser CLARAMENTE del rol que compra lo del cliente. PROHIBIDO elegir gente de OTRA área que la del comprador: si el comprador es de Operaciones/Facilities/Mantenimiento/Administración, NO elijas a nadie de Marketing/Mercadeo/Ventas/Comercial/RR.HH./Finanzas, POR MÁS que la empresa sea una marca top. Un cargo suelto sin función clara ("Mercadeo", "Analista", "Coordinador" a secas) NO sirve. Un "CEO/Dueño" de empresa chica sí sirve porque ahí decide. MEJOR devolver MENOS cuentas (o repetir vertical) que UNA sola de función equivocada: una cuenta mal apuntada quema todo el reporte.
 2. PAÍS: preferí candidatos del PAÍS DEL CLIENTE (van marcados con ★ y vienen primero en la lista). Elegí de otro país de LatAm SOLO si no hay suficientes buenos del país del cliente. NUNCA elijas a alguien de un país donde el cliente no puede prestar el servicio.
 3. Decisor real: nada de analistas, trainees ni juniors.
 4. Empresa ANCLA con fit de ICP: usá los "empleados" que te muestro. Marca grande y conocida emociona; startup desconocida de 8 personas no. Pero si el ICP son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real.
@@ -742,6 +742,19 @@ function _sinGuiones(s){
   t = t.replace(/\s{2,}/g, ' ').replace(/\s+([,.;:?!)])/g, '$1').replace(/\(\s+/g, '(').replace(/,\s*,/g, ',').replace(/\s+,/g, ',').trim();
   return t;
 }
+// Suaviza números fabricados típicos (conteos de servicios/categorías/clientes y tiempos sin fuente),
+// que la IA a veces inventa pese a la instrucción. Solo prosa; NO toca stats ni ICP.
+function _sinInventos(s){
+  if(s==null) return s;
+  let t = String(s);
+  t = t.replace(/(?:\+|m[áa]s de|cerca de|alrededor de|unos?)\s*\d[\d.,]*\s*(tipos|categor[ií]as|clases)\s+de\s+servicios?/gi, 'múltiples $1 de servicio');
+  t = t.replace(/\b\d{3,}\s*(tipos|categor[ií]as|clases)\s+de\s+servicios?/gi, 'múltiples $1 de servicio');
+  t = t.replace(/(?:\+|m[áa]s de|cerca de|alrededor de)\s*\d[\d.,]{3,}\s*(servicios|clientes|usuarios|atenciones|operaciones|hogares|empresas)\b/gi, 'miles de $1');
+  t = t.replace(/(en\s+)?(menos de\s+)?(una|[0-9]+)\s*(hora|minuto)s?\b/gi, (m)=> /hora|minuto/i.test(m) ? 'en tiempos de respuesta cortos' : m);
+  t = t.replace(/\s{2,}/g,' ').replace(/\s+([,.;:?!])/g,'$1').trim();
+  return t;
+}
+const _limpia = s => _sinInventos(_sinGuiones(s));
 // Acorta un headline de LinkedIn relleno de keywords al segmento más relevante
 // (el que menciona la función objetivo), sin inventar nada.
 function _cargoCorto(head, kws){
@@ -751,6 +764,15 @@ function _cargoCorto(head, kws){
   const kwl = (kws||[]).map(k=>_norm(k)).filter(k=>k.length>=3);
   const best = segs.find(s => kwl.some(k => _norm(s).includes(k))) || segs[0];
   return best.length > 70 ? best.slice(0,70).trim() : best;
+}
+// ¿El cargo muestra la función objetivo o es un decisor genérico? Si no (ej. "Mercadeo", "Analista"
+// suelto cuando el comprador es Operaciones/Facilities), se descarta la card.
+function _rolRelevante(cargo, titulos){
+  const c = _norm(cargo);
+  const kws = (titulos||[]).map(k=>_norm(k)).filter(k=>k.length>=3);
+  if(kws.some(k=>c.includes(k))) return true;
+  const jefes = ['gerente','director','jefe','jefa','head','vp','vice','chief','ceo','coo','cfo','cto','founder','owner','dueno','propietario','presidente','lider','leader','coordinador','coordinadora','manager','responsable','encargado','encargada','administrador','administradora','superintendente'];
+  return jefes.some(j=>c.includes(j));
 }
 
 function armarReporte(plan, seleccion, pool){
@@ -767,6 +789,12 @@ function armarReporte(plan, seleccion, pool){
     const empresa = p.empresa || _empresaDeHeadline(p.head) || '';
     if(!empresa){ console.warn(`[SELECT] card sin empresa real, descartada: ${p.name}`); continue; }
 
+    // --- GUARDA DE FUNCIÓN: el cargo tiene que mostrar la función objetivo o ser un decisor ---
+    if(!_rolRelevante(String(p.head||'').split('@')[0], titulos)){
+      console.warn(`[SELECT] card DESCARTADA por FUNCIÓN equivocada/irrelevante: ${p.name} ("${String(p.head||'').slice(0,50)}")`);
+      continue;
+    }
+
     // --- GUARD ANTI-MEZCLA: el ángulo/hook tienen que ser de ESTA persona/empresa ---
     const primerNombre = (_norm(p.name).split(' ')[0]) || '';
     const hookN = _norm(hook), angN = _norm(angulo), empN = _norm(empresa);
@@ -777,7 +805,7 @@ function armarReporte(plan, seleccion, pool){
       console.warn(`[SELECT] card DESCARTADA por MEZCLA (no corresponde a ${p.name} @ ${empresa}) | hook="${hook.slice(0,70)}"`);
       continue;
     }
-    // --- fin guard ---
+    // --- fin guards ---
 
     const empKey = _empKey(empresa);
     if(empKey && usadasEmp.has(empKey)){ console.warn(`[SELECT] empresa DUPLICADA, ignorada: ${p.name} @ ${empresa}`); continue; }
@@ -788,18 +816,18 @@ function armarReporte(plan, seleccion, pool){
       urn: p.id, slug: _slugCos(p.name),
       ubicacion: p.loc || ((plan._plan && plan._plan.geografia) || ''),
       grado: _degOrdinal(p.dist===9?3:p.dist, '2do') + ' grado',
-      angulo: _sinGuiones(angulo), hook: _sinGuiones(hook)
+      angulo: _limpia(angulo), hook: _limpia(hook)
     });
   }
-  if(cards.length < NUM_CUENTAS) console.warn(`[SELECT] ⚠️ solo ${cards.length}/${NUM_CUENTAS} cards válidas tras dedupe/guard.`);
+  if(cards.length < NUM_CUENTAS) console.warn(`[SELECT] ⚠️ solo ${cards.length}/${NUM_CUENTAS} cards válidas tras dedupe/guards.`);
   const { _plan, ...base } = plan;
   if(!base.empresa) base.empresa = base.h1_company || '';
-  // Limpieza de guiones en TODO el texto generado de página 1.
-  for(const f of ['lead','proof','h1_post']) if(typeof base[f]==='string') base[f]=_sinGuiones(base[f]);
-  if(Array.isArray(base.context))     base.context     = base.context.map(_sinGuiones);
-  if(Array.isArray(base.apertura))    base.apertura    = base.apertura.map(_sinGuiones);
-  if(Array.isArray(base.prioridades)) base.prioridades = base.prioridades.map(_sinGuiones);
-  if(Array.isArray(base.icp))         base.icp         = base.icp.map(o => (o && typeof o.desc==='string') ? {...o, desc:_sinGuiones(o.desc)} : o);
+  // Limpieza de guiones + números inventados en TODO el texto generado de página 1.
+  for(const f of ['lead','proof','h1_post']) if(typeof base[f]==='string') base[f]=_limpia(base[f]);
+  if(Array.isArray(base.context))     base.context     = base.context.map(_limpia);
+  if(Array.isArray(base.apertura))    base.apertura    = base.apertura.map(_limpia);
+  if(Array.isArray(base.prioridades)) base.prioridades = base.prioridades.map(_limpia);
+  if(Array.isArray(base.icp))         base.icp         = base.icp.map(o => (o && typeof o.desc==='string') ? {...o, desc:_limpia(o.desc)} : o);
   return { ...base, cards };
 }
 
