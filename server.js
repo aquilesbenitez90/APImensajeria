@@ -626,10 +626,11 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 ## Reglas
 - "fecha" = EXACTAMENTE la fecha de hoy que te paso en el mensaje (no inventes otra).
 - VERACIDAD (CRÍTICO): PROHIBIDO inventar métricas o datos duros. Esto incluye específicamente: cantidad de categorías/tipos de servicio (ej. "+300 categorías"), totales acumulados (ej. "+470.000 servicios"), tiempos de respuesta ("60 minutos"), %, premios, año de fundación o stage. Si un número NO sale textual de web_search o de una fuente verificable, NO lo pongas en ningún lado (lead, proof, context, apertura, stats, ribbon). Ante la duda, usá una formulación cualitativa SIN número ("amplia cobertura", "varias categorías de servicio"). Es preferible un reporte sin números a uno con números inventados.
-- STATS: que los 4 chips sean datos verificables o estructurales (ej: la cantidad ${N} de cuentas priorizadas, países de operación reales, año de fundación SOLO si lo verificaste). NUNCA rellenes un stat con un número inventado para que "quede lindo".
+- STATS: que los 4 chips sean datos verificables o estructurales (ej: la cantidad ${N} de cuentas priorizadas, países de operación reales, año de fundación SOLO si lo verificaste). NUNCA rellenes un stat con un número inventado para que "quede lindo". Preferí stats que IMPACTEN y sean verificables (ciudades/países de cobertura, años en el mercado, la cantidad ${N} de cuentas). EVITÁ stats que subvendan al cliente, como su propia cantidad de empleados si es baja.
 - El ICP card "Rol del decisor" y el bloque _plan.funcion deben describir al MISMO comprador.
-- TÍTULO (H1): el CLIENTE va PRIMERO y resaltado. h1_pre = "" (vacío); h1_company = nombre del cliente (lo resaltado, va primero); h1_post = "— ${N} clientes potenciales en [País o región]". PROHIBIDO "para escalar".
+- TÍTULO (H1): el CLIENTE va PRIMERO y resaltado. h1_pre = "" (vacío); h1_company = nombre del cliente (lo resaltado, va primero); h1_post = "· ${N} clientes potenciales en [País o región]" (separador "·", NUNCA un guion). PROHIBIDO "para escalar".
 - IDIOMA: TODO en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.
+- SIN GUIONES (importante): NUNCA uses guiones largos (—) ni guiones (-) como conectores o para incisos, en NINGÚN texto (lead, proof, context, apertura, icp, prioridades). Reemplazalos por comas, paréntesis o dos puntos. Ej: en vez de "servicios técnicos —plomería, electricidad— con cobertura", escribí "servicios técnicos (plomería, electricidad) con cobertura". El texto tiene que sonar humano, no de IA.
 - GEOGRAFÍA (CRÍTICO): "geografia" = país del cliente (prioritario). "geografias" = país del cliente PRIMERO + SOLO los demás países donde el cliente HOY ya puede prestar el servicio de verdad (sus países de operación actuales). PROHIBIDO mercados de expansión futura o donde el cliente todavía NO opera. El sistema prioriza fuerte el país del cliente; los demás solo rellenan.
 - INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar las VERTICALES ANCLA reales donde están los compradores del cliente (las mismas que marcás ALTA en "prioridades"). El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Construcción", "Banca"). NO pongas el rubro del propio cliente ni industrias genéricas.
 - TAMAÑO (para que salgan empresas ANCLA, no micro-empresas): "tamano_min" tiene que ser un número real de empleados que refleje el ICP. Si el ICP son empresas medianas y grandes / marcas ancla, poné un piso alto (ej: 200). Poné un piso bajo (20-50) SOLO si el ICP son genuinamente PyMEs/micro. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva.
@@ -642,7 +643,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "eyebrow": "Análisis de mercado · ... (uppercase corto)",
   "h1_pre": "",
   "h1_company": "Nombre del cliente (resaltado, va primero)",
-  "h1_post": "— ${N} clientes potenciales en [País o región]",
+  "h1_post": "· ${N} clientes potenciales en [País o región]",
   "lead": "Máx 2 oraciones anclando el proof point REAL del cliente.",
   "proof": "El proof point / origen del cliente (máx 2 oraciones).",
   "ribbon": [ {"label":"Vertical","value":"..."}, {"label":"País","value":"..."}, {"label":"Fundada","value":"..."}, {"label":"Stage","value":"..."}, {"label":"Modelo","value":"..."} ],
@@ -650,7 +651,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "icp": [ {"title":"Rol del decisor","desc":"..."}, {"title":"Tamaño de empresa","desc":"..."}, {"title":"Geografía","desc":"..."}, {"title":"Vertical / industria","desc":"..."} ],
   "context": [ "bullet 1 (corto)", "bullet 2 (corto)", "bullet 3 (corto)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
-  "prioridades": [ "Alta — ...", "Media — ...", "...", "..." ],
+  "prioridades": [ "Alta: ...", "Media: ...", "...", "..." ],
   "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA, ES+EN+abreviaturas"], "geografia": "País del cliente (prioritario, ej: Colombia)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA reales y reconocibles, ej: Seguros, Comercio al por menor, Inmobiliario, Construcción"], "tamano_min": 200 }
 }
 CANTIDADES EXACTAS: ribbon 5, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
@@ -703,6 +704,9 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 - NUNCA menciones el grado de conexión (1er/2do/3er grado) ni inventes datos que no estén en lo que te paso.
 - IDIOMA: ángulo y hook en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos.
 - Texto plano: NADA de markdown (sin **negritas**, sin asteriscos). Solo el objeto JSON.
+- SIN GUIONES: NUNCA uses guiones largos (—) ni guiones (-) como conectores o incisos en el ángulo ni en el hook. Usá comas, paréntesis o dos puntos. El texto tiene que sonar a persona, no a IA.
+- ESTILO HUMANO (sutil): los hooks se mandan como si los escribiera una persona real, no una IA impecable. Está bien (y preferible) que ALGÚN hook corto no termine en punto, o que una pregunta casual vaya sin el signo de cierre "?", como cuando uno escribe rápido por chat. Que sea SUTIL y OCASIONAL: a lo sumo UN detalle así por hook, NUNCA en todos. PROHIBIDO errores de ortografía, palabras mal escritas o mayúsculas raras: lo único "relajado" permitido es esa puntuación final blanda. El mensaje tiene que verse profesional y creíble, solo que humano.
+- COMPETIDORES: NO elijas personas de empresas que sean COMPETIDORAS directas del cliente (que vendan/ofrezcan lo mismo). Preferí empresas que serían CLIENTES del cliente, no rivales.
 
 ## Output — SOLO JSON (sin texto alrededor)
 { "seleccion": [ {"id":"<id EXACTO de la lista>", "angulo":"...", "hook":"\\"...\\""} ] }
@@ -726,7 +730,31 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
 }
 
 // Ensamblado: HECHOS del pool (código); la IA solo aportó id + ángulo + hook.
+// Quita guiones largos/medios y guiones-conector del texto generado por la IA,
+// para que suene humano y no "de IA". Convierte incisos "—x—" en "(x)" y conectores en coma.
+function _sinGuiones(s){
+  if(s==null) return s;
+  let t = String(s);
+  t = t.replace(/\s*[—–]\s*([^—–]+?)\s*[—–]\s*/g, ' ($1) ');
+  t = t.replace(/^\s*[—–]\s*/, '');
+  t = t.replace(/\s*[—–]\s*/g, ', ');
+  t = t.replace(/\s+-\s+/g, ', ');
+  t = t.replace(/\s{2,}/g, ' ').replace(/\s+([,.;:?!)])/g, '$1').replace(/\(\s+/g, '(').replace(/,\s*,/g, ',').replace(/\s+,/g, ',').trim();
+  return t;
+}
+// Acorta un headline de LinkedIn relleno de keywords al segmento más relevante
+// (el que menciona la función objetivo), sin inventar nada.
+function _cargoCorto(head, kws){
+  let raw = String(head||'').split('@')[0].replace(/\s{2,}/g,' ').trim();
+  const segs = raw.split(/\s*[|•·]\s*|\s+[lI]\s+|\s+-\s+/).map(s=>s.trim()).filter(Boolean);
+  if(!segs.length) return raw;
+  const kwl = (kws||[]).map(k=>_norm(k)).filter(k=>k.length>=3);
+  const best = segs.find(s => kwl.some(k => _norm(s).includes(k))) || segs[0];
+  return best.length > 70 ? best.slice(0,70).trim() : best;
+}
+
 function armarReporte(plan, seleccion, pool){
+  const titulos = (plan._plan && plan._plan.titulos_objetivo) || [];
   const byId = new Map(pool.map(p=>[p.id, p]));
   const cards=[]; const usados=new Set(); const usadasEmp=new Set();
   for(const s of (seleccion||[])){
@@ -755,18 +783,23 @@ function armarReporte(plan, seleccion, pool){
     if(empKey && usadasEmp.has(empKey)){ console.warn(`[SELECT] empresa DUPLICADA, ignorada: ${p.name} @ ${empresa}`); continue; }
     usados.add(s.id);
     if(empKey) usadasEmp.add(empKey);
-    const cargoLimpio = String(p.head||'').split('@')[0].split('|')[0].trim() || _headlineLimpio(p.head) || p.head;
     cards.push({
-      empresa, nombre: p.name, cargo: cargoLimpio,
+      empresa, nombre: p.name, cargo: _cargoCorto(p.head, titulos),
       urn: p.id, slug: _slugCos(p.name),
       ubicacion: p.loc || ((plan._plan && plan._plan.geografia) || ''),
       grado: _degOrdinal(p.dist===9?3:p.dist, '2do') + ' grado',
-      angulo, hook
+      angulo: _sinGuiones(angulo), hook: _sinGuiones(hook)
     });
   }
   if(cards.length < NUM_CUENTAS) console.warn(`[SELECT] ⚠️ solo ${cards.length}/${NUM_CUENTAS} cards válidas tras dedupe/guard.`);
   const { _plan, ...base } = plan;
   if(!base.empresa) base.empresa = base.h1_company || '';
+  // Limpieza de guiones en TODO el texto generado de página 1.
+  for(const f of ['lead','proof','h1_post']) if(typeof base[f]==='string') base[f]=_sinGuiones(base[f]);
+  if(Array.isArray(base.context))     base.context     = base.context.map(_sinGuiones);
+  if(Array.isArray(base.apertura))    base.apertura    = base.apertura.map(_sinGuiones);
+  if(Array.isArray(base.prioridades)) base.prioridades = base.prioridades.map(_sinGuiones);
+  if(Array.isArray(base.icp))         base.icp         = base.icp.map(o => (o && typeof o.desc==='string') ? {...o, desc:_sinGuiones(o.desc)} : o);
   return { ...base, cards };
 }
 
