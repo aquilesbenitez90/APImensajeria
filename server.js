@@ -1,17 +1,19 @@
 /**
- * IBT GTM Report — server.js v7.2
+ * IBT GTM Report — server.js v7.3
  *
- * Sobre v7.1.1 (fix del "?"), suma:
- *   - NUM_CUENTAS configurable (default 3, antes 6). Toca cap de cards, SELECT, PLAN, juez e integridad.
- *   - Dedup por EMPRESA en armarReporte (_empKey): no se repiten empresas entre cards.
- *   - Título (H1) reframeado: el cliente es protagonista -> "N clientes potenciales para [Cliente] en [País]".
- *   - Español NEUTRO (usted, sin voseo) forzado en PLAN y SELECT.
- *   - GEOGRAFÍA LatAm: el PLAN emite "geografias" (país del cliente PRIMERO + otros LatAm con fit);
- *     sourceCandidates busca en todos y da boost de cercanía al país del cliente.
- *   - Juez: cantidad de cuentas y páginas se validan contra valores pasados en el mensaje
- *     (EXPECTED_PAGES=0 => no valida páginas, para la transición del template a N cuentas).
+ * Sobre v7.2 suma (todo apuntado a la credibilidad del lead, que es el corazón del producto):
+ *   - GEOGRAFÍA: el país del cliente MANDA. sourceCandidates prioriza fuerte a los candidatos
+ *     del país del cliente (en el enriquecido y en la selección final); los de otros países de
+ *     LatAm solo rellenan. El PLAN solo lista países donde el cliente HOY puede prestar servicio.
+ *   - ANTI-INVENCIÓN: SELECT no puede inflar/cambiar el cargo ni inventar estudios/seniority;
+ *     PLAN no puede inventar métricas (tiempos, %, cantidades) en lead/proof/context/apertura/stats.
+ *   - ÁNGULOS cortos (máx 2 oraciones) -> entran 3 cards en 1 hoja y se va el boilerplate.
+ *   - HOOKS con fórmula distinta entre sí (pain concreto por persona).
+ *   - LARGO acotado de lead/proof/context para que el overview entre en 1 página.
+ *   - Juez: el src del logo puede venir como "[LOGO]" (redacción interna), NO es error.
  *
- * FIX v7.1.1: empresa "?" — _empresaDeHeadline ignora "?", _parseProfile limpia "@ ?".
+ * v7.2: NUM_CUENTAS=3 configurable, dedup por empresa, título "N clientes potenciales para [Cliente]",
+ *       español neutro, geografias LatAm, EXPECTED_PAGES configurable, fix del "?".
  */
 
 const express = require('express');
@@ -27,12 +29,11 @@ const MODEL_GEN = 'claude-sonnet-4-6';
 const MODEL_JUDGE = 'claude-sonnet-4-6';
 const MODEL_FIX = 'claude-sonnet-4-6';
 
-// Cantidad de cuentas del reporte (antes 6). Configurable por env.
+// Cantidad de cuentas del reporte. Configurable por env.
 const NUM_CUENTAS = parseInt(process.env.NUM_CUENTAS || '3', 10);
 // Cuántas le pedimos a la IA: sobre-generamos para tener margen tras dedupe (persona + empresa).
 const PEDIR_SELECT = NUM_CUENTAS + 3;
-// Páginas esperadas del PDF para el juez. 0 = NO validar páginas (útil mientras se reacomoda
-// el template.html para N cuentas). Cuando sepas el número real, seteá EXPECTED_PAGES en Railway.
+// Páginas esperadas del PDF para el juez. 0 = NO validar páginas. Seteá EXPECTED_PAGES=2 cuando confirmes.
 const EXPECTED_PAGES = parseInt(process.env.EXPECTED_PAGES || '0', 10);
 
 const MCP_URL = 'https://backoffice-server-production.up.railway.app/api/mcp';
@@ -152,9 +153,7 @@ async function listMCPTools() {
   return toolList;
 }
 
-// ---------------------------------------------------------------------------
 // PROMPT viejo de generación directa (NO usado en el pipeline de 3 fases; se deja por compat).
-// ---------------------------------------------------------------------------
 const SYSTEM_PROMPT_HTML = `# IBT GTM Report — (legacy, sin uso en 3 fases)`;
 
 // ===========================================================================
@@ -180,20 +179,22 @@ Criterios:
 3. **Páginas del PDF** — te paso "Páginas esperadas" en el mensaje. Si dice "no validar", dá este criterio por PASS y NO lo evalúes. Si es un número, FAIL si el PDF no tiene exactamente esa cantidad de páginas.
 
 4. **VERACIDAD de los datos de la empresa** (CRÍTICO):
-   FAIL si el overview tiene datos que parecen inventados o demasiado específicos sin verificación (año de fundación, stage de funding, número de productos/clientes, métricas redondas sin fuente). Si todo el overview suena a "marketing copy genérico" → FAIL.
+   FAIL si el overview tiene datos que parecen inventados o demasiado específicos sin verificación (año de fundación, stage de funding, número de productos/clientes, métricas redondas sin fuente, tiempos de respuesta). Si todo el overview suena a "marketing copy genérico" → FAIL.
 
-5. **Coherencia interna** — el reporte trata sobre la empresa correcta, las cuentas hacen sentido para ese ICP.
-   FAIL si una de las cuentas target es la misma empresa mencionada como proof point/cliente del producto en el overview.
+5. **Coherencia interna + GEOGRAFÍA** (CRÍTICO) — el reporte trata sobre la empresa correcta y las cuentas hacen sentido para ese ICP.
+   FAIL si una cuenta target es la misma empresa mencionada como proof point/cliente del producto en el overview.
+   FAIL si una cuenta target está ubicada en un país donde el cliente NO opera / no puede prestar el servicio (mirá la geografía del ICP: las cuentas deben estar en los países de operación del cliente, priorizando el país principal).
 
 6. **Personalización del ÁNGULO y el HOOK** (CRÍTICO — esto lo escribe la IA):
    - Cada card con ángulo y hook ÚNICOS y específicos de ESA persona/empresa, con un pain concreto.
-   - FAIL si hay frases genéricas tipo "escalar tu operación" / "mejorar la eficiencia", o si los ángulos repiten la MISMA estructura.
+   - FAIL si hay frases genéricas tipo "escalar tu operación" / "mejorar la eficiencia", o si los ángulos/hooks repiten la MISMA estructura entre cards.
    - FAIL si el ángulo o el hook hablan de OTRA persona o empresa distinta a la de la card. El hook debe nombrar a la persona de ESA card.
-   - FAIL si el ángulo inventa datos de la empresa que NO se pueden inferir del cargo/headline.
-   (El cargo y la empresa de la card son datos REALES — NO los marques como inventados.)
+   - FAIL si el ángulo inventa o infla el cargo (ej. lo llama "Manager" cuando la card dice "Project Manager") o le atribuye estudios/seniority/área que NO constan en la card.
+   (El cargo y la empresa de la card son datos REALES — NO los marques como inventados, pero el ángulo NO puede contradecirlos ni agregarles títulos.)
 
 7. **Sin datos rotos** — sin [INSERT], TODO, undefined, lorem ipsum, placeholders {{...}} crudos, ni cards VACÍAS (sin nombre/empresa/cargo/link). Sin fechas incoherentes.
    (Mismo grado de conexión en varias cards NO es error.)
+   (El src del logo puede venir como "[LOGO]" — es una redacción interna nuestra para ahorrar tokens, NO es un error ni un placeholder roto; ignoralo.)
 
 8. **Proof points presentes y plausibles** — al menos 1 ancla de credibilidad del cliente. FAIL si suenan fabricados.
 
@@ -392,16 +393,14 @@ async function contarPaginas(pdfBuffer) {
 // ---------------------------------------------------------------------------
 // Resolución de identidad del cliente
 // ---------------------------------------------------------------------------
-// FIX v7.1.1: "?" NO es una empresa (la DB de IBT a veces trae "@ ?").
+// FIX: "?" NO es una empresa (la DB de IBT a veces trae "@ ?").
 function _empresaDeHeadline(txt){let m=(txt||'').match(/@\s*([^·•|(\n]+)/);if(!m)m=(txt||'').match(/\bat\s+([^·•|(\n]+)/i);const e=m?m[1].trim():'';return e==='?'?'':e;}
 function _empresaDeLookup(txt){const m=(txt||'').match(/Company:\s*(.+?)\s*(?:\[|—|\u2014|,|$)/i);return m?m[1].trim():'';}
 function _headcountDe(txt){const m=(txt||'').match(/([\d][\d.,]*)\s*employees/i);return m?(parseInt(m[1].replace(/[.,]/g,''),10)||null):null;}
 function _tier(h){if(h==null)return null;if(h<10)return'micro';if(h<50)return'chica';if(h<500)return'media';if(h<5000)return'grande';return'enterprise';}
 function _esEmailGratuito(d){return /(gmail|yahoo|hotmail|outlook|icloud|live|aol|proton|protonmail|gmx)\./i.test((d||'').trim());}
 function _mismaEmpresa(a,b){a=_norm(a);b=_norm(b);if(!a||!b)return false;if(a===b||a.includes(b)||b.includes(a))return true;const ta=new Set(a.split(' ').filter(w=>w.length>2));return b.split(' ').filter(w=>w.length>2).some(w=>ta.has(w));}
-// Clave de empresa para dedup determinístico. Saca sufijos legales/genéricos para que
-// "Tuya S.A" == "Tuya SA", pero sin colapsar distintas por una palabra común
-// (ej: "Grupo TCC" != "Grupo Bios", porque saca "grupo" y compara "tcc" vs "bios").
+// Clave de empresa para dedup: saca sufijos legales/genéricos ("Tuya S.A"=="Tuya SA", pero "Grupo TCC"!="Grupo Bios").
 function _empKey(emp){
   const k=_norm(emp).replace(/\b(sas|sa|s a|s a s|srl|s r l|ltda|ltd|inc|corp|llc|cia|compania|co|sapi|group|grupo|holding)\b/g,'').replace(/\s+/g,' ').trim();
   return k || _norm(emp);
@@ -476,12 +475,12 @@ function _rankFit(head, titulos){
   return (matchFuncion ? 100 : 10) + sen;
 }
 
-// FIX v7.1.1: limpia el sufijo "@ ?" del headline enriquecido (empresa sin resolver en DB).
+// FIX: limpia el sufijo "@ ?" del headline enriquecido (empresa sin resolver en DB).
 function _parseProfile(res){
   const s=String(res||'');
   const hc=(s.match(/(\d[\d,]*)\s+employees/)||[])[1];
   let headRich=((s.match(/—\s*(.+?)\s*\(\s*(?:\?|\d)/)||[])[1]||'').trim();
-  headRich=headRich.replace(/\s*@\s*\?\s*$/,'').trim();   // "@ ?" = empresa sin resolver en la DB, no es dato
+  headRich=headRich.replace(/\s*@\s*\?\s*$/,'').trim();
   return { headcount: hc?parseInt(hc.replace(/,/g,''),10):null, headRich };
 }
 function _sizeBoost(hc, tamMin){
@@ -503,9 +502,10 @@ function validarPlan(plan){
 async function sourceCandidates(plan, cliente){
   validarPlan(plan);
   const icp = plan._plan;
-  const geografia = icp.geografia;   // país del cliente (prioritario)
+  const geografia = icp.geografia;            // país del cliente (prioritario)
   const funcion   = icp.funcion;
-  // GEOGRAFÍA LatAm: país del cliente PRIMERO + otros países de LatAm con fit (los define el PLAN).
+  const homeGeo   = _norm(geografia||'');      // para priorizar el país del cliente
+  // país del cliente PRIMERO + solo países donde el cliente PUEDE prestar servicio hoy
   const geos = (Array.isArray(icp.geografias) && icp.geografias.length ? icp.geografias : [geografia]).filter(Boolean).slice(0, 6);
   const locIds = [];
   for(const g of geos){
@@ -531,16 +531,17 @@ async function sourceCandidates(plan, cliente){
     if(_rankSenioridad(p.head) < 1) continue;
     const emp=_empresaDeHeadline(p.head)||'';
     if(empCliente && emp && _mismaEmpresa(empCliente, emp)) continue;
-    out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, icp.titulos_objetivo) });
+    const cerca = homeGeo && _norm(p.loc||'').includes(homeGeo) ? 1 : 0;
+    out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, icp.titulos_objetivo) });
   }
-  out.sort((a,b)=> (b.fit-a.fit) || (a.dist-b.dist));
+  // EL PAÍS DEL CLIENTE MANDA: primero los de su país (por fit), después el resto de LatAm.
+  out.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (a.dist-b.dist));
 
   const K = parseInt(process.env.SOURCE_ENRICH_TOP || '14', 10);
   const noCache = String(process.env.SOURCE_ENRICH_NOCACHE||'').toLowerCase()==='true';
   const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
   const _microBase = parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
   const MICRO = Math.min(_microBase, tamMin>0 ? tamMin : _microBase);
-  const homeGeo = _norm(geografia||'');   // país del cliente -> boost de cercanía
   const top = out.slice(0, K);
   for(const c of top){
     try{
@@ -558,22 +559,24 @@ async function sourceCandidates(plan, cliente){
         c.fit     = _rankFit(fresh, icp.titulos_objetivo);
       }
     }catch{}
+    c.cerca  = homeGeo && _norm(c.loc||'').includes(homeGeo) ? 1 : 0;
     const warmth = c.dist===1?2 : c.dist===2?1 : 0;
-    const cerca  = homeGeo && _norm(c.loc||'').includes(homeGeo) ? 1 : 0;   // mismo país que el cliente = más cercano
-    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*2 + warmth + cerca;
+    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*2 + warmth;
   }
   const fueraICP = top.filter(c => c.headcount!=null && c.headcount < MICRO);
   for(const p of fueraICP) console.warn(`[SOURCE] fuera de ICP por tamaño (${p.headcount} emp < ${MICRO}), descartado: ${p.name} @ ${p.empresa||'?'}`);
   const topICP = top.filter(c => !(c.headcount!=null && c.headcount < MICRO));
-  topICP.sort((a,b)=> (b.score-a.score) || (a.dist-b.dist));
+  // país del cliente primero, después score; los de otros países solo rellenan
+  topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.score-a.score) || (a.dist-b.dist));
   const final = topICP.concat(out.slice(K)).slice(0, 12);
+  const enCasa = final.filter(c=>c.cerca).length;
   const refit = top.filter(c=>c._headViejo).length;
   const refrescados = top.filter(c=>c._fresco).length;
-  console.log(`[SOURCE] Pool: ${out.length} reales | enriquecidos ${top.length}${noCache?' (noCache)':''} | re-fit ${refit} | refrescados ${refrescados} | fuera-ICP ${fueraICP.length} | devueltos ${final.length} (loc=${locIds.join('+')||'?'}, fn=${fnId||funcion}, tamMin=${tamMin||'-'}, micro<${MICRO}).`);
+  console.log(`[SOURCE] Pool: ${out.length} reales (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length}${noCache?' (noCache)':''} | re-fit ${refit} | refrescados ${refrescados} | fuera-ICP ${fueraICP.length} | devueltos ${final.length} (${enCasa} en ${geografia}) (loc=${locIds.join('+')||'?'}, fn=${fnId||funcion}, tamMin=${tamMin||'-'}, micro<${MICRO}).`);
   return final;
 }
 
-// FASE 1 — IA: research + ICP + página 1. Prompt parametrizado por N (cantidad de cuentas).
+// FASE 1 — IA: research + ICP + página 1. Prompt parametrizado por N.
 function _promptPlan(N){ return `# IBT GTM — Fase PLAN (research + ICP + página 1)
 
 Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un prospecto. NO elegís personas todavía: eso lo hace el sistema. Vos investigás al cliente y definís a QUIÉN hay que buscar.
@@ -585,12 +588,13 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 
 ## Reglas
 - "fecha" = EXACTAMENTE la fecha de hoy que te paso en el mensaje (no inventes otra).
-- Datos de mercado (context): solo si salen de web_search; NO inventes porcentajes redondos.
+- VERACIDAD (CRÍTICO): PROHIBIDO inventar métricas o datos duros (tiempos de respuesta, %, cantidades, "60 minutos", premios) en lead, proof, context, apertura o stats si no salen de web_search o de un dato real verificado. Los hooks de apertura NO pueden incluir números no verificados. Ante la duda, no lo pongas.
 - El ICP card "Rol del decisor" y el bloque _plan.funcion deben describir al MISMO comprador.
-- TÍTULO (H1): el protagonista es el CLIENTE y las cuentas son VALOR PARA ÉL. Construilo como "${N} clientes potenciales para [Cliente] en [País o región]" → h1_pre="${N} clientes potenciales para", h1_company=nombre del cliente (lo resaltado), h1_post="en [País o región]". PROHIBIDO "para escalar" ni poner el tipo de cuenta antes que el cliente.
-- IDIOMA: TODO el contenido en ESPAÑOL NEUTRO latinoamericano, con trato de "usted". Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.
-- GEOGRAFÍA: los targets pueden ser de TODA Latinoamérica, no solo del país del cliente. "geografia" = el país del cliente (prioritario, el más cercano). "geografias" = ESE país PRIMERO + otros países de LatAm donde el cliente tenga fit comercial real para vender (no metas países donde no podría operar/vender). El sistema busca en todos pero prioriza el país del cliente.
-- _plan.titulos_objetivo es CRÍTICO: el sistema rankea los candidatos buscando estas palabras DENTRO del cargo. Palabras SUELTAS (no frases), ES+inglés+abreviaturas. Si el ICP apunta a empresas chicas donde compra el dueño/CEO, incluí "ceo, founder, owner, dueño, fundador".
+- TÍTULO (H1): el protagonista es el CLIENTE y las cuentas son VALOR PARA ÉL. Construilo como "${N} clientes potenciales para [Cliente] en [País/Región]" → h1_pre="${N} clientes potenciales para", h1_company=nombre del cliente (lo resaltado), h1_post="en [País o región]". PROHIBIDO "para escalar" ni poner el tipo de cuenta antes que el cliente.
+- IDIOMA: TODO en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.
+- GEOGRAFÍA (CRÍTICO): "geografia" = país del cliente (prioritario). "geografias" = país del cliente PRIMERO + SOLO los demás países donde el cliente HOY ya puede prestar el servicio / vender de verdad (sus países de operación actuales). PROHIBIDO incluir mercados de "expansión futura", aspiracionales o donde el cliente todavía NO opera: si hoy no puede entregar ahí, NO lo pongas. Excepción: si el cliente vende algo digital/remoto que sirve a toda LatAm, ahí sí listá varios. El sistema prioriza fuerte el país del cliente; los demás solo rellenan.
+- LARGO (para que el overview entre en 1 página): lead = MÁX 2 oraciones; proof = MÁX 2 oraciones; cada bullet de context = 1 oración corta (máx ~140 caracteres). Sé conciso.
+- _plan.titulos_objetivo es CRÍTICO: el sistema rankea buscando estas palabras DENTRO del cargo. Palabras SUELTAS (no frases), ES+inglés+abreviaturas. Si el ICP apunta a empresas chicas donde compra el dueño/CEO, incluí "ceo, founder, owner, dueño, fundador".
 
 ## Output — SOLO JSON (sin texto ni markdown alrededor)
 {
@@ -599,15 +603,15 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "h1_pre": "${N} clientes potenciales para",
   "h1_company": "Nombre del cliente (resaltado)",
   "h1_post": "en [País o región]",
-  "lead": "2-3 oraciones que anclan el proof point REAL del cliente.",
-  "proof": "El proof point / origen del cliente (texto del box PROOF).",
+  "lead": "Máx 2 oraciones anclando el proof point REAL del cliente.",
+  "proof": "El proof point / origen del cliente (máx 2 oraciones).",
   "ribbon": [ {"label":"Vertical","value":"..."}, {"label":"País","value":"..."}, {"label":"Fundada","value":"..."}, {"label":"Stage","value":"..."}, {"label":"Modelo","value":"..."} ],
   "stats": [ {"num":"...","label":"..."}, {"num":"${N}","label":"Cuentas priorizadas"}, {"num":"...","label":"..."}, {"num":"...","label":"..."} ],
   "icp": [ {"title":"Rol del decisor","desc":"..."}, {"title":"Tamaño de empresa","desc":"..."}, {"title":"Geografía","desc":"..."}, {"title":"Vertical / industria","desc":"..."} ],
-  "context": [ "bullet 1", "bullet 2", "bullet 3" ],
+  "context": [ "bullet 1 (corto)", "bullet 2 (corto)", "bullet 3 (corto)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
   "prioridades": [ "Alta — ...", "Media — ...", "...", "..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA, ES+EN+abreviaturas"], "geografia": "País del cliente (prioritario, ej: Colombia)", "geografias": ["País del cliente PRIMERO, después otros LatAm con fit (ej: Colombia, Chile, México)"], "industrias": ["industrias con fit"], "tamano_min": 0 }
+  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA, ES+EN+abreviaturas"], "geografia": "País del cliente (prioritario, ej: Colombia)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera/puede prestar"], "industrias": ["industrias con fit"], "tamano_min": 0 }
 }
 CANTIDADES EXACTAS: ribbon 5, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
@@ -637,27 +641,28 @@ async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
 // FASE 3 — IA: elige + escribe. Prompt parametrizado por (pedir, usar).
 function _promptSelect(pedir, usar){ return `# IBT GTM — Fase SELECT (elegir + escribir)
 
-Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo textual, empresa y grado de conexión) y el contexto del cliente. Elegís los ${pedir} MEJORES decisores EN ORDEN de prioridad (el mejor primero) y escribís, para cada uno, un ángulo y un hook. El sistema usa los primeros ${usar} válidos.
+Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo textual, empresa, país y grado de conexión) y el contexto del cliente. Elegís los ${pedir} MEJORES decisores EN ORDEN de prioridad (el mejor primero) y escribís, para cada uno, un ángulo y un hook. El sistema usa los primeros ${usar} válidos.
 
 ## Cómo elegir (en este orden)
-1. FIT de función: el cargo tiene que ser CLARAMENTE del rol que compra lo del cliente. Un "CEO/Dueño" de empresa chica puede servir; un C-level de un rubro que NO tiene que ver NO va, aunque sea senior. Ante la duda de fit, descartalo.
-2. Decisor real: nada de analistas, trainees ni juniors.
-3. Empresa ANCLA con fit de ICP: usá los "empleados" que te muestro. Marca grande y conocida emociona; startup desconocida de 8 personas no. Pero si el ICP son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real, no el tamaño por el tamaño.
-4. Coherencia / credibilidad: si cargo+empresa+ubicación se ve raro o confuso, no la elijas.
-5. Grado más cálido primero (1er/2do).
+1. FIT de función: el cargo tiene que ser CLARAMENTE del rol que compra lo del cliente. Si NO es claramente del área (ej. un "Project Manager", "Analyst" o "Coordinator" genérico sin facilities/operaciones/mantenimiento/marketing/etc. explícito), NO lo elijas aunque la empresa sea atractiva. Un "CEO/Dueño" de empresa chica sí sirve porque ahí decide.
+2. PAÍS: preferí candidatos del PAÍS DEL CLIENTE (van marcados con ★ y vienen primero en la lista). Elegí de otro país de LatAm SOLO si no hay suficientes buenos del país del cliente. NUNCA elijas a alguien de un país donde el cliente no puede prestar el servicio.
+3. Decisor real: nada de analistas, trainees ni juniors.
+4. Empresa ANCLA con fit de ICP: usá los "empleados" que te muestro. Marca grande y conocida emociona; startup desconocida de 8 personas no. Pero si el ICP son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real.
+5. Coherencia / credibilidad: si cargo+empresa+ubicación se ve raro, no la elijas.
+6. Grado más cálido primero (1er/2do).
 
 ## Reglas DURAS
 - Elegí SOLO ids que estén en la lista. PROHIBIDO inventar una persona, un id, un cargo o una empresa.
 - LOS ${pedir} ids tienen que ser DISTINTOS. Prohibido repetir la misma persona.
-- EMPRESAS DISTINTAS: cada cuenta es de una empresa DIFERENTE. PROHIBIDO elegir dos personas de la misma empresa. Si dos son de la misma empresa, quedate con el de mejor fit y completá con otra empresa.
+- EMPRESAS DISTINTAS: cada cuenta es de una empresa DIFERENTE. Si dos son de la misma empresa, quedate con el de mejor fit y completá con otra empresa.
+- PROHIBIDO inventar o inflar el cargo: usá EXACTAMENTE el que figura en la lista. Si dice "Project Manager", es "Project Manager" — no lo asciendas a "Manager de Mantenimiento" ni le inventes MBA, estudios, especialidad ni un rol que no está. No le atribuyas datos (seniority, área, formación) que no estén en lo que te paso.
 - CADA uno DEBE tener angulo y hook NO vacíos.
-- PROHIBIDO copiar/pegar un ángulo o hook de una persona a otra. El ángulo y el hook de cada id hablan SOLO de ESA persona y ESA empresa. Antes de cerrar, revisá que el nombre y la empresa que mencionás en cada ángulo sean los de ESE id.
-- El hook DEBE empezar nombrando a la persona por su PRIMER NOMBRE (ej: "Clara, ...").
-- El ángulo (3-4 oraciones) es ESPECÍFICO de esa persona/empresa: usá su cargo, empresa y —si está— el "perfil" REALES + lo que ofrece el cliente. Prohibido inventar datos. Cada ángulo 100% único.
-- NUNCA menciones el grado de conexión (1er/2do/3er grado) en el ángulo ni en el hook.
-- El hook: UNA sola oración de apertura entre comillas, lista para copiar y mandar.
+- El ÁNGULO: MÁXIMO 2 oraciones (≤ 320 caracteres), específico de ESA persona/empresa, usando su cargo/empresa/perfil REALES + lo que ofrece el cliente. Corto y al hueso, sin relleno. 100% único por persona.
+- PROHIBIDO copiar/pegar o calcar la estructura de un ángulo a otro. Antes de cerrar, revisá que el nombre y la empresa de cada ángulo sean los de ESE id.
+- El HOOK: UNA sola oración entre comillas, lista para mandar, empezando por el PRIMER NOMBRE (ej: "Clara, ..."). Los hooks NO pueden compartir la misma fórmula entre sí: cada uno arranca distinto y nombra un pain o contexto CONCRETO y DIFERENTE. Si los releés y suenan iguales, reescribilos.
+- NUNCA menciones el grado de conexión (1er/2do/3er grado) ni inventes datos que no estén en lo que te paso.
 - IDIOMA: ángulo y hook en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos.
-- Texto plano: NADA de markdown (sin **negritas**, sin asteriscos, sin comentarios). Solo el objeto JSON.
+- Texto plano: NADA de markdown (sin **negritas**, sin asteriscos). Solo el objeto JSON.
 
 ## Output — SOLO JSON (sin texto alrededor)
 { "seleccion": [ {"id":"<id EXACTO de la lista>", "angulo":"...", "hook":"\\"...\\""} ] }
@@ -668,11 +673,13 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
   const lista = pool.map((p,i)=>{
     const tam = p.headcount!=null ? ` (~${p.headcount} empleados)` : '';
     const ctx = (p.headRich && p.headRich!==p.head) ? ` | perfil: ${p.headRich}` : '';
-    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}`;
+    const loc = p.loc ? ` | ${p.loc}` : '';
+    const home = p.cerca ? ' ★(país del cliente)' : '';
+    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}`;
   }).join('\n');
-  const ctx = `Cliente: ${(cliente&&cliente.empresa)||plan.h1_company||''}. Qué ofrece / proof: ${String(plan.proof||plan.lead||'').slice(0,500)}. Función del comprador: ${(plan._plan&&plan._plan.funcion)||''}.`;
+  const ctx = `Cliente: ${(cliente&&cliente.empresa)||plan.h1_company||''}. País del cliente (prioritario): ${(plan._plan&&plan._plan.geografia)||''}. Qué ofrece / proof: ${String(plan.proof||plan.lead||'').slice(0,500)}. Función del comprador: ${(plan._plan&&plan._plan.funcion)||''}.`;
   const fixBloque = (fixes&&fixes.length) ? `\n\nCORRECCIONES del juez (aplicalas re-eligiendo o reescribiendo):\n- ${fixes.join('\n- ')}` : '';
-  const messages = [{ role:'user', content:`${ctx}\n\nLISTA REAL DE CANDIDATOS (elegí de ACÁ, por id EXACTO):\n${lista}${fixBloque}\n\nElegí los ${PEDIR_SELECT} MEJORES en ORDEN de prioridad (el mejor primero), de EMPRESAS distintas. Devolvé SOLO el JSON {"seleccion":[...]} con EXACTAMENTE ${PEDIR_SELECT} elementos distintos. El sistema arma el reporte con los primeros ${NUM_CUENTAS} válidos, así que un error puntual no rompe nada — pero los primeros ${NUM_CUENTAS} tienen que ser tus mejores.` }];
+  const messages = [{ role:'user', content:`${ctx}\n\nLISTA REAL DE CANDIDATOS (elegí de ACÁ, por id EXACTO; los ★ son del país del cliente):\n${lista}${fixBloque}\n\nElegí los ${PEDIR_SELECT} MEJORES en ORDEN de prioridad (el mejor primero), de EMPRESAS distintas y priorizando el país del cliente. Devolvé SOLO el JSON {"seleccion":[...]} con EXACTAMENTE ${PEDIR_SELECT} elementos distintos. El sistema arma el reporte con los primeros ${NUM_CUENTAS} válidos, así que los primeros ${NUM_CUENTAS} tienen que ser tus mejores.` }];
   const data = await callClaude({ model:MODEL_GEN, system:_promptSelect(PEDIR_SELECT, NUM_CUENTAS), messages, tools:[], maxTokens:6000 });
   const j = parseReporteJSON(data.content.find(b=>b.type==='text')?.text);
   return Array.isArray(j && j.seleccion) ? j.seleccion : [];
@@ -724,7 +731,7 @@ async function seleccionarConRetry({ cliente, plan, pool, fixes }){
   const MAX = parseInt(process.env.SELECT_MAX_TRIES || '2', 10);
   let best=null, bestN=-1;
   for(let i=1;i<=MAX;i++){
-    const extra = i>1 ? [`INTENTO ${i}: el intento previo no llegó a ${MIN} cuentas completas. Devolvé ${PEDIR_SELECT} ids EXACTOS de la lista (copiá el id tal cual), todos distintos, de EMPRESAS distintas, cada uno con empresa real + ángulo + hook.`] : [];
+    const extra = i>1 ? [`INTENTO ${i}: el intento previo no llegó a ${MIN} cuentas completas. Devolvé ${PEDIR_SELECT} ids EXACTOS de la lista (copiá el id tal cual), todos distintos, de EMPRESAS distintas y priorizando el país del cliente, cada uno con empresa real + ángulo + hook.`] : [];
     const seleccion = await runSelectWrite({ cliente, plan, pool, fixes: (fixes||[]).concat(extra) });
     const data = armarReporte(plan, seleccion, pool);
     const n = _cuentaCompletas(data);
