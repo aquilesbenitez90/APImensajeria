@@ -19,7 +19,7 @@ function _logoDataUri() {
 }
 
 /**
- * Render de reporte GTM determinístico.
+ * Render de reporte determinístico.
  * La IA YA NO genera HTML: devuelve SOLO el objeto `data` (ver schema abajo).
  * Esta función pega ese data en template.html (diseño fijo) -> HTML final.
  *
@@ -32,7 +32,7 @@ function _logoDataUri() {
  *   context: [string]           x3,
  *   apertura:[string]           x3,
  *   prioridades:[string]        x4,
- *   cards:   [{ empresa, nombre, cargo, slug, urn, ubicacion, grado, angulo, hook }] x6
+ *   cards:   [{ empresa, nombre, cargo, slug, urn, ubicacion, grado, angulo, hook }] x3
  * }
  * Nota: `urn` es el member URN real (ACwAA...). El href usa urn; el texto visible usa slug.
  * Si urn viene vacío, cae al slug (compatibilidad).
@@ -96,10 +96,10 @@ function renderReport(data, templatePath) {
   for (const k of Object.keys(flat)) {
     html = html.split('{{' + k + '}}').join(_esc(flat[k]));
   }
-  // Logo del repo: pisa el base64 embebido de la plantilla si el archivo existe.
+  // Logo del repo: pisa el base64 embebido en TODAS las páginas (flag g) si el archivo existe.
   const logo = _logoDataUri();
-  if (logo) html = html.replace(/src="data:image\/png;base64,[A-Za-z0-9+/=]+"/, 'src="' + logo + '"');
-  // Seguridad: si el gen entregó menos items de los esperados (p.ej. 5 cards en vez de 6),
+  if (logo) html = html.replace(/src="data:image\/png;base64,[A-Za-z0-9+/=]+"/g, () => 'src="' + logo + '"');
+  // Seguridad: si el gen entregó menos cards de las esperadas (p.ej. 2 en vez de 3),
   // no dejes {{...}} crudos en el PDF. Logueá cuáles faltaron y blanqueá.
   const leftover = html.match(/\{\{[^}]+\}\}/g);
   if (leftover && leftover.length) {
