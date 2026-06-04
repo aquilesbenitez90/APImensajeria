@@ -27,7 +27,6 @@ const { renderReport } = require('./render.js'); // plantilla fija + datos JSON 
 // ---------------------------------------------------------------------------
 const MODEL_GEN = 'claude-sonnet-4-6';
 const MODEL_JUDGE = 'claude-sonnet-4-6';
-const MODEL_FIX = 'claude-sonnet-4-6';
 
 // Cantidad de cuentas del reporte. Configurable por env.
 const NUM_CUENTAS = parseInt(process.env.NUM_CUENTAS || '3', 10);
@@ -153,8 +152,7 @@ async function listMCPTools() {
   return toolList;
 }
 
-// PROMPT viejo de generación directa (NO usado en el pipeline de 3 fases; se deja por compat).
-const SYSTEM_PROMPT_HTML = `# IBT GTM Report — (legacy, sin uso en 3 fases)`;
+// PROMPT viejo de generación directa: eliminado (el pipeline usa 3 fases).
 
 // ===========================================================================
 // JUEZ de calidad
@@ -202,8 +200,6 @@ Respondé EXCLUSIVAMENTE con JSON válido, sin markdown, sin texto extra:
 {"veredicto":"APROBADO"|"RECHAZADO","score":<0-8>,"fixes":["fix concreto 1","fix concreto 2"]}
 
 APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concretas.`;
-
-const SYSTEM_PROMPT_FIX = `Sos el corrector del reporte de IBT. Recibís los DATOS en JSON y correcciones del juez. Aplicá SOLO las correcciones necesarias y devolvé el MISMO objeto JSON corregido, misma estructura y nombres de campo (sin HTML, sin markdown). NUNCA inventes datos.`;
 
 // ---------------------------------------------------------------------------
 // Llamadas a Claude — CON PROMPT CACHING + logging de tokens
@@ -301,6 +297,15 @@ function parseReporteJSON(raw) {
   throw new Error('JSON inválido tras limpieza: ' + (lastErr && lastErr.message));
 }
 
+// De los content blocks de una respuesta de Claude, devuelve el texto que contiene el JSON.
+// Con web_search la respuesta trae varios bloques de texto (preámbulo + resultado), y el JSON
+// queda en el ÚLTIMO. .find() agarraba el primer bloque (el preámbulo, sin "{") y reventaba.
+function _textoJSON(content){
+  const texts = (content || []).filter(b => b && b.type === 'text').map(b => String(b.text || ''));
+  for (let i = texts.length - 1; i >= 0; i--) { if (texts[i].includes('{')) return texts[i]; }
+  return texts.join('\n');
+}
+
 async function runJudge(html, pageCount) {
   currentStage = 'judge';
   console.log(`[JUDGE] Evaluando reporte (${pageCount} páginas, esperadas ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}, cuentas ${NUM_CUENTAS})...`);
@@ -314,7 +319,7 @@ async function runJudge(html, pageCount) {
       role: 'user',
       content: `Cuentas esperadas: ${NUM_CUENTAS}\nPáginas esperadas: ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}\nPáginas del PDF renderizado: ${pageCount}\n\nHTML del reporte:\n${htmlLite}`
     }],
-    maxTokens: 2000
+    maxTokens: 4000
   });
 
   const raw = data.content.find(b => b.type === 'text')?.text || '';
@@ -404,6 +409,12 @@ function _mismaEmpresa(a,b){a=_norm(a);b=_norm(b);if(!a||!b)return false;if(a===
 function _empKey(emp){
   const k=_norm(emp).replace(/\b(sas|sa|s a|s a s|srl|s r l|ltda|ltd|inc|corp|llc|cia|compania|co|sapi|group|grupo|holding)\b/g,'').replace(/\s+/g,' ').trim();
   return k || _norm(emp);
+}
+// ¿La empresa del candidato es un competidor directo del cliente? Matchea contra NOMBRES de empresa
+// competidora (no contra palabras del headline, para no descartar a un comprador cuyo cargo dice "asistencia").
+function _esCompetidor(empresa, competidores){
+  const e = _norm(empresa||''); if(!e) return false;
+  return (competidores||[]).some(c => c && c.length>=4 && (e.includes(c) || c.includes(e)));
 }
 
 async function resolverCliente({ profileId, dominio, empresa }) {
@@ -517,7 +528,13 @@ async function sourceCandidates(plan, cliente){
     : String(funcion||'').replace(/[\/|]+/g,' ').replace(/\s+/g,' ').trim();
 
   async function locId(nombrePais){
-    try{ return (String(await callMCP('resolve_sales_navigator_id',{type:'LOCATION',keywords:nombrePais,limit:1})).match(/id="?([0-9]+)"?/)||[])[1] || null; }catch{ return null; }
+    try{
+      const txt = String(await callMCP('resolve_sales_navigator_id',{type:'LOCATION',keywords:nombrePais,limit:8}));
+      const matches = [...txt.matchAll(/id="?([0-9]+)"?\s+"([^"]+)"/g)].map(m=>({id:m[1],name:m[2]}));
+      const exacto = matches.find(m=> _norm(m.name)===_norm(nombrePais)); // "Colombia", NO "Antioquia, Colombia"
+      if(!exacto && matches[0]) console.warn(`[SOURCE] LOCATION "${nombrePais}": sin match exacto de país, uso "${matches[0].name}".`);
+      return (exacto||matches[0])?.id || null;
+    }catch{ return null; }
   }
   let fnId=null;
   try{ fnId=(String(await callMCP('resolve_sales_navigator_id',{type:'FUNCTION',keywords:funcion,limit:3})).match(/id="?([A-Za-z0-9_]+)"?/)||[])[1]||null; }catch{}
@@ -540,32 +557,36 @@ async function sourceCandidates(plan, cliente){
   }
 
   const _validosHome = arr => arr.filter(p => _rankSenioridad(p.head) >= 2 && _norm(p.loc||'').includes(homeGeo)).length;
+
+  // GEOGRAFÍA: país principal PRIMERO + países donde el cliente HOY opera (cercanos).
+  // Se buscan TODOS juntos para tener el mejor pool posible; el orden final (cerca-first) prioriza el país principal.
   const homeId  = await locId(geografia);
   const homeLoc = homeId ? [homeId] : null;
+  const opsIds  = [];
+  for(const g of secundarias){ const id = await locId(g); if(id && id!==homeId && !opsIds.includes(id)) opsIds.push(id); }
+  const geoLoc  = [...(homeLoc||[]), ...opsIds];
+  const geoLocOrNull = geoLoc.length ? geoLoc : null;
   const HOME_MIN = parseInt(process.env.SOURCE_HOME_MIN || String(NUM_CUENTAS + 2), 10);
 
-  // 1) país principal + industrias ancla (el mejor fit posible)
-  let pool = await buscar(homeLoc, true);
-  console.log(`[SOURCE] "${geografia}" + ind [${(icp.industrias||[]).join(', ')||'-'}]: ${pool.length} perfiles (${_validosHome(pool)} decisores locales).`);
+  // 1) país principal + cercanos + industrias ancla (mejor fit; el país principal manda en el orden)
+  let pool = await buscar(geoLocOrNull, true);
+  console.log(`[SOURCE] geo [${[geografia,...secundarias].join(', ')||'-'}] + ind [${(icp.industrias||[]).join(', ')||'-'}]: ${pool.length} perfiles (${_validosHome(pool)} decisores en ${geografia}).`);
 
-  // 2) si la industria estricta deja poco, mismo país sin industria (recall)
+  // 2) si el país principal queda corto de decisores, misma geo sin filtro de industria (recall)
   if(_validosHome(pool) < HOME_MIN){
-    pool = pool.concat(await buscar(homeLoc, false));
-    console.log(`[SOURCE] recall ${geografia} sin industria: total ${pool.length} (${_validosHome(pool)} decisores locales).`);
-  }
-  // 3) recién si el principal no alcanza, países secundarios donde el cliente opera
-  if(_validosHome(pool) < HOME_MIN && secundarias.length){
-    const secIds=[]; for(const g of secundarias){ const id=await locId(g); if(id) secIds.push(id); }
-    if(secIds.length){ pool = pool.concat(await buscar(secIds, indIds.length>0)); console.log(`[SOURCE] secundarias [${secundarias.join(', ')}] sumadas.`); }
+    pool = pool.concat(await buscar(geoLocOrNull, false));
+    console.log(`[SOURCE] recall sin industria: total ${pool.length} (${_validosHome(pool)} decisores en ${geografia}).`);
   }
 
-  // dedupe + descartes (decisor real, no la propia empresa del cliente)
+  // dedupe + descartes (decisor real, no la propia empresa del cliente, no competidores)
+  const competidores = (Array.isArray(icp.competidores)?icp.competidores:[]).map(_norm).filter(c=>c.length>=4);
   const vistos=new Set(); const out=[]; const empCliente=_norm((cliente&&cliente.empresa)||'');
   for(const p of pool){
     if(!p.id || vistos.has(p.id)) continue; vistos.add(p.id);
     if(_rankSenioridad(p.head) < 1) continue;                 // descarta asistente/analista/becario/junior
     const emp=_empresaDeHeadline(p.head)||'';
     if(empCliente && emp && _mismaEmpresa(empCliente, emp)) continue;
+    if(emp && _esCompetidor(emp, competidores)){ console.warn(`[SOURCE] descartado por COMPETIDOR: ${p.name} @ ${emp}`); continue; }
     const cerca = homeGeo && _norm(p.loc||'').includes(homeGeo) ? 1 : 0;
     out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos) });
   }
@@ -622,6 +643,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - GEOGRAFÍA (CRÍTICO): "geografia" = país del cliente (prioritario). "geografias" = país del cliente PRIMERO + SOLO los demás países donde el cliente HOY ya puede prestar el servicio de verdad (sus países de operación actuales). PROHIBIDO mercados de expansión futura o donde el cliente todavía NO opera. El sistema prioriza fuerte el país del cliente; los demás solo rellenan.
 - INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar las VERTICALES ANCLA reales donde están los compradores del cliente (las mismas que marcás ALTA en "prioridades"). El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Construcción", "Banca"). NO pongas el rubro del propio cliente ni industrias genéricas.
 - TAMAÑO (para que salgan empresas ANCLA, no micro-empresas): "tamano_min" tiene que ser un número real de empleados que refleje el ICP. Si el ICP son empresas medianas y grandes / marcas ancla, poné un piso alto (ej: 200). Poné un piso bajo (20-50) SOLO si el ICP son genuinamente PyMEs/micro. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva.
+- COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas que compiten DIRECTO con el cliente (venden/ofrecen lo mismo). El sistema EXCLUYE de los candidatos a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES que hayas visto en el research (ej. para una empresa de asistencia técnica: otras redes de asistencia como "Iké Asistencia", "Asissprex"). NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque eso descartaría compradores legítimos cuyo cargo menciona esas palabras. Si no identificás competidores claros, dejá la lista vacía.
 - LARGO (para que el overview entre en 1 página): lead = MÁX 2 oraciones; proof = MÁX 2 oraciones; cada bullet de context = 1 oración corta (máx ~140 caracteres). Sé conciso.
 - _plan.titulos_objetivo es CRÍTICO: el sistema rankea buscando estas palabras DENTRO del cargo. Palabras SUELTAS (no frases), ES+inglés+abreviaturas. Si el ICP apunta a empresas chicas donde compra el dueño/CEO, incluí "ceo, founder, owner, dueño, fundador".
 
@@ -640,7 +662,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "context": [ "bullet 1 (corto)", "bullet 2 (corto)", "bullet 3 (corto)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
   "prioridades": [ "Alta: ...", "Media: ...", "...", "..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA, ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA reales y reconocibles, ej: Seguros, Comercio al por menor, Inmobiliario, Construcción"], "tamano_min": 200 }
+  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA, ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA reales y reconocibles, ej: Seguros, Comercio al por menor, Inmobiliario, Construcción"], "competidores": ["NOMBRES de empresas competidoras directas a EXCLUIR (que venden lo mismo que el cliente), ej: Iké Asistencia, Asissprex"], "tamano_min": 200 }
 }
 CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
@@ -656,13 +678,14 @@ async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
     const data = await callClaude({ model:MODEL_GEN, system:_promptPlan(NUM_CUENTAS), messages, tools: cerrar?[]:[WEB_SEARCH_TOOL], maxTokens:8000 });
     contarYLoguearWebSearch(data, 'PLAN');
     messages.push({ role:'assistant', content:data.content });
+    if(data.stop_reason==='pause_turn') continue; // turno largo de web_search: reanudar el turno
     if(data.stop_reason==='end_turn' || data.stop_reason==='stop_sequence')
-      return parseReporteJSON(data.content.find(b=>b.type==='text')?.text);
+      return parseReporteJSON(_textoJSON(data.content));
     if(data.stop_reason==='tool_use'){
       const tr=[]; for(const b of data.content){ if(b.type!=='tool_use') continue; tr.push({type:'tool_result',tool_use_id:b.id,content:await callMCP(b.name,b.input)}); }
       it++; if(it>=MAX) cerrar=true;
       if(tr.length){ if(cerrar) tr.push({type:'text',text:'Suficiente research. Devolvé YA el JSON.'}); messages.push({role:'user',content:tr}); }
-      else return parseReporteJSON(messages.filter(m=>m.role==='assistant').pop()?.content?.find(b=>b.type==='text')?.text||'');
+      else return parseReporteJSON(_textoJSON(messages.filter(m=>m.role==='assistant').pop()?.content));
     }
   }
 }
@@ -713,7 +736,7 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
   const fixBloque = (fixes&&fixes.length) ? `\n\nCORRECCIONES del juez (aplicalas re-eligiendo o reescribiendo):\n- ${fixes.join('\n- ')}` : '';
   const messages = [{ role:'user', content:`${ctx}\n\nLISTA REAL DE CANDIDATOS (elegí de ACÁ, por id EXACTO; los ★ son del país del cliente):\n${lista}${fixBloque}\n\nElegí los ${PEDIR_SELECT} MEJORES en ORDEN de prioridad (el mejor primero), de EMPRESAS distintas y priorizando el país del cliente. Devolvé SOLO el JSON {"seleccion":[...]} con EXACTAMENTE ${PEDIR_SELECT} elementos distintos. El sistema arma el reporte con los primeros ${NUM_CUENTAS} válidos, así que los primeros ${NUM_CUENTAS} tienen que ser tus mejores.` }];
   const data = await callClaude({ model:MODEL_GEN, system:_promptSelect(PEDIR_SELECT, NUM_CUENTAS), messages, tools:[], maxTokens:6000 });
-  const j = parseReporteJSON(data.content.find(b=>b.type==='text')?.text);
+  const j = parseReporteJSON(_textoJSON(data.content));
   return Array.isArray(j && j.seleccion) ? j.seleccion : [];
 }
 
@@ -918,6 +941,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
       cards_validas: cardsValidas,
       cards_descartadas: descartadas,
       nombre, email,
+      pdf_filename: _nombreArchivoPDF(empresaFinal),
       paginas: pageCount,
       juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8',
       juez_fixes: judgeResult.fixes,
@@ -1030,6 +1054,7 @@ app.post('/generar-reporte', async (req, res) => {
       cards_validas: cardsValidas,
       cards_descartadas: descartadas,
       nombre: nombre || '', email,
+      pdf_filename: _nombreArchivoPDF(empresaFinal),
       paginas: pageCount,
       juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8',
       juez_fixes: judgeResult.fixes,
