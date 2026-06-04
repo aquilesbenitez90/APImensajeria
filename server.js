@@ -481,6 +481,9 @@ function _rankFit(head, titulos){
   const sen=_rankSenioridad(head);
   return (matchFuncion ? 100 : 10) + sen;
 }
+// Calidez de la conexión: 1er grado > 2do > 3ro > fuera de red. Se usa SOLO como desempate
+// (a igual fit/país gana el más cálido), nunca por encima del fit. El skill GTM pide priorizar 2do grado.
+function _warmth(dist){ return dist===1 ? 3 : dist===2 ? 2 : dist===3 ? 1 : 0; }
 
 // FIX: limpia el sufijo "@ ?" del headline enriquecido (empresa sin resolver en DB).
 function _parsePeople(res){
@@ -524,10 +527,11 @@ async function sourceCandidates(plan, cliente){
 
   // TÉRMINOS de rol: Sales Navigator NO tolera keywords multi-palabra (las trata como frase casi-exacta
   // y devuelve 0). Buscamos UN término por vez y unimos. Cada título objetivo es un término (1-2 palabras).
+  // Hasta 7 para que entren tanto los roles de facilities como los del producto/canal del cliente.
   const terminos = (titulos.length ? titulos : [funcion])
     .map(t=>String(t||'').replace(/[\/|]+/g,' ').replace(/\s+/g,' ').trim())
     .filter(t=>t.length>=3)
-    .slice(0,5);
+    .slice(0,7);
 
   async function locId(nombrePais){
     try{
@@ -605,7 +609,7 @@ async function sourceCandidates(plan, cliente){
     out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos) });
   }
   // orden por FIT (el grado NO entra): primero locales, después fit, después seniority
-  out.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (b.rank-a.rank));
+  out.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.rank-a.rank));
 
   // enriquecer el top por cargo y tamaño
   const K = parseInt(process.env.SOURCE_ENRICH_TOP || '14', 10);
@@ -622,7 +626,7 @@ async function sourceCandidates(plan, cliente){
       }
     }catch{}
     c.cerca = homeGeo && _norm(c.loc||'').includes(homeGeo) ? 1 : 0;
-    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + c.cerca;   // fit y tamaño mandan; el grado NO entra
+    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + c.cerca + _warmth(c.dist);   // fit y tamaño mandan; el grado solo desempata
   }
   // piso de tamaño contra el ICP, SIN vaciar el pool
   const cumplen  = top.filter(c => !(c.headcount!=null && c.headcount < PISO));
@@ -630,7 +634,7 @@ async function sourceCandidates(plan, cliente){
   for(const p of fueraTam) console.warn(`[SOURCE] fuera de ICP por tamaño (${p.headcount}<${PISO}): ${p.name} @ ${p.empresa||'?'}`);
   const topICP = (cumplen.length >= NUM_CUENTAS) ? cumplen : top;
   if(cumplen.length < NUM_CUENTAS) console.warn(`[SOURCE] piso ${PISO} dejó ${cumplen.length}/${NUM_CUENTAS} -> relajo el piso para no quedar corto.`);
-  topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (b.score-a.score));
+  topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.score-a.score));
   const final = topICP.concat(out.slice(K)).slice(0, 12);
   console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | devueltos ${final.length} (terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], fn=${fnId||'-'}, piso<${PISO}).`);
   return final;
@@ -655,11 +659,11 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - IDIOMA: TODO en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.
 - SIN GUIONES (importante): NUNCA uses guiones largos (—) ni guiones (-) como conectores o para incisos, en NINGÚN texto (lead, proof, context, apertura, icp, prioridades). Reemplazalos por comas, paréntesis o dos puntos. Ej: en vez de "servicios técnicos —plomería, electricidad— con cobertura", escribí "servicios técnicos (plomería, electricidad) con cobertura". El texto tiene que sonar humano, no de IA.
 - GEOGRAFÍA (CRÍTICO): "geografia" = país del cliente (prioritario). "geografias" = país del cliente PRIMERO + SOLO los demás países donde el cliente HOY ya puede prestar el servicio de verdad (sus países de operación actuales). PROHIBIDO mercados de expansión futura o donde el cliente todavía NO opera. El sistema prioriza fuerte el país del cliente; los demás solo rellenan.
-- INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar las VERTICALES ANCLA reales donde están los compradores del cliente (las mismas que marcás ALTA en "prioridades"). El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Construcción", "Banca"). NO pongas el rubro del propio cliente ni industrias genéricas.
+- INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar las VERTICALES ANCLA reales donde están los COMPRADORES del cliente (las mismas que marcás ALTA en "prioridades"). El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Banca", "Administración de propiedades"). NO pongas el rubro del propio cliente ni industrias genéricas. EVITÁ verticales industriales/pesadas amplias (ej. "Construcción", "Manufactura", "Minería", "Cemento") salvo que sean LITERALMENTE el comprador: arrastran jefes de mantenimiento de planta que consumen el servicio puertas adentro pero NO son el canal de compra. Ante la duda, preferí las verticales donde el producto del cliente se compra o se revende.
 - TAMAÑO (para que salgan empresas ANCLA, no micro-empresas): "tamano_min" tiene que ser un número real de empleados que refleje el ICP. Si el ICP son empresas medianas y grandes / marcas ancla, poné un piso alto (ej: 200). Poné un piso bajo (20-50) SOLO si el ICP son genuinamente PyMEs/micro. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva.
 - COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas que compiten DIRECTO con el cliente (venden/ofrecen lo mismo). El sistema EXCLUYE de los candidatos a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES que hayas visto en el research (ej. para una empresa de asistencia técnica: otras redes de asistencia como "Iké Asistencia", "Asissprex"). NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque eso descartaría compradores legítimos cuyo cargo menciona esas palabras. Si no identificás competidores claros, dejá la lista vacía.
 - LARGO (para que el overview entre en 1 página): lead = MÁX 2 oraciones; proof = MÁX 2 oraciones; cada bullet de context = 1 oración corta (máx ~140 caracteres). Sé conciso.
-- _plan.titulos_objetivo es CRÍTICO: el sistema rankea buscando estas palabras DENTRO del cargo. Palabras SUELTAS (no frases), ES+inglés+abreviaturas. Si el ICP apunta a empresas chicas donde compra el dueño/CEO, incluí "ceo, founder, owner, dueño, fundador".
+- _plan.titulos_objetivo es CRÍTICO: el sistema rankea y BUSCA con estas palabras (una por una) dentro del cargo. Palabras SUELTAS (no frases), ES+inglés+abreviaturas. Pensá DOS tipos de comprador y poné términos de AMBOS: (a) el que CONSUME el servicio puertas adentro (operaciones, facilities, mantenimiento, servicios generales, administrador); y (b) el que dentro de la empresa-canal OWNS la línea de producto/relación que mapea con lo que vende el cliente (el comprador de canal). Para (b), usá el NOMBRE del producto/vertical del cliente tal como aparece en cargos del comprador: ej. para una empresa de asistencia domiciliaria, los que en una aseguradora/retailer manejan "hogar", "asistencia", "vivienda", "copropiedad", "siniestros", "líneas personales", "proveedores". NO te quedes solo con los roles de facilities: el comprador de canal (ej. el jefe de línea hogar de una aseguradora) suele ser la mejor cuenta. Si el ICP apunta a empresas chicas donde compra el dueño/CEO, incluí "ceo, founder, owner, dueño, fundador". ORDEN: poné PRIMERO los términos del comprador de canal/producto (b) y después los de facilities (a); el sistema usa los primeros, así que los más valiosos van al frente.
 
 ## Output — SOLO JSON (sin texto ni markdown alrededor)
 {
@@ -676,7 +680,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "context": [ "bullet 1 (corto)", "bullet 2 (corto)", "bullet 3 (corto)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
   "prioridades": [ "Alta: ...", "Media: ...", "...", "..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA, ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA reales y reconocibles, ej: Seguros, Comercio al por menor, Inmobiliario, Construcción"], "competidores": ["NOMBRES de empresas competidoras directas a EXCLUIR (que venden lo mismo que el cliente), ej: Iké Asistencia, Asissprex"], "tamano_min": 200 }
+  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA donde se COMPRA/revende el producto, ej: Seguros, Comercio al por menor, Inmobiliario, Administración de propiedades, Banca (evitá industriales amplias tipo Construcción/Manufactura)"], "competidores": ["NOMBRES de empresas competidoras directas a EXCLUIR (que venden lo mismo que el cliente), ej: Iké Asistencia, Asissprex"], "tamano_min": 200 }
 }
 CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
@@ -715,7 +719,7 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 3. Decisor real: nada de analistas, trainees ni juniors.
 4. Empresa ANCLA con fit de ICP: usá los "empleados" que te muestro. Marca grande y conocida emociona; startup desconocida de 8 personas no. Pero si el ICP son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real.
 5. Coherencia / credibilidad: si cargo+empresa+ubicación se ve raro, no la elijas.
-6. Grado más cálido primero (1er/2do).
+6. Grado de conexión: a IGUAL fit y país, preferí SIEMPRE el grado más cálido (1er o 2do grado por encima de 3ro o fuera de red): un 2do grado acepta y responde mucho más porque comparten un contacto. Nunca sacrifiques fit por grado, pero entre candidatos parecidos, el más cálido gana.
 
 ## Reglas DURAS
 - Elegí SOLO ids que estén en la lista. PROHIBIDO inventar una persona, un id, un cargo o una empresa.
