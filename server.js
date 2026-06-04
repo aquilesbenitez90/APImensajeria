@@ -484,6 +484,22 @@ function _rankFit(head, titulos){
 // Calidez de la conexión: 1er grado > 2do > 3ro > fuera de red. Se usa SOLO como desempate
 // (a igual fit/país gana el más cálido), nunca por encima del fit. El skill GTM pide priorizar 2do grado.
 function _warmth(dist){ return dist===1 ? 3 : dist===2 ? 2 : dist===3 ? 1 : 0; }
+// Corre fn sobre items con como MÁXIMO `limit` en paralelo (preserva el orden de items).
+// Sirve para no pegarle al MCP de a una (lento) ni todas juntas (rate limit / timeout).
+async function _mapLimit(items, limit, fn){
+  const out = new Array(items.length);
+  let i = 0;
+  const n = Math.max(1, Math.min(limit, items.length));
+  const workers = Array.from({length:n}, async () => {
+    while(true){
+      const idx = i++;
+      if(idx >= items.length) break;
+      out[idx] = await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
 
 // FIX: limpia el sufijo "@ ?" del headline enriquecido (empresa sin resolver en DB).
 function _parsePeople(res){
@@ -527,11 +543,11 @@ async function sourceCandidates(plan, cliente){
 
   // TÉRMINOS de rol: Sales Navigator NO tolera keywords multi-palabra (las trata como frase casi-exacta
   // y devuelve 0). Buscamos UN término por vez y unimos. Cada título objetivo es un término (1-2 palabras).
-  // Hasta 7 para que entren tanto los roles de facilities como los del producto/canal del cliente.
+  // Hasta 6 para que entren tanto los roles de facilities como los del producto/canal del cliente.
   const terminos = (titulos.length ? titulos : [funcion])
     .map(t=>String(t||'').replace(/[\/|]+/g,' ').replace(/\s+/g,' ').trim())
     .filter(t=>t.length>=3)
-    .slice(0,7);
+    .slice(0,6);
 
   async function locId(nombrePais){
     try{
@@ -563,11 +579,14 @@ async function sourceCandidates(plan, cliente){
     try{ return _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{ return []; }
   }
   // Une los resultados de buscar cada término de rol por separado (dedupe por id).
+  // Los términos se lanzan en PARALELO con tope CONC (rápido sin que el MCP rate-limitee).
+  const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '4', 10);
   async function buscar(locIds, conIndustria){
     if(!terminos.length) return await buscarUno(locIds, conIndustria, null);
+    const listas = await _mapLimit(terminos, CONC, t => buscarUno(locIds, conIndustria, t));
     const acc=[]; const vis=new Set();
-    for(const t of terminos){
-      for(const p of await buscarUno(locIds, conIndustria, t)){
+    for(const lista of listas){
+      for(const p of (lista||[])){
         if(p.id && !vis.has(p.id)){ vis.add(p.id); acc.push(p); }
       }
     }
@@ -612,12 +631,12 @@ async function sourceCandidates(plan, cliente){
   out.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.rank-a.rank));
 
   // enriquecer el top por cargo y tamaño
-  const K = parseInt(process.env.SOURCE_ENRICH_TOP || '14', 10);
+  const K = parseInt(process.env.SOURCE_ENRICH_TOP || '10', 10);
   const noCache = String(process.env.SOURCE_ENRICH_NOCACHE||'').toLowerCase()==='true';
   const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
   const PISO   = tamMin > 0 ? tamMin : parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
   const top = out.slice(0, K);
-  for(const c of top){
+  await _mapLimit(top, CONC, async (c) => {
     try{
       const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
       if(prof.headcount!=null) c.headcount=prof.headcount;
@@ -627,7 +646,7 @@ async function sourceCandidates(plan, cliente){
     }catch{}
     c.cerca = homeGeo && _norm(c.loc||'').includes(homeGeo) ? 1 : 0;
     c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + c.cerca + _warmth(c.dist);   // fit y tamaño mandan; el grado solo desempata
-  }
+  });
   // piso de tamaño contra el ICP, SIN vaciar el pool
   const cumplen  = top.filter(c => !(c.headcount!=null && c.headcount < PISO));
   const fueraTam = top.filter(c => c.headcount!=null && c.headcount < PISO);
@@ -661,6 +680,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - IDIOMA: TODO en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.
 - SIN GUIONES (importante): NUNCA uses guiones largos (—) ni guiones (-) como conectores o para incisos, en NINGÚN texto (lead, proof, context, apertura, icp, prioridades). Reemplazalos por comas, paréntesis o dos puntos. Ej: en vez de "servicios técnicos —plomería, electricidad— con cobertura", escribí "servicios técnicos (plomería, electricidad) con cobertura". El texto tiene que sonar humano, no de IA.
 - GEOGRAFÍA (CRÍTICO): "geografia" = país del cliente (prioritario). "geografias" = país del cliente PRIMERO + SOLO los demás países donde el cliente HOY ya puede prestar el servicio de verdad (sus países de operación actuales). PROHIBIDO mercados de expansión futura o donde el cliente todavía NO opera. El sistema prioriza fuerte el país del cliente; los demás solo rellenan.
+- COHERENCIA DE PAÍSES (importante, lo nota el cliente): si el cliente YA opera en un país, describilo como "opera en X" / "con operación en X" / "presencia en X", NUNCA como "posibilidad de extender a X", "apertura a X" ni "mercado futuro" (eso subvalúa y es falso si ya está ahí). Y los países tienen que ser CONSISTENTES en todo el reporte: si en el lead/proof/geografía decís que opera en Colombia, Chile y USA, el stat de países (si lo ponés) debe contar ESOS mismos (3), no 2. No te contradigas entre el texto y el stat. Si no estás seguro de un país, no lo cuentes en ningún lado (ni en el texto ni en el stat), pero que ambos coincidan.
 - INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar las VERTICALES ANCLA reales donde están los COMPRADORES del cliente (las mismas que marcás ALTA en "prioridades"). El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Banca", "Administración de propiedades"). NO pongas el rubro del propio cliente ni industrias genéricas. EVITÁ verticales industriales/pesadas amplias (ej. "Construcción", "Manufactura", "Minería", "Cemento") salvo que sean LITERALMENTE el comprador: arrastran jefes de mantenimiento de planta que consumen el servicio puertas adentro pero NO son el canal de compra. Ante la duda, preferí las verticales donde el producto del cliente se compra o se revende.
 - TAMAÑO (para que salgan empresas ANCLA, no micro-empresas): "tamano_min" tiene que ser un número real de empleados que refleje el ICP. Si el ICP son empresas medianas y grandes / marcas ancla, poné un piso alto (ej: 200). Poné un piso bajo (20-50) SOLO si el ICP son genuinamente PyMEs/micro. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva.
 - COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas que compiten DIRECTO con el cliente (venden/ofrecen lo mismo). El sistema EXCLUYE de los candidatos a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES que hayas visto en el research (ej. para una empresa de asistencia técnica: otras redes de asistencia como "Iké Asistencia", "Asissprex"). NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque eso descartaría compradores legítimos cuyo cargo menciona esas palabras. Si no identificás competidores claros, dejá la lista vacía.
