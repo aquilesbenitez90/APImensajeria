@@ -1072,7 +1072,7 @@ app.get('/resultado/:jobId', (req, res) => {
 });
 
 app.post('/generar-reporte', async (req, res) => {
-  const { email, dominio, empresa, nombre, profileId } = req.body || {};
+  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug } = req.body || {};
   if (!email || !dominio) return res.status(400).json({ error: 'email y dominio son obligatorios' });
 
   try {
@@ -1128,6 +1128,7 @@ app.post('/generar-reporte', async (req, res) => {
     return res.json({
       status: 'ok',
       pdf_base64: pdfBuffer.toString('base64'),
+      reporte: (evalMode || debug) ? data : undefined, // solo en modo eval: objeto estructurado para inspección
       empresa: empresaFinal,
       anclado: cliente.anclado,
       cliente_resuelto: cliente,
