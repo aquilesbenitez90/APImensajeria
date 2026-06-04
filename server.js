@@ -739,7 +739,12 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 
 ## Output — SOLO JSON (sin texto alrededor)
 { "seleccion": [ {"id":"<id EXACTO de la lista>", "angulo":"...", "hook":"\\"...\\""} ] }
-EXACTAMENTE ${pedir} elementos distintos, en orden de prioridad. NADA fuera del objeto JSON.`; }
+EXACTAMENTE ${pedir} elementos distintos, en orden de prioridad. NADA fuera del objeto JSON.
+
+## JSON VÁLIDO (CRÍTICO — si el JSON no parsea, se pierde todo el trabajo)
+- Dentro de "angulo" y "hook" NO uses comillas dobles (") sin escapar. Si necesitás encomillar una palabra o frase dentro del texto, usá comillas simples ('algo') o ninguna. Las ÚNICAS comillas dobles del hook son las dos que lo envuelven (\\"...\\").
+- NO uses puntos suspensivos "..." literales, ni saltos de línea, ni tabs dentro de los valores.
+- Escribí cada valor en UNA línea. Antes de responder, verificá mentalmente que cada "{", "[", "\\"" tenga su cierre y que no haya comas colgando.`; }
 
 async function runSelectWrite({ cliente, plan, pool, fixes }){
   currentStage = 'gen';
@@ -755,8 +760,13 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
   const fixBloque = (fixes&&fixes.length) ? `\n\nCORRECCIONES del juez (aplicalas re-eligiendo o reescribiendo):\n- ${fixes.join('\n- ')}` : '';
   const messages = [{ role:'user', content:`${ctx}\n\nLISTA REAL DE CANDIDATOS (elegí de ACÁ, por id EXACTO; los ★ son del país del cliente):\n${lista}${fixBloque}\n\nElegí los ${PEDIR_SELECT} MEJORES en ORDEN de prioridad (el mejor primero), de EMPRESAS distintas y priorizando el país del cliente. Devolvé SOLO el JSON {"seleccion":[...]} con EXACTAMENTE ${PEDIR_SELECT} elementos distintos. El sistema arma el reporte con los primeros ${NUM_CUENTAS} válidos, así que los primeros ${NUM_CUENTAS} tienen que ser tus mejores.` }];
   const data = await callClaude({ model:MODEL_GEN, system:_promptSelect(PEDIR_SELECT, NUM_CUENTAS), messages, tools:[], maxTokens:6000 });
-  const j = parseReporteJSON(_textoJSON(data.content));
-  return Array.isArray(j && j.seleccion) ? j.seleccion : [];
+  try{
+    const j = parseReporteJSON(_textoJSON(data.content));
+    return Array.isArray(j && j.seleccion) ? j.seleccion : [];
+  }catch(e){
+    console.warn(`[SELECT] JSON inválido del modelo (${e.message}). Devuelvo [] para que seleccionarConRetry reintente.`);
+    return [];
+  }
 }
 
 // Ensamblado: HECHOS del pool (código); la IA solo aportó id + ángulo + hook.
@@ -870,7 +880,7 @@ function _cuentaCompletas(data){
 
 async function seleccionarConRetry({ cliente, plan, pool, fixes }){
   const MIN = parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10);
-  const MAX = parseInt(process.env.SELECT_MAX_TRIES || '2', 10);
+  const MAX = parseInt(process.env.SELECT_MAX_TRIES || '3', 10);
   let best=null, bestN=-1;
   for(let i=1;i<=MAX;i++){
     const extra = i>1 ? [`INTENTO ${i}: el intento previo no llegó a ${MIN} cuentas completas. Devolvé ${PEDIR_SELECT} ids EXACTOS de la lista (copiá el id tal cual), todos distintos, de EMPRESAS distintas y priorizando el país del cliente, cada uno con empresa real + ángulo + hook.`] : [];
