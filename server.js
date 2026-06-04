@@ -454,10 +454,6 @@ async function resolverCliente({ profileId, dominio, empresa }) {
 // ===========================================================================
 // PIPELINE FULL (3 fases).
 // ===========================================================================
-function _parsePeople(res){
-  return [...String(res||'').matchAll(/id=([A-Za-z0-9_\-]+)\s+"([^"]+)"\s+(.*?)\s*\(DISTANCE_(\d|OUT_OF_NETWORK)[^,)]*(?:,\s*([^)]+))?\)/g)]
-    .map(x=>({ id:x[1], name:x[2], head:(x[3]||'').trim(), dist: x[4]==='OUT_OF_NETWORK'?9:parseInt(x[4],10), loc:(x[5]||'').trim() }));
-}
 function _slugCos(n){ return _norm(n).split(' ').filter(Boolean).join('-'); }
 function _rankSenioridad(head){
   const h=_norm(head);
@@ -476,6 +472,10 @@ function _rankFit(head, titulos){
 }
 
 // FIX: limpia el sufijo "@ ?" del headline enriquecido (empresa sin resolver en DB).
+function _parsePeople(res){
+  return [...String(res||'').matchAll(/id=([A-Za-z0-9_\-]+)\s+"([^"]+)"\s+(.*?)\s*\(DISTANCE_(\d|OUT_OF_NETWORK)[^,)]*(?:,\s*([^)]+))?\)/g)]
+    .map(x=>({ id:x[1], name:x[2], head:(x[3]||'').trim(), dist: x[4]==='OUT_OF_NETWORK'?9:parseInt(x[4],10), loc:(x[5]||'').trim() }));
+}
 function _parseProfile(res){
   const s=String(res||'');
   const hc=(s.match(/(\d[\d,]*)\s+employees/)||[])[1];
@@ -502,17 +502,18 @@ function validarPlan(plan){
 async function sourceCandidates(plan, cliente){
   validarPlan(plan);
   const icp = plan._plan;
-  const geografia = icp.geografia;            // país principal (manda)
-  const funcion   = icp.funcion;
+  const geografia = icp.geografia;            // país principal del cliente
   const homeGeo   = _norm(geografia||'');
+  const funcion   = icp.funcion;
+  const titulos   = Array.isArray(icp.titulos_objetivo) ? icp.titulos_objetivo : [];
 
-  // Secundarias = SOLO donde el cliente opera de verdad, sin el país principal.
+  // países donde el cliente opera (secundarios), sin el principal
   const todas = (Array.isArray(icp.geografias) && icp.geografias.length ? icp.geografias : [geografia]).filter(Boolean);
   const secundarias = todas.filter(g => _norm(g) !== homeGeo).slice(0, 5);
 
-  // Keyword limpio: hasta 4 títulos objetivo (palabras sueltas), NO el string con barras.
-  const kw = (Array.isArray(icp.titulos_objetivo) && icp.titulos_objetivo.length)
-    ? icp.titulos_objetivo.filter(t=>String(t||'').trim().length>=3).slice(0,4).join(' ')
+  // keyword: hasta 4 títulos objetivo (palabras sueltas), NO el string con barras
+  const kw = (titulos.length)
+    ? titulos.filter(t=>String(t||'').trim().length>=3).slice(0,4).join(' ')
     : String(funcion||'').replace(/[\/|]+/g,' ').replace(/\s+/g,' ').trim();
 
   async function locId(nombrePais){
@@ -521,14 +522,15 @@ async function sourceCandidates(plan, cliente){
   let fnId=null;
   try{ fnId=(String(await callMCP('resolve_sales_navigator_id',{type:'FUNCTION',keywords:funcion,limit:3})).match(/id="?([A-Za-z0-9_]+)"?/)||[])[1]||null; }catch{}
 
-  // INDUSTRIAS ANCLA: resolvemos las verticales del ICP a IDs de Sales Navigator.
-  // Con esto la búsqueda trae decisores EN aseguradoras/retailers/inmobiliarias (cuentas "wow"),
-  // no admins de cualquier empresa que tenga el título.
+  // INDUSTRIAS ANCLA: verticales del ICP -> IDs de Sales Navigator (filtro de fit DURO).
+  // Con esto traemos decisores EN aseguradoras/retailers/inmobiliarias, no admins de cualquier empresa.
   const indIds=[];
   for(const ind of (Array.isArray(icp.industrias)?icp.industrias:[]).slice(0,6)){
     try{ const id=(String(await callMCP('resolve_sales_navigator_id',{type:'SALES_INDUSTRY',keywords:ind,limit:1})).match(/id="?([0-9]+)"?/)||[])[1]; if(id && !indIds.includes(id)) indIds.push(id); }catch{}
   }
 
+  // SIN filtro de grado: el filtro de grado de Sales Nav no es confiable (1st->0, 2nd mezcla 3ro).
+  // Traemos por FIT (país + función + industria ancla) y leemos el grado real (DISTANCE) de cada perfil.
   async function buscar(locIds, conIndustria){
     const f={ category:'people', profilesLimit:50, keywords: kw };
     if(locIds && locIds.length) f.location={ include: locIds };
@@ -538,78 +540,64 @@ async function sourceCandidates(plan, cliente){
   }
 
   const _validosHome = arr => arr.filter(p => _rankSenioridad(p.head) >= 2 && _norm(p.loc||'').includes(homeGeo)).length;
-  const homeId = await locId(geografia);
+  const homeId  = await locId(geografia);
   const homeLoc = homeId ? [homeId] : null;
   const HOME_MIN = parseInt(process.env.SOURCE_HOME_MIN || String(NUM_CUENTAS + 2), 10);
 
-  // 1) PAÍS PRINCIPAL + INDUSTRIAS ANCLA (lo que impacta al prospecto).
+  // 1) país principal + industrias ancla (el mejor fit posible)
   let pool = await buscar(homeLoc, true);
-  console.log(`[SOURCE] principal "${geografia}" + industrias [${(icp.industrias||[]).join(', ')||'-'}]: ${pool.length} perfiles (${_validosHome(pool)} válidos).`);
+  console.log(`[SOURCE] "${geografia}" + ind [${(icp.industrias||[]).join(', ')||'-'}]: ${pool.length} perfiles (${_validosHome(pool)} decisores locales).`);
 
-  // 2) si la industria estricta dejó poco, mismo país SIN industria (recall).
+  // 2) si la industria estricta deja poco, mismo país sin industria (recall)
   if(_validosHome(pool) < HOME_MIN){
-    const extra = await buscar(homeLoc, false);
-    pool = pool.concat(extra);
-    console.log(`[SOURCE] industria estricta floja -> ${geografia} sin industria: total ${pool.length} (${_validosHome(pool)} válidos).`);
+    pool = pool.concat(await buscar(homeLoc, false));
+    console.log(`[SOURCE] recall ${geografia} sin industria: total ${pool.length} (${_validosHome(pool)} decisores locales).`);
   }
-
-  // 3) recién si el principal no alcanza, secundarias donde el cliente SÍ opera.
+  // 3) recién si el principal no alcanza, países secundarios donde el cliente opera
   if(_validosHome(pool) < HOME_MIN && secundarias.length){
     const secIds=[]; for(const g of secundarias){ const id=await locId(g); if(id) secIds.push(id); }
-    if(secIds.length){
-      const extra = await buscar(secIds, indIds.length>0);
-      pool = pool.concat(extra);
-      console.log(`[SOURCE] principal insuficiente -> secundarias [${secundarias.join(', ')}]: +${extra.length}.`);
-    }
+    if(secIds.length){ pool = pool.concat(await buscar(secIds, indIds.length>0)); console.log(`[SOURCE] secundarias [${secundarias.join(', ')}] sumadas.`); }
   }
 
+  // dedupe + descartes (decisor real, no la propia empresa del cliente)
   const vistos=new Set(); const out=[]; const empCliente=_norm((cliente&&cliente.empresa)||'');
   for(const p of pool){
     if(!p.id || vistos.has(p.id)) continue; vistos.add(p.id);
-    if(_rankSenioridad(p.head) < 1) continue;
+    if(_rankSenioridad(p.head) < 1) continue;                 // descarta asistente/analista/becario/junior
     const emp=_empresaDeHeadline(p.head)||'';
     if(empCliente && emp && _mismaEmpresa(empCliente, emp)) continue;
     const cerca = homeGeo && _norm(p.loc||'').includes(homeGeo) ? 1 : 0;
-    out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, icp.titulos_objetivo) });
+    out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos) });
   }
-  out.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (a.dist-b.dist));
+  // orden por FIT (el grado NO entra): primero locales, después fit, después seniority
+  out.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (b.rank-a.rank));
 
+  // enriquecer el top por cargo y tamaño
   const K = parseInt(process.env.SOURCE_ENRICH_TOP || '14', 10);
   const noCache = String(process.env.SOURCE_ENRICH_NOCACHE||'').toLowerCase()==='true';
   const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
-  // PISO de tamaño: si el ICP define tamano_min (medianas/grandes), es el piso real.
-  // Así una empresa de 26 personas NO entra cuando el ICP pide empresas ancla.
-  const PISO = tamMin > 0 ? tamMin : parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
+  const PISO   = tamMin > 0 ? tamMin : parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
   const top = out.slice(0, K);
   for(const c of top){
     try{
-      let prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
-      if(!prof.headRich && !noCache){
-        try{ const fresco=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache:true })); if(fresco.headRich || fresco.headcount!=null){ prof=fresco; c._fresco=true; } }catch{}
-      }
+      const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
       if(prof.headcount!=null) c.headcount=prof.headcount;
       if(prof.headRich && prof.headRich.length>=3){
-        const fresh = prof.headRich;
-        if(_norm(fresh)!==_norm(c.head)) c._headViejo = c.head;
-        c.head=fresh; c.headRich=fresh;
-        c.empresa=_empresaDeHeadline(fresh) || c.empresa;
-        c.fit=_rankFit(fresh, icp.titulos_objetivo);
+        c.head=prof.headRich; c.empresa=_empresaDeHeadline(prof.headRich) || c.empresa; c.fit=_rankFit(prof.headRich, titulos);
       }
     }catch{}
-    c.cerca  = homeGeo && _norm(c.loc||'').includes(homeGeo) ? 1 : 0;
-    const warmth = c.dist===1?2 : c.dist===2?1 : 0;
-    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + warmth + c.cerca;
+    c.cerca = homeGeo && _norm(c.loc||'').includes(homeGeo) ? 1 : 0;
+    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + c.cerca;   // fit y tamaño mandan; el grado NO entra
   }
-  // Descarte por tamaño contra el PISO del ICP, SIN vaciar el pool.
-  const cumplen = top.filter(c => !(c.headcount!=null && c.headcount < PISO));
-  const fueraPorTam = top.filter(c => c.headcount!=null && c.headcount < PISO);
-  for(const p of fueraPorTam) console.warn(`[SOURCE] fuera de ICP por tamaño (${p.headcount}<${PISO}): ${p.name} @ ${p.empresa||'?'}`);
+  // piso de tamaño contra el ICP, SIN vaciar el pool
+  const cumplen  = top.filter(c => !(c.headcount!=null && c.headcount < PISO));
+  const fueraTam = top.filter(c => c.headcount!=null && c.headcount < PISO);
+  for(const p of fueraTam) console.warn(`[SOURCE] fuera de ICP por tamaño (${p.headcount}<${PISO}): ${p.name} @ ${p.empresa||'?'}`);
   const topICP = (cumplen.length >= NUM_CUENTAS) ? cumplen : top;
-  if(cumplen.length < NUM_CUENTAS) console.warn(`[SOURCE] piso ${PISO} dejó solo ${cumplen.length}/${NUM_CUENTAS} -> relajo el piso para no quedar corto.`);
-  topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.score-a.score) || (a.dist-b.dist));
+  if(cumplen.length < NUM_CUENTAS) console.warn(`[SOURCE] piso ${PISO} dejó ${cumplen.length}/${NUM_CUENTAS} -> relajo el piso para no quedar corto.`);
+  topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (b.score-a.score));
   const final = topICP.concat(out.slice(K)).slice(0, 12);
-  const enCasa = final.filter(c=>c.cerca).length;
-  console.log(`[SOURCE] Pool: ${out.length} reales (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraPorTam.length} | devueltos ${final.length} (${enCasa} en ${geografia}) (kw="${kw}", ind=[${indIds.join('+')||'-'}], fn=${fnId||'-'}, piso<${PISO}).`);
+  console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | devueltos ${final.length} (kw="${kw}", ind=[${indIds.join('+')||'-'}], fn=${fnId||'-'}, piso<${PISO}).`);
   return final;
 }
 
@@ -1066,5 +1054,5 @@ if (require.main === module) {
 module.exports = {
   validarPlan, sourceCandidates, armarReporte, verificarLinksData,
   parseReporteJSON, _rankFit, _rankSenioridad, _parseProfile, _sizeBoost,
-  _parsePeople, _norm, _empresaDeHeadline, _empKey, _slugCos, _degOrdinal, _headlineLimpio, _fechaHoy
+  _norm, _empresaDeHeadline, _empKey, _slugCos, _degOrdinal, _headlineLimpio, _fechaHoy
 };
