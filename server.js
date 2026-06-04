@@ -522,10 +522,12 @@ async function sourceCandidates(plan, cliente){
   const todas = (Array.isArray(icp.geografias) && icp.geografias.length ? icp.geografias : [geografia]).filter(Boolean);
   const secundarias = todas.filter(g => _norm(g) !== homeGeo).slice(0, 5);
 
-  // keyword: hasta 4 títulos objetivo (palabras sueltas), NO el string con barras
-  const kw = (titulos.length)
-    ? titulos.filter(t=>String(t||'').trim().length>=3).slice(0,4).join(' ')
-    : String(funcion||'').replace(/[\/|]+/g,' ').replace(/\s+/g,' ').trim();
+  // TÉRMINOS de rol: Sales Navigator NO tolera keywords multi-palabra (las trata como frase casi-exacta
+  // y devuelve 0). Buscamos UN término por vez y unimos. Cada título objetivo es un término (1-2 palabras).
+  const terminos = (titulos.length ? titulos : [funcion])
+    .map(t=>String(t||'').replace(/[\/|]+/g,' ').replace(/\s+/g,' ').trim())
+    .filter(t=>t.length>=3)
+    .slice(0,5);
 
   async function locId(nombrePais){
     try{
@@ -547,13 +549,25 @@ async function sourceCandidates(plan, cliente){
   }
 
   // SIN filtro de grado: el filtro de grado de Sales Nav no es confiable (1st->0, 2nd mezcla 3ro).
-  // Traemos por FIT (país + función + industria ancla) y leemos el grado real (DISTANCE) de cada perfil.
-  async function buscar(locIds, conIndustria){
-    const f={ category:'people', profilesLimit:50, keywords: kw };
+  // Traemos por FIT (país + término de rol + industria ancla) y leemos el grado real (DISTANCE) de cada perfil.
+  async function buscarUno(locIds, conIndustria, kwUnico){
+    const f={ category:'people', profilesLimit:50 };
+    if(kwUnico) f.keywords = kwUnico;                       // UNA sola palabra/término (multi-palabra da 0)
     if(locIds && locIds.length) f.location={ include: locIds };
     if(fnId) f.function={ include:[fnId] };
     if(conIndustria && indIds.length) f.industry={ include: indIds };
     try{ return _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{ return []; }
+  }
+  // Une los resultados de buscar cada término de rol por separado (dedupe por id).
+  async function buscar(locIds, conIndustria){
+    if(!terminos.length) return await buscarUno(locIds, conIndustria, null);
+    const acc=[]; const vis=new Set();
+    for(const t of terminos){
+      for(const p of await buscarUno(locIds, conIndustria, t)){
+        if(p.id && !vis.has(p.id)){ vis.add(p.id); acc.push(p); }
+      }
+    }
+    return acc;
   }
 
   const _validosHome = arr => arr.filter(p => _rankSenioridad(p.head) >= 2 && _norm(p.loc||'').includes(homeGeo)).length;
@@ -618,7 +632,7 @@ async function sourceCandidates(plan, cliente){
   if(cumplen.length < NUM_CUENTAS) console.warn(`[SOURCE] piso ${PISO} dejó ${cumplen.length}/${NUM_CUENTAS} -> relajo el piso para no quedar corto.`);
   topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (b.score-a.score));
   const final = topICP.concat(out.slice(K)).slice(0, 12);
-  console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | devueltos ${final.length} (kw="${kw}", ind=[${indIds.join('+')||'-'}], fn=${fnId||'-'}, piso<${PISO}).`);
+  console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | devueltos ${final.length} (terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], fn=${fnId||'-'}, piso<${PISO}).`);
   return final;
 }
 
@@ -725,6 +739,7 @@ EXACTAMENTE ${pedir} elementos distintos, en orden de prioridad. NADA fuera del 
 
 async function runSelectWrite({ cliente, plan, pool, fixes }){
   currentStage = 'gen';
+  if(!pool || !pool.length) return [];   // sin candidatos no hay nada que elegir (evita parsear prosa)
   const lista = pool.map((p,i)=>{
     const tam = p.headcount!=null ? ` (~${p.headcount} empleados)` : '';
     const ctx = (p.headRich && p.headRich!==p.head) ? ` | perfil: ${p.headRich}` : '';
@@ -886,6 +901,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
     const fechaHoy = _fechaHoy();
     const plan = await runPlan({ empresa: empresaFinal, dominio, email, nombre, cliente, fechaHoy });
     const pool = await sourceCandidates(plan, cliente);
+    if (!pool.length) throw new Error(`Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.`);
     let data = await seleccionarConRetry({ cliente, plan, pool });
 
     let cleanHtml = limpiarHtml(renderReport(data));
@@ -1002,6 +1018,7 @@ app.post('/generar-reporte', async (req, res) => {
     const fechaHoy = _fechaHoy();
     const plan = await runPlan({ empresa: empresaFinal, dominio, email, nombre: nombre || '', cliente, fechaHoy });
     const pool = await sourceCandidates(plan, cliente);
+    if (!pool.length) return res.status(422).json({ error: `Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.` });
     let data = await seleccionarConRetry({ cliente, plan, pool });
 
     let cleanHtml = limpiarHtml(renderReport(data));
