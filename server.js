@@ -670,6 +670,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 3. Escribí TODO el contenido de página 1 (ribbon, stats, icp, contexto, aperturas, prioridades, lead, proof, h1).
 
 ## Reglas
+- PRINCIPIO RECTOR (gobierna TODO lo de abajo): tu nivel de certeza al escribir tiene que IGUALAR el nivel de tu fuente. No subas el tono (no afirmes como un hecho algo que la fuente sugiere, ni como "operación" algo que recién arranca, ni como "cliente" a un tercero que no está confirmado) ni lo bajes (no llames "apertura/posibilidad" a algo que la fuente da por consolidado). Ante la duda: bajá el tono a una formulación cualitativa, o directamente omití el dato. Las reglas que siguen (números, año de fundación, terceros, países) son CASOS de este mismo principio; cuando dudes en algo no listado, aplicá el principio igual.
 - "fecha" = EXACTAMENTE la fecha de hoy que te paso en el mensaje (no inventes otra).
 - VERACIDAD (CRÍTICO): PROHIBIDO inventar métricas o datos duros. Esto incluye específicamente: cantidad de categorías/tipos de servicio (ej. "+300 categorías"), totales acumulados (ej. "+470.000 servicios"), tiempos de respuesta ("60 minutos"), %, premios, año de fundación o stage. Si un número NO sale textual de web_search o de una fuente verificable, NO lo pongas en ningún lado (lead, proof, context, apertura, stats, ribbon). Ante la duda, usá una formulación cualitativa SIN número ("amplia cobertura", "varias categorías de servicio"). Es preferible un reporte sin números a uno con números inventados. REGLA DE ORO: antes de cerrar, releé CADA número que escribiste; si no podés señalar la fuente exacta de web_search de donde salió, BORRALO o pasalo a texto cualitativo. El invento más común y MÁS GRAVE es "+300 tipos de servicio" o "+X servicios/clientes": NO lo escribas jamás si no lo viste en una fuente.
 - STATS: que los 4 chips sean datos verificables o estructurales (ej: la cantidad ${N} de cuentas priorizadas, países de operación reales, año de fundación SOLO si lo verificaste). NUNCA rellenes un stat con un número inventado para que "quede lindo". Preferí stats que IMPACTEN y sean verificables (ciudades/países de cobertura, años en el mercado, la cantidad ${N} de cuentas). EVITÁ stats que subvendan al cliente, como su propia cantidad de empleados si es baja.
@@ -680,7 +681,11 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - IDIOMA: TODO en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.
 - SIN GUIONES (importante): NUNCA uses guiones largos (—) ni guiones (-) como conectores o para incisos, en NINGÚN texto (lead, proof, context, apertura, icp, prioridades). Reemplazalos por comas, paréntesis o dos puntos. Ej: en vez de "servicios técnicos —plomería, electricidad— con cobertura", escribí "servicios técnicos (plomería, electricidad) con cobertura". El texto tiene que sonar humano, no de IA.
 - GEOGRAFÍA (CRÍTICO): "geografia" = país del cliente (prioritario). "geografias" = país del cliente PRIMERO + SOLO los demás países donde el cliente HOY ya puede prestar el servicio de verdad (sus países de operación actuales). PROHIBIDO mercados de expansión futura o donde el cliente todavía NO opera. El sistema prioriza fuerte el país del cliente; los demás solo rellenan.
-- COHERENCIA DE PAÍSES (importante, lo nota el cliente): si el cliente YA opera en un país, describilo como "opera en X" / "con operación en X" / "presencia en X", NUNCA como "posibilidad de extender a X", "apertura a X" ni "mercado futuro" (eso subvalúa y es falso si ya está ahí). Y los países tienen que ser CONSISTENTES en todo el reporte: si en el lead/proof/geografía decís que opera en Colombia, Chile y USA, el stat de países (si lo ponés) debe contar ESOS mismos (3), no 2. No te contradigas entre el texto y el stat. Si no estás seguro de un país, no lo cuentes en ningún lado (ni en el texto ni en el stat), pero que ambos coincidan.
+- NIVEL DE CERTEZA POR PAÍS (caso del principio rector; lo nota el cliente): no todos los países donde aparece un cliente están al mismo nivel. Clasificá CADA uno según cómo lo describen TUS fuentes de web_search y usá un lenguaje que coincida con esa evidencia:
+  • CONSOLIDADO (la fuente dice "opera en", "tiene oficina/equipo/Country Manager en", "presencia en", "desde hace X años", "lanzó/llegó en 20XX") → escribilo como "opera en X" / "con operación en X". NUNCA lo llames "apertura a X", "posibilidad de extender a X" ni "mercado futuro" (eso subvalúa y es falso si ya está ahí hace años).
+  • RECIENTE / EN ENTRADA (la fuente dice "se está expandiendo a", "está entrando en", "recién llegó a", "lanzó este año en") → escribilo como "expansión reciente a X" / "está entrando en X". No lo presentes con la misma solidez que un mercado consolidado.
+  • SOLO PLAN (la fuente dice "planea", "quiere", "próximamente", "evalúa", sin operar todavía) → NO lo cuentes como país de operación, ni en el texto ni en el stat.
+  REGLA DE ORO: no subas ni bajes el nivel respecto de lo que dice la fuente. El stat de países (si lo ponés) cuenta los consolidados + los recientes reales (NO los aspiracionales), y el texto y el stat tienen que COINCIDIR: si decís que opera/se expande en 3 países, el stat dice 3, no 2. Si no estás seguro de un país, no lo cuentes en ningún lado, pero que texto y stat coincidan.
 - INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar las VERTICALES ANCLA reales donde están los COMPRADORES del cliente (las mismas que marcás ALTA en "prioridades"). El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Banca", "Administración de propiedades"). NO pongas el rubro del propio cliente ni industrias genéricas. EVITÁ verticales industriales/pesadas amplias (ej. "Construcción", "Manufactura", "Minería", "Cemento") salvo que sean LITERALMENTE el comprador: arrastran jefes de mantenimiento de planta que consumen el servicio puertas adentro pero NO son el canal de compra. Ante la duda, preferí las verticales donde el producto del cliente se compra o se revende.
 - TAMAÑO (para que salgan empresas ANCLA, no micro-empresas): "tamano_min" tiene que ser un número real de empleados que refleje el ICP. Si el ICP son empresas medianas y grandes / marcas ancla, poné un piso alto (ej: 200). Poné un piso bajo (20-50) SOLO si el ICP son genuinamente PyMEs/micro. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva.
 - COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas que compiten DIRECTO con el cliente (venden/ofrecen lo mismo). El sistema EXCLUYE de los candidatos a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES que hayas visto en el research (ej. para una empresa de asistencia técnica: otras redes de asistencia como "Iké Asistencia", "Asissprex"). NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque eso descartaría compradores legítimos cuyo cargo menciona esas palabras. Si no identificás competidores claros, dejá la lista vacía.
@@ -821,11 +826,33 @@ const _limpia = s => _sinInventos(_sinGuiones(s));
 // (el que menciona la función objetivo), sin inventar nada.
 function _cargoCorto(head, kws){
   let raw = String(head||'').split('@')[0].replace(/\s{2,}/g,' ').trim();
-  const segs = raw.split(/\s*[|•·]\s*|\s+[lI]\s+|\s+-\s+/).map(s=>s.trim()).filter(Boolean);
-  if(!segs.length) return raw;
+  raw = raw.replace(/\bc-\s+level\b/gi,'C-level'); // "C- level" -> "C-level"
+  const cap = s => (s.length > 70 ? s.slice(0,70).trim() : s);
+  // Separar en segmentos por | • · / , y por " - " (guion con espacios). Los títulos
+  // bien formados quedan en un solo segmento; los headlines keyword-salad se trocean.
+  const segs = raw.split(/\s*[|•·\/,]\s*|\s+-\s+/).map(s=>s.trim()).filter(Boolean);
+  if(segs.length <= 1) return cap(raw);
   const kwl = (kws||[]).map(k=>_norm(k)).filter(k=>k.length>=3);
-  const best = segs.find(s => kwl.some(k => _norm(s).includes(k))) || segs[0];
-  return best.length > 70 ? best.slice(0,70).trim() : best;
+  const matchKw = s => kwl.some(k => _norm(s).includes(k));
+  const esRol = s => /(?:c-?\s*level|chief|\bceo\b|\bcoo\b|\bcfo\b|\bcto\b|\bcmo\b|\bcuo\b|director|gerente|subgerente|jefe|jefa|\bhead\b|\bvp\b|vicepresid|vice president|founder|owner|dueno|presidente|lider|leader|coordinador|manager|responsable|encargad|administrador|superintendente)/.test(_norm(s));
+  // 1) Si el primer segmento ya es un título con rol, usalo (los títulos arrancan con el rol).
+  //    Si ese rol no nombra el área del cliente pero hay un segmento que sí, lo anexa.
+  if(esRol(segs[0])){
+    let out = segs[0];
+    if(!matchKw(out)){
+      const area = segs.slice(1).find(matchKw);
+      if(area && (out.length + area.length) <= 48) out = `${out}, ${area}`;
+    }
+    return cap(out);
+  }
+  // 2) Headline tipo keyword-salad: priorizá el segmento que matchea el producto/canal,
+  //    y si hay un segmento de rol distinto, combiná rol + área.
+  const kwSeg = segs.find(matchKw);
+  const rolSeg = segs.find(esRol);
+  let best;
+  if(rolSeg && kwSeg && rolSeg !== kwSeg && (rolSeg.length + kwSeg.length) <= 48) best = `${rolSeg}, ${kwSeg}`;
+  else best = kwSeg || rolSeg || segs[0];
+  return cap(best);
 }
 // ¿El cargo muestra la función objetivo o es un decisor genérico? Si no (ej. "Mercadeo", "Analista"
 // suelto cuando el comprador es Operaciones/Facilities), se descarta la card.
