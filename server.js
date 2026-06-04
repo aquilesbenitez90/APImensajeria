@@ -1,5 +1,17 @@
 /**
- * IBT GTM Report — server.js v7.3
+ * IBT GTM Report — server.js v7.4
+ *
+ * Sobre v7.3 suma (3 arreglos de robustez bajo concurrencia + veracidad geográfica):
+ *   - IDEMPOTENCIA en /generar: dedup por lead (profileId/dominio/email/empresa). Si ya hay
+ *     un job en curso para ese lead, devuelve el MISMO jobId (deduplicado:true) en vez de
+ *     arrancar otro. Mata los reportes duplicados y el doble-envío / costo x2-x5.
+ *   - ESTADO DE TOKENS POR REQUEST (AsyncLocalStorage): se eliminan las globales mutables
+ *     tokenStats/stageStats/currentStage que se corrompían cuando dos jobs corrían en paralelo
+ *     en la misma réplica. Ahora cada job tiene su propio acumulador aislado.
+ *   - GEO-COHERENCIA determinística: antes del veredicto final se chequea que el país de cada
+ *     card coincida con el país del título (h1_post) y del ICP "Geografía". Si una card está en
+ *     un país distinto al que dice apuntar el reporte (caso Apodemia "México/Guatemala" con
+ *     targets en Barcelona), se fuerza RECHAZADO. Cierra el punto ciego del juez.
  *
  * Sobre v7.2 suma (todo apuntado a la credibilidad del lead, que es el corazón del producto):
  *   - GEOGRAFÍA: el país del cliente MANDA. sourceCandidates prioriza fuerte a los candidatos
@@ -49,34 +61,38 @@ const WEB_SEARCH_TOOL = {
   max_uses: 8
 };
 
-// Acumulador de tokens por job (total + desglose por etapa)
-let tokenStats = { input: 0, output: 0, cache_write: 0, cache_read: 0 };
-let stageStats = {
-  gen:   { input: 0, output: 0, cache_write: 0, cache_read: 0 },
-  judge: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
-  fix:   { input: 0, output: 0, cache_write: 0, cache_read: 0 }
-};
-let currentStage = 'gen';
+// Acumulador de tokens POR REQUEST (aislado por job con AsyncLocalStorage).
+// Antes eran globales mutables (tokenStats/stageStats/currentStage) que se corrompían
+// cuando dos jobs corrían en paralelo en la misma réplica. Ahora cada job tiene el suyo.
+const { AsyncLocalStorage } = require('async_hooks');
+const _statsALS = new AsyncLocalStorage();
 
-function resetTokenStats() {
-  tokenStats = { input: 0, output: 0, cache_write: 0, cache_read: 0 };
-  stageStats = {
-    gen:   { input: 0, output: 0, cache_write: 0, cache_read: 0 },
-    judge: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
-    fix:   { input: 0, output: 0, cache_write: 0, cache_read: 0 }
+function _nuevoStats() {
+  return {
+    currentStage: 'gen',
+    total:  { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    stages: {
+      gen:   { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      judge: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      fix:   { input: 0, output: 0, cache_write: 0, cache_read: 0 }
+    }
   };
-  currentStage = 'gen';
 }
+// Store del request actual. Si por algún motivo se llama fuera de un job (no debería),
+// devuelve uno efímero para no romper el conteo.
+function _stats()     { return _statsALS.getStore() || _nuevoStats(); }
+function _setStage(s) { const st = _statsALS.getStore(); if (st) st.currentStage = s; }
 
 function costoDe({ input, output, cache_write, cache_read }) {
   return (input * 3 + output * 15 + cache_write * 3.75 + cache_read * 0.30) / 1e6;
 }
 
 function logTokenCost(label) {
-  const total = costoDe(tokenStats);
-  console.log(`[TOKENS] ${label} | in:${tokenStats.input} out:${tokenStats.output} cache_w:${tokenStats.cache_write} cache_r:${tokenStats.cache_read} | ~$${total.toFixed(4)} (Sonnet)`);
+  const st = _stats();
+  const total = costoDe(st.total);
+  console.log(`[TOKENS] ${label} | in:${st.total.input} out:${st.total.output} cache_w:${st.total.cache_write} cache_r:${st.total.cache_read} | ~$${total.toFixed(4)} (Sonnet)`);
   for (const etapa of ['gen', 'judge', 'fix']) {
-    const s = stageStats[etapa];
+    const s = st.stages[etapa];
     const c = costoDe(s);
     if (s.input || s.output || s.cache_read || s.cache_write) {
       console.log(`[TOKENS]   └─ ${etapa.padEnd(5)} | in:${s.input} out:${s.output} cache_w:${s.cache_write} cache_r:${s.cache_read} | ~$${c.toFixed(4)}`);
@@ -263,8 +279,9 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
     const o = data.usage.output_tokens || 0;
     const cw = data.usage.cache_creation_input_tokens || 0;
     const cr = data.usage.cache_read_input_tokens || 0;
-    tokenStats.input += i; tokenStats.output += o; tokenStats.cache_write += cw; tokenStats.cache_read += cr;
-    const st = stageStats[currentStage];
+    const _s = _stats();
+    _s.total.input += i; _s.total.output += o; _s.total.cache_write += cw; _s.total.cache_read += cr;
+    const st = _s.stages[_s.currentStage];
     if (st) { st.input += i; st.output += o; st.cache_write += cw; st.cache_read += cr; }
   }
   return data;
@@ -307,7 +324,7 @@ function _textoJSON(content){
 }
 
 async function runJudge(html, pageCount) {
-  currentStage = 'judge';
+  _setStage('judge');
   console.log(`[JUDGE] Evaluando reporte (${pageCount} páginas, esperadas ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}, cuentas ${NUM_CUENTAS})...`);
   const htmlLite = String(html || '')
     .replace(/src="data:image\/[a-z]+;base64,[A-Za-z0-9+/=]+"/gi, 'src="[LOGO]"')
@@ -327,16 +344,25 @@ async function runJudge(html, pageCount) {
   try {
     const parsed = JSON.parse(match ? match[0] : raw);
     const result = {
-      veredicto: parsed.veredicto || 'APROBADO',
+      veredicto: parsed.veredicto || 'RECHAZADO', // sin veredicto explícito → rechazar (fail-closed)
       score: parsed.score ?? 0,
       fixes: Array.isArray(parsed.fixes) ? parsed.fixes : []
     };
+    // Coherencia: el juez solo APRUEBA si pasa los 8/8. Un APROBADO con score<8 es
+    // incoherente (o un fallback) → se rechaza por seguridad para no enviar sin revisar.
+    if (result.veredicto === 'APROBADO' && result.score < 8) {
+      console.warn(`[JUDGE] Veredicto incoherente (APROBADO ${result.score}/8) → RECHAZADO por seguridad.`);
+      result.veredicto = 'RECHAZADO';
+      if (!result.fixes.length) result.fixes = ['Veredicto incoherente del juez (APROBADO con score < 8); se rechaza por seguridad.'];
+    }
     console.log(`[JUDGE] Veredicto: ${result.veredicto} ${result.score}/8`);
     if (result.fixes.length > 0) console.log(`[JUDGE] Fixes: ${result.fixes.join(' | ')}`);
     return result;
   } catch (e) {
-    console.error('[JUDGE] No se pudo parsear, aprobando por defecto:', e.message);
-    return { veredicto: 'APROBADO', score: 0, fixes: [] };
+    // FAIL-CLOSED: si el juez no devuelve un veredicto parseable, NO aprobar.
+    // Un error del juez no puede traducirse en un reporte enviado sin revisión.
+    console.error('[JUDGE] No se pudo parsear el veredicto → RECHAZO por seguridad (fail-closed):', e.message);
+    return { veredicto: 'RECHAZADO', score: 0, fixes: ['El juez no devolvió un veredicto parseable; se rechaza por seguridad para no enviar un reporte sin revisar.'] };
   }
 }
 
@@ -713,7 +739,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
 async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
-  currentStage = 'gen';
+  _setStage('gen');
   const bloqueCliente = (cliente && cliente.anclado)
     ? `\n\nDATOS VERIFICADOS DEL CLIENTE (NO inventes otra empresa, usá ESTOS): Empresa: ${cliente.empresa}; Tamaño: ${cliente.headcount ?? '?'} empleados${cliente.tier ? ` (tier ${cliente.tier})` : ''}.`
     : '';
@@ -775,7 +801,7 @@ EXACTAMENTE ${pedir} elementos distintos, en orden de prioridad. NADA fuera del 
 - Escribí cada valor en UNA línea. Antes de responder, verificá mentalmente que cada "{", "[", "\\"" tenga su cierre y que no haya comas colgando.`; }
 
 async function runSelectWrite({ cliente, plan, pool, fixes }){
-  currentStage = 'gen';
+  _setStage('gen');
   if(!pool || !pool.length) return [];   // sin candidatos no hay nada que elegir (evita parsear prosa)
   const lista = pool.map((p,i)=>{
     const tam = p.headcount!=null ? ` (~${p.headcount} empleados)` : '';
@@ -928,6 +954,41 @@ function _cuentaCompletas(data){
   return (((data && data.cards) || []).filter(_cardCompleta)).length;
 }
 
+// --- GEO-COHERENCIA (determinística) ------------------------------------------
+// Países que el reporte puede nombrar (LatAm + España/EEUU). Forma normalizada (sin tildes).
+const _PAISES = [
+  'mexico','guatemala','el salvador','honduras','nicaragua','costa rica','panama',
+  'colombia','venezuela','ecuador','peru','bolivia','chile','argentina','uruguay',
+  'paraguay','brasil','republica dominicana','puerto rico','cuba',
+  'espana','estados unidos','eeuu','usa'
+];
+// Devuelve la lista de países (normalizados) que aparecen mencionados en un texto.
+function _paisesDeTexto(txt){
+  const t = _norm(txt);
+  if(!t) return [];
+  // "espanol/a" NO debe contar como "espana": exigimos límite de palabra al final.
+  return _PAISES.filter(p => new RegExp(`\\b${_esc(p)}\\b`).test(t));
+}
+// Compara el país de cada card contra el país objetivo del reporte (título h1_post + ICP "Geografía").
+// Devuelve null si todo coherente; o { objetivo:[...], fuera:[...] } si alguna card está en otro país.
+function _geoIncoherente(data){
+  if(!data) return null;
+  const objetivo = new Set();
+  for(const p of _paisesDeTexto(data.h1_post)) objetivo.add(p);
+  const icpGeo = (data.icp||[]).find(o => o && /geograf/.test(_norm(o.title||o.titulo||'')));
+  if(icpGeo) for(const p of _paisesDeTexto(icpGeo.desc)) objetivo.add(p);
+  if(!objetivo.size) return null; // sin país objetivo reconocible no podemos juzgar → no bloquear
+  const fuera = [];
+  for(const c of (data.cards||[])){
+    const paisesCard = _paisesDeTexto(c.ubicacion);
+    if(!paisesCard.length) continue; // ubicación sin país reconocible → no bloquear por esta card
+    if(!paisesCard.some(p => objetivo.has(p))){
+      fuera.push(`${c.nombre||'?'} (${c.empresa||'?'}) figura en "${c.ubicacion}", fuera del/los país(es) objetivo del reporte (${[...objetivo].join(', ')}).`);
+    }
+  }
+  return fuera.length ? { objetivo:[...objetivo], fuera } : null;
+}
+
 async function seleccionarConRetry({ cliente, plan, pool, fixes }){
   const MIN = parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10);
   const MAX = parseInt(process.env.SELECT_MAX_TRIES || '3', 10);
@@ -954,10 +1015,10 @@ function _nombreArchivoPDF(empresa){
 }
 
 async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
+  return _statsALS.run(_nuevoStats(), async () => {
   try {
     console.log(`\n========== Job ${jobId} - Inicio (${NUM_CUENTAS} cuentas) ==========`);
     console.log(`Empresa: ${empresa} | Email: ${email} | Dominio: ${dominio} | profileId: ${profileId ?? '-'}`);
-    resetTokenStats();
 
     const cliente = await resolverCliente({ profileId, dominio, empresa });
     const empresaFinal = cliente.empresa || empresa;
@@ -1003,6 +1064,12 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 5),
         fixes: [`Reporte INCOMPLETO: ${cardsValidas}/${MIN_CARDS_OK} cuentas completas. Faltan decisores reales con empresa, cargo, ángulo y hook — el sourcing/selección debe entregar ${MIN_CARDS_OK}.`].concat(judgeResult.fixes||[]) };
     }
+    const geoMal = _geoIncoherente(data);
+    if (geoMal) {
+      console.warn(`[GEO] Incoherencia país: objetivo=[${geoMal.objetivo.join(', ')}] | ${geoMal.fuera.join(' ')}`);
+      judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
+        fixes: [`GEO INCOHERENTE: el reporte apunta a ${geoMal.objetivo.join(', ')} pero hay cuentas en otro país. ${geoMal.fuera.join(' ')} Las cuentas deben estar en el/los país(es) del título e ICP, o hay que ajustar el título/ICP al país real de las cuentas.`].concat(judgeResult.fixes||[]) };
+    }
     const aptoEnvio = cardsValidas >= MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO';
     const descartadas = [];
     console.log(aptoEnvio
@@ -1026,9 +1093,9 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
       juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8',
       juez_fixes: judgeResult.fixes,
       links_corregidos: [], links_no_resueltos: [], grados_corregidos: [], grados_mal: [],
-      tokens: { ...tokenStats },
-      tokens_input: tokenStats.input, tokens_output: tokenStats.output,
-      tokens_cache_write: tokenStats.cache_write, tokens_cache_read: tokenStats.cache_read,
+      tokens: { ..._stats().total },
+      tokens_input: _stats().total.input, tokens_output: _stats().total.output,
+      tokens_cache_write: _stats().total.cache_write, tokens_cache_read: _stats().total.cache_read,
       finishedAt: Date.now()
     });
     console.log(`========== Job ${jobId} - OK ${pageCount} páginas, juez FINAL ${judgeResult.veredicto} ${judgeResult.score}/8 ==========\n`);
@@ -1036,6 +1103,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
     console.error(`[Job ${jobId}] Error:`, err);
     jobs.set(jobId, { status: 'error', error: err.message, finishedAt: Date.now() });
   }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,6 +1114,12 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.static('.'));
 
 const jobs = new Map();
+// Dedup anti doble-disparo: leadKey -> jobId EN CURSO. Si el mismo lead se dispara dos veces
+// (re-fire de n8n, doble click, retry de red), reutilizamos el job en vez de generar otro reporte.
+const enProgreso = new Map();
+function _leadKey({ profileId, dominio, email, empresa }) {
+  return String(profileId || dominio || email || empresa || '').trim().toLowerCase();
+}
 
 setInterval(() => {
   const limite = Date.now() - 60 * 60 * 1000;
@@ -1059,10 +1133,25 @@ app.post('/generar', (req, res) => {
   if (!empresa && !dominio && !profileId) {
     return res.status(400).json({ error: 'Falta empresa, dominio o profileId' });
   }
+
+  // IDEMPOTENCIA: si ya hay un job EN CURSO para este mismo lead, devolvemos ESE jobId
+  // (deduplicado:true) en vez de arrancar otro. Evita reportes duplicados y doble envío.
+  const key = _leadKey({ profileId, dominio, email, empresa });
+  if (key && enProgreso.has(key)) {
+    const jobPrevio = enProgreso.get(key);
+    const j = jobs.get(jobPrevio);
+    if (j && j.status === 'processing') {
+      console.log(`[DEDUP] Lead "${key}" ya en proceso (job ${jobPrevio}). No se arranca otro.`);
+      return res.status(202).json({ jobId: jobPrevio, status: 'processing', deduplicado: true });
+    }
+  }
+
   const jobId = crypto.randomUUID();
   jobs.set(jobId, { status: 'processing', createdAt: Date.now() });
+  if (key) enProgreso.set(key, jobId);
   res.status(202).json({ jobId, status: 'processing' });
-  procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId });
+  procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId })
+    .finally(() => { if (key && enProgreso.get(key) === jobId) enProgreso.delete(key); });
 });
 
 app.get('/resultado/:jobId', (req, res) => {
@@ -1075,8 +1164,8 @@ app.post('/generar-reporte', async (req, res) => {
   const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug } = req.body || {};
   if (!email || !dominio) return res.status(400).json({ error: 'email y dominio son obligatorios' });
 
+  await _statsALS.run(_nuevoStats(), async () => {
   try {
-    resetTokenStats();
     const cliente = await resolverCliente({ profileId, dominio, empresa: empresa || dominio });
     const empresaFinal = cliente.empresa || empresa || dominio;
     const fechaHoy = _fechaHoy();
@@ -1117,6 +1206,12 @@ app.post('/generar-reporte', async (req, res) => {
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 5),
         fixes: [`Reporte INCOMPLETO: ${cardsValidas}/${MIN_CARDS_OK} cuentas completas.`].concat(judgeResult.fixes||[]) };
     }
+    const geoMal = _geoIncoherente(data);
+    if (geoMal) {
+      console.warn(`[GEO] Incoherencia país: objetivo=[${geoMal.objetivo.join(', ')}] | ${geoMal.fuera.join(' ')}`);
+      judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
+        fixes: [`GEO INCOHERENTE: el reporte apunta a ${geoMal.objetivo.join(', ')} pero hay cuentas en otro país. ${geoMal.fuera.join(' ')} Las cuentas deben estar en el/los país(es) del título e ICP, o hay que ajustar el título/ICP al país real de las cuentas.`].concat(judgeResult.fixes||[]) };
+    }
     const aptoEnvio = cardsValidas >= MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO';
     const descartadas = [];
     console.log(aptoEnvio
@@ -1141,14 +1236,15 @@ app.post('/generar-reporte', async (req, res) => {
       juez: judgeResult.veredicto + ' ' + judgeResult.score + '/8',
       juez_fixes: judgeResult.fixes,
       links_corregidos: [], links_no_resueltos: [], grados_corregidos: [], grados_mal: [],
-      tokens: { ...tokenStats },
-      tokens_input: tokenStats.input, tokens_output: tokenStats.output,
-      tokens_cache_write: tokenStats.cache_write, tokens_cache_read: tokenStats.cache_read
+      tokens: { ..._stats().total },
+      tokens_input: _stats().total.input, tokens_output: _stats().total.output,
+      tokens_cache_write: _stats().total.cache_write, tokens_cache_read: _stats().total.cache_read
     });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: err.message });
   }
+  });
 });
 
 app.get('/health', (req, res) => res.json({ ok: true, jobs_activos: jobs.size, cuentas: NUM_CUENTAS }));
