@@ -1,0 +1,1558 @@
+{
+  "name": "Lead Magnet generator  - GTM",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 10
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        3888,
+        4528
+      ],
+      "id": "c375b26e-5f45-49eb-a7f1-c8125b2c6d00",
+      "name": "Trigger cada 5 min1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://backoffice-server-production.up.railway.app/api/mcp",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json, text/event-stream"
+            },
+            {}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"get_logged_in_user\",\n    \"arguments\": {}\n  },\n  \"id\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        4336,
+        4528
+      ],
+      "id": "a68858be-859d-4988-b2c1-e45a62f8518e",
+      "name": "IBT Get user1",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "FxterpQCOE4hxazV",
+          "name": "Diego Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst structured = response?.result?.structuredContent;\nconst userId = structured?.id;\nconst dateFrom = new Date();\ndateFrom.setDate(dateFrom.getDate() - 30);\nreturn [{ json: { userId, dateFrom: dateFrom.toISOString() } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4560,
+        4528
+      ],
+      "id": "1701712b-9f77-476c-a1d4-2aee3cbebf98",
+      "name": "Extraer userId1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://backoffice-server-production.up.railway.app/api/mcp",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json, text/event-stream"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"list_inbox_chats\",\n    \"arguments\": {\n      \"dateFrom\": \"2026-01-01T00:00:00.000Z\",\n      \"needsResponse\": true,\n      \"sortBy\": \"lastMessageAt\",\n      \"sortDirection\": \"desc\",\n      \"limit\": 100\n    }\n  },\n  \"id\": 2\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        4768,
+        4528
+      ],
+      "id": "edc60f33-f0a6-49d6-bfb4-bc362b63dbd2",
+      "name": "IBT Listar chats1",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "FxterpQCOE4hxazV",
+          "name": "Diego Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nlet chats = [];\ntry {\n  const text = response.data;\n  const jsonMatch = text.match(/data: ({.*})\\n\\n/);\n  if (jsonMatch) {\n    const parsed = JSON.parse(jsonMatch[1]);\n    chats = parsed?.result?.structuredContent?.items || [];\n  }\n} catch(e) {}\nif (chats.length === 0) return [{ json: { skip: true } }];\nreturn chats.map(chat => ({ json: {\n  chatId: chat.id,\n  recipientName: chat.recipientName || '',\n  recipientCompany: chat.recipientCompany || '',\n  recipientId: chat.recipientId,\n  lastMessage: chat.lastMessage || ''\n}}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4960,
+        4528
+      ],
+      "id": "d30b6847-b6a3-4e18-80b3-54075589a92a",
+      "name": "Parsear chats1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://backoffice-server-production.up.railway.app/api/mcp",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json, text/event-stream"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"get_chat_messages\",\n    \"arguments\": {\n      \"chatId\": {{ $json.chatId }},\n      \"limit\": 50\n    }\n  },\n  \"id\": 3\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        5456,
+        4048
+      ],
+      "id": "5f697c76-528e-4ef5-9320-839660ce8240",
+      "name": "IBT Get mensajes1",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "FxterpQCOE4hxazV",
+          "name": "Diego Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const DIAS_ATRAS = 2;\n\n// Emails propios a ignorar — agregá los tuyos acá\nconst MIS_EMAILS = [\n  'benitez.aquiles@gmail.com',\n  'diego@squads.ventures'\n];\n\nconst dateFrom = new Date();\ndateFrom.setDate(dateFrom.getDate() - DIAS_ATRAS);\n\nreturn [{ json: { \n  dateFrom: dateFrom.toISOString(),\n  diasAtras: DIAS_ATRAS,\n  misEmails: MIS_EMAILS\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4112,
+        4528
+      ],
+      "id": "196f4f2e-0df5-481c-9849-b41794f86477",
+      "name": "Config dias atras"
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        5104,
+        4384
+      ],
+      "id": "61db80de-b778-4a95-bfe4-bba4a0a49a66",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1H1Zpc82YqtcSIBqZwvCsM7LIVlnmFaiAb55vqfc0TXY",
+          "mode": "list",
+          "cachedResultName": "Squad Leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H1Zpc82YqtcSIBqZwvCsM7LIVlnmFaiAb55vqfc0TXY/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H1Zpc82YqtcSIBqZwvCsM7LIVlnmFaiAb55vqfc0TXY/edit#gid=0"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "email",
+              "lookupValue": "={{ $('Extraer email y dominio1').item.json.email_extraido.trim().toLowerCase() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        6352,
+        3904
+      ],
+      "id": "9e3c3843-156f-45cd-893e-0466dd51d139",
+      "name": "Buscar en Squad Leads",
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "NXvHXoqeRh2lh5y7",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cond-skip",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        5904,
+        4128
+      ],
+      "id": "48c41162-679e-4fab-8036-e0a3cb9c0524",
+      "name": "Tiene email1"
+    },
+    {
+      "parameters": {
+        "amount": 30
+      },
+      "id": "77244462-dcdf-480e-9b5c-d325d92d9f6d",
+      "name": "Esperar 60s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        7024,
+        3904
+      ],
+      "webhookId": "4e45b59e-71dc-4b79-89e2-9c972a135b0d"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://apimensajeria-production.up.railway.app/generar",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"email\": \"{{ $('Extraer email y dominio1').item.json.email_extraido }}\",\n  \"dominio\": \"{{ $('Extraer email y dominio1').item.json.dominio }}\",\n  \"empresa\": \"{{ $('Extraer email y dominio1').item.json.recipientCompany }}\",\n  \"nombre\": \"{{ $('Extraer email y dominio1').item.json.recipientName }}\",\n  \"profileId\": \"{{ $('Extraer email y dominio1').item.json.recipientId }}\"\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "faabf77a-d122-4945-a57a-218e3a3e0f90",
+      "name": "Generar PDF (async)1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        6800,
+        3904
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://apimensajeria-production.up.railway.app/resultado/{{ $('Generar PDF (async)1').item.json.jobId }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "81095e07-2225-4659-9845-827ef8f4c18b",
+      "name": "Consultar resultado1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        7248,
+        3824
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-procesando",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "processing",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e016e79f-b81f-44ff-abd4-f5f68d019137",
+      "name": "¿Sigue procesando?1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        7472,
+        3904
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "=aquilesbenitez@squads.ventures",
+        "subject": "=TEST personalizado de {{ $('Descargar PDF1').item.json.empresa }}- preparado para vos",
+        "emailType": "text",
+        "message": "=Hola {{ $('Descargar PDF1').item.json.nombre }},\n\nTal cual te dije, te dejo el análisis de mercado de {{ $('Descargar PDF1').item.json.empresa }}.\n\nTe adjunto un reporte con 6 cuentas que identificamos como tus mejores clientes potenciales. Cada una incluye un ángulo de apertura personalizado y un decisor clave para abrir conversación.\n\nNo es una propuesta genérica, está hecho mirando quiénes están activos hoy en tu industria y dónde creemos que hay oportunidad real.\n\nSi algo te resuena, respondeme directo y lo charlamos.\n\nDiego\nSaludos!",
+        "options": {
+          "appendAttribution": false,
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {
+                "property": "reporte"
+              }
+            ]
+          },
+          "bccList": "",
+          "ccList": "diego@squads.ventures"
+        }
+      },
+      "id": "32d419e3-9018-4e1c-8e61-13423e37da52",
+      "name": "Enviar reporte Gmail",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        7920,
+        3904
+      ],
+      "webhookId": "04dfa303-c1b5-488a-bba2-2c6b9cd50e70",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "RT2lRk8KfDxjL7lR",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d36eacaf-837d-402d-b309-b8a00eef7d13",
+              "leftValue": "={{ String($json.enviado).toUpperCase() }}",
+              "rightValue": "TRUE",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        6576,
+        3904
+      ],
+      "id": "bf3750d5-c299-4ecb-999c-11e4d33aab85",
+      "name": "Ya fue Enviado"
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = $('Consultar resultado1').item.json;\nif (result.status !== 'ok') {\n  throw new Error('El job no terminó OK: ' + JSON.stringify(result));\n}\nconst base64 = result.pdf_base64;\nif (!base64) {\n  throw new Error('No se recibió pdf_base64 del servidor');\n}\n\n// Nombre profesional: usa el que manda el server (pdf_filename); si no viene,\n// lo arma con la empresa. Saca caracteres ilegales para nombres de archivo.\nconst empresaLimpia = String(result.empresa || 'Empresa').replace(/[\\\\/:*?\"<>|]/g, '').trim();\nconst fileName = result.pdf_filename || ('Análisis de Mercado - ' + empresaLimpia + '.pdf');\n\nreturn [{\n  json: {\n    email: result.email,\n    empresa: result.empresa,\n    nombre: result.nombre,\n    pdf_filename: fileName,\n    paginas: result.paginas,\n    juez: result.juez,\n    tokens_input: result.tokens_input,\n    tokens_output: result.tokens_output,\n    tokens_cache_write: result.tokens_cache_write,\n    tokens_cache_read: result.tokens_cache_read\n  },\n  binary: {\n    reporte: {\n      data: base64,\n      mimeType: 'application/pdf',\n      fileName: fileName\n    }\n  }\n}];"
+      },
+      "id": "4018646a-05d6-4f55-9e16-8aa88ec6341f",
+      "name": "Descargar PDF1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7696,
+        3904
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1H1Zpc82YqtcSIBqZwvCsM7LIVlnmFaiAb55vqfc0TXY",
+          "mode": "list",
+          "cachedResultName": "Squad Leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H1Zpc82YqtcSIBqZwvCsM7LIVlnmFaiAb55vqfc0TXY/edit#gid=0"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H1Zpc82YqtcSIBqZwvCsM7LIVlnmFaiAb55vqfc0TXY/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "email": "={{ $('Extraer email y dominio1').item.json.email_extraido.trim().toLowerCase() }}",
+            "nombre": "={{ $('Extraer email y dominio1').item.json.recipientName }}",
+            "enviado": "TRUE",
+            "fecha_envio": "={{ $now }}",
+            "empresa": "={{ $('Extraer email y dominio1').item.json.dominio }}",
+            "fecha_outreach": "={{ $('Extraer email y dominio1').item.json.fecha_mensaje }}",
+            "tokens_input": "={{ $('Consultar resultado1').item.json.tokens_input }}",
+            "tokens_output": "={{ $('Consultar resultado1').item.json.tokens_output }}",
+            "tokens_cache_write": "={{ $('Consultar resultado1').item.json.tokens_cache_write }}",
+            "tokens_cache_read": "={{ $('Consultar resultado1').item.json.tokens_cache_read }}"
+          },
+          "matchingColumns": [
+            "email"
+          ],
+          "schema": [
+            {
+              "id": "email",
+              "displayName": "email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "nombre",
+              "displayName": "nombre",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "empresa",
+              "displayName": "empresa",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "fecha_outreach",
+              "displayName": "fecha_outreach",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "enviado",
+              "displayName": "enviado",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "fecha_envio",
+              "displayName": "fecha_envio",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tokens_input",
+              "displayName": "tokens_input",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "tokens_output",
+              "displayName": "tokens_output",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "tokens_cache_write",
+              "displayName": "tokens_cache_write",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "tokens_cache_read",
+              "displayName": "tokens_cache_read",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        8288,
+        3920
+      ],
+      "id": "259ae14b-6b32-4709-abcd-7cc0de2fb509",
+      "name": "Marcar enviado Sheet1",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "NXvHXoqeRh2lh5y7",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst emailRegex = /[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}/g;\nconst emailsIgnorar = $('Config dias atras').first().json.misEmails || [];\nconst results = [];\nfor (const item of items) {\n  const chatData = item.json;\n  let emailEncontrado = null;\n  let fechaMensaje = null;\n  let textoCompleto = '';\n  try {\n    const text = chatData.data;\n    // Extraer el JSON de la respuesta SSE de forma robusta\n    let jsonStr = null;\n    const idx = text.lastIndexOf('data: {');\n    if (idx !== -1) {\n      jsonStr = text.slice(idx + 'data: '.length).trim();\n    }\n    if (jsonStr) {\n      const parsed = JSON.parse(jsonStr);\n      const todos = parsed?.result?.structuredContent?.data || [];\n      // Texto de TODOS los mensajes (tuyos y del contacto) para buscar la palabra clave\n      textoCompleto = todos.map(m => m.text || '').join(' ');\n      // El email se busca solo en los mensajes del contacto (isSender 0)\n      const recibidos = todos.filter(m => m.isSender === 0);\n      for (const msg of recibidos) {\n        const matches = (msg.text || '').match(emailRegex);\n        if (matches && matches.length > 0) {\n          const email = matches[0];\n          if (!emailsIgnorar.includes(email)) {\n            emailEncontrado = email;\n            fechaMensaje = msg.timestamp;\n            break;\n          }\n        }\n      }\n    }\n  } catch(e) {}\n  if (emailEncontrado) {\n    results.push({ json: {\n      chatId: chatData.chatId,\n      recipientName: $('Loop Over Items').item.json.recipientName || '',\n      recipientCompany: $('Loop Over Items').item.json.recipientCompany || '',\n      recipientId: $('Loop Over Items').item.json.recipientId,\n      email_extraido: emailEncontrado,\n      dominio: emailEncontrado.split('@')[1],\n      fecha_mensaje: fechaMensaje,\n      texto_mensaje: textoCompleto\n    }});\n  }\n}\nif (results.length === 0) return [{ json: { skip: true } }];\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5680,
+        4048
+      ],
+      "id": "a6ac758f-3cd6-4049-9fb2-2767f44f3161",
+      "name": "Extraer email y dominio1"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1H1Zpc82YqtcSIBqZwvCsM7LIVlnmFaiAb55vqfc0TXY",
+          "mode": "list",
+          "cachedResultName": "Squad Leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H1Zpc82YqtcSIBqZwvCsM7LIVlnmFaiAb55vqfc0TXY/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H1Zpc82YqtcSIBqZwvCsM7LIVlnmFaiAb55vqfc0TXY/edit#gid=0"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "email",
+              "lookupValue": "={{ $('Extraer email y dominio1').item.json.email_extraido.trim().toLowerCase() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        6352,
+        4192
+      ],
+      "id": "02860bc8-0de1-43fc-b660-e8d1c01ff1b0",
+      "name": "Buscar en Squad Leads GEO",
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "NXvHXoqeRh2lh5y7",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d36eacaf-837d-402d-b309-b8a00eef7d13",
+              "leftValue": "={{ String($json.enviado).toUpperCase() }}",
+              "rightValue": "TRUE",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        6576,
+        4192
+      ],
+      "id": "64b1fe64-84a3-4ae6-9895-4b4b6833c8ba",
+      "name": "Ya fue Enviado GEO"
+    },
+    {
+      "parameters": {
+        "amount": 60
+      },
+      "id": "730d9d7d-3a8f-48db-b7d9-8a3cce932698",
+      "name": "Esperar 60s GEO",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        7024,
+        4192
+      ],
+      "webhookId": "4e45b59e-71dc-4b79-89e2-9c972a135b0d"
+    },
+    {
+      "parameters": {
+        "url": "=https://apimensajeria-production.up.railway.app/resultado/{{ $('Generar PDF (async)1 GEO').item.json.jobId }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "8247a87a-c809-4ce4-bea8-552a1af985eb",
+      "name": "Consultar resultado1 GEO",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        7248,
+        4176
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-procesando",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "processing",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "79630a87-abfc-42f7-badc-31b8d6a7ee70",
+      "name": "¿Sigue procesando?1 GEO",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        7472,
+        4192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = $('Consultar resultado1 GEO').item.json;\n\nif (result.status !== 'ok') {\n  throw new Error('El job no terminó OK: ' + JSON.stringify(result));\n}\n\nconst base64 = result.pdf_base64;\nif (!base64) {\n  throw new Error('No se recibió pdf_base64 del servidor');\n}\n\nreturn [{\n  json: {\n    email: result.email,\n    empresa: result.empresa,\n    nombre: result.nombre,\n    paginas: result.paginas,\n    juez: result.juez,\n    tokens_input: result.tokens_input,\n    tokens_output: result.tokens_output,\n    tokens_cache_write: result.tokens_cache_write,\n    tokens_cache_read: result.tokens_cache_read\n  },\n  binary: {\n    reporte: {\n      data: base64,\n      mimeType: 'application/pdf',\n      fileName: 'reporte.pdf'\n    }\n  }\n}];"
+      },
+      "id": "fa2537b7-8558-4f45-848c-3d8fffef711d",
+      "name": "Descargar PDF1 GEO",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7696,
+        4192
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "=aquilesbenitez@squads.ventures",
+        "subject": "=Reporte personalizado de {{ $('Descargar PDF1 GEO').item.json.empresa }} — preparado para vos",
+        "emailType": "text",
+        "message": "=Hola {{ $('Descargar PDF1 GEO').item.json.nombre }},\n\nVi tu perfil y me tomé un rato para preparar algo específico para {{ $('Descargar PDF1 GEO').item.json.empresa }}.\n\nTe adjunto un reporte con 6 cuentas target que identificamos como prioridad para escalar tu operación. Cada una incluye un ángulo de apertura personalizado y un decisor clave para abrir conversación.\n\nNo es una propuesta genérica — está hecho mirando lo que están haciendo hoy y dónde creemos que hay oportunidad real.\n\nSi algo te resuena, respondeme directo y lo charlamos.\n\nSaludos!",
+        "options": {
+          "appendAttribution": false,
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {
+                "property": "reporte"
+              }
+            ]
+          }
+        }
+      },
+      "id": "bef06d20-720f-4d39-bea2-fa26169111a6",
+      "name": "Enviar reporte Gmail GEO",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        7920,
+        4192
+      ],
+      "webhookId": "04dfa303-c1b5-488a-bba2-2c6b9cd50e70",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "RT2lRk8KfDxjL7lR",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1H1Zpc82YqtcSIBqZwvCsM7LIVlnmFaiAb55vqfc0TXY",
+          "mode": "list",
+          "cachedResultName": "Squad Leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H1Zpc82YqtcSIBqZwvCsM7LIVlnmFaiAb55vqfc0TXY/edit#gid=0"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H1Zpc82YqtcSIBqZwvCsM7LIVlnmFaiAb55vqfc0TXY/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "email": "={{ $('Extraer email y dominio1').item.json.email_extraido.trim().toLowerCase() }}",
+            "nombre": "={{ $('Extraer email y dominio1').item.json.recipientName }}",
+            "enviado": "TRUE",
+            "fecha_envio": "={{ $now }}",
+            "empresa": "={{ $('Extraer email y dominio1').item.json.dominio }}",
+            "fecha_outreach": "={{ $('Extraer email y dominio1').item.json.fecha_mensaje }}",
+            "tokens_input": "={{ $('Consultar resultado1 GEO').item.json.tokens_input }}",
+            "tokens_output": "={{ $('Consultar resultado1 GEO').item.json.tokens_output }}",
+            "tokens_cache_write": "={{ $('Consultar resultado1 GEO').item.json.tokens_cache_write }}",
+            "tokens_cache_read": "={{ $('Consultar resultado1 GEO').item.json.tokens_cache_read }}"
+          },
+          "matchingColumns": [
+            "email"
+          ],
+          "schema": [
+            {
+              "id": "email",
+              "displayName": "email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "nombre",
+              "displayName": "nombre",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "empresa",
+              "displayName": "empresa",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "fecha_outreach",
+              "displayName": "fecha_outreach",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "enviado",
+              "displayName": "enviado",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "fecha_envio",
+              "displayName": "fecha_envio",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tokens_input",
+              "displayName": "tokens_input",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "tokens_output",
+              "displayName": "tokens_output",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "tokens_cache_write",
+              "displayName": "tokens_cache_write",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "tokens_cache_read",
+              "displayName": "tokens_cache_read",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        8336,
+        4208
+      ],
+      "id": "37592da8-4c82-4f14-aae6-1eedabc510cb",
+      "name": "Marcar enviado Sheet1 GEO",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "NXvHXoqeRh2lh5y7",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.texto_mensaje }}",
+                    "rightValue": "=mercado",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    },
+                    "id": "1b24169a-2216-496b-86e8-003de24c097a"
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        6128,
+        4032
+      ],
+      "id": "bf0d6097-5bdd-4de6-90ca-449089bcba29",
+      "name": "Tipo de Diagnostico"
+    },
+    {
+      "parameters": {
+        "jsCode": "// PLACEHOLDER - Flujo GEO (futuro)\n// Aca va a ir el procesamiento del diagnostico GEO.\n// Por ahora solo deja pasar los datos para testear el ruteo del Switch.\n\nconst item = $input.first().json;\nconsole.log('=== RAMA GEO activada (test) ===');\nconsole.log('Email:', item.email_extraido);\nconsole.log('Empresa:', item.dominio);\n\nreturn [{ json: { ...item, tipo_diagnostico: 'geo', test: true } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6800,
+        4192
+      ],
+      "id": "8048c86e-e0f8-4f19-835a-dc7329741736",
+      "name": "TEST GEO (placeholder)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://apimensajeria-production.up.railway.app/generar",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"email\": \"{{ $('Extraer email y dominio1').item.json.email_extraido }}\",\n  \"dominio\": \"{{ $('Extraer email y dominio1').item.json.dominio }}\",\n  \"empresa\": \"{{ $('Extraer email y dominio1').item.json.recipientCompany }}\",\n  \"nombre\": \"{{ $('Extraer email y dominio1').item.json.recipientName }}\",\n  \"profileId\": \"{{ $('Extraer email y dominio1').item.json.recipientId }}\"\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "30a0facc-bb9c-4d84-9b2a-6dabc683fbbe",
+      "name": "Generar PDF (async)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        6688,
+        3680
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.texto_mensaje }}",
+                    "rightValue": "=mercado",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    },
+                    "id": "1b24169a-2216-496b-86e8-003de24c097a"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.texto_mensaje }}",
+                    "rightValue": "competencia",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    },
+                    "id": "f30d42d8-dfe8-44c0-b646-880830bf278c"
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        5888,
+        3776
+      ],
+      "id": "f465f4ac-f677-4b6f-b56e-b45610d6ebc7",
+      "name": "Tipo de Diagnostico1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://apimensajeria-production.up.railway.app/generar",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"email\": \"test@quales.com\",\n  \"dominio\": \"quales.com\",\n  \"empresa\": \"Quales Group\",\n  \"nombre\": \"Fernando Manjarin\",\n  \"profileId\": 1905\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "5f9d17ff-32bd-4ec5-bb8a-0c0137898c58",
+      "name": "Generar PDF (async)2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        6944,
+        3696
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        5280,
+        4080
+      ],
+      "id": "ce93c15b-422b-4428-a12f-48685067c06e",
+      "name": "Wait",
+      "webhookId": "bdba6041-97f1-4c4f-be8c-da281627a11b"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://backoffice-server-production.up.railway.app/api/mcp",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json, text/event-stream"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"send_message\",\n    \"arguments\": {\n      \"userId\": \"{{ $('Extraer userId1').item.json.userId }}\",\n      \"linkedinPublicId\": \"ACoAACEzuN8BmH7W6jdixYXMEzwaBYMvB0h4RRQ\",\n      \"expectedRecipientName\": \"TU NOMBRE COMPLETO (como figura en tu LinkedIn)\",\n      \"message\": \"enviado!\"\n    }\n  },\n  \"id\": 9\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        8176,
+        3664
+      ],
+      "id": "0d6d70ec-5b8e-47ae-9135-975a7757faaf",
+      "name": "IBT Enviar \"enviado!\" (PRUEBA)",
+      "retryOnFail": false,
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "FxterpQCOE4hxazV",
+          "name": "Diego Account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Trigger cada 5 min1": {
+      "main": [
+        [
+          {
+            "node": "Config dias atras",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IBT Get user1": {
+      "main": [
+        [
+          {
+            "node": "Extraer userId1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraer userId1": {
+      "main": [
+        [
+          {
+            "node": "IBT Listar chats1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IBT Listar chats1": {
+      "main": [
+        [
+          {
+            "node": "Parsear chats1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parsear chats1": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IBT Get mensajes1": {
+      "main": [
+        [
+          {
+            "node": "Extraer email y dominio1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config dias atras": {
+      "main": [
+        [
+          {
+            "node": "IBT Get user1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar en Squad Leads": {
+      "main": [
+        [
+          {
+            "node": "Ya fue Enviado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tiene email1": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Tipo de Diagnostico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Esperar 60s": {
+      "main": [
+        [
+          {
+            "node": "Consultar resultado1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generar PDF (async)1": {
+      "main": [
+        [
+          {
+            "node": "Esperar 60s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consultar resultado1": {
+      "main": [
+        [
+          {
+            "node": "¿Sigue procesando?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Sigue procesando?1": {
+      "main": [
+        [
+          {
+            "node": "Esperar 60s",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Descargar PDF1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar reporte Gmail": {
+      "main": [
+        [
+          {
+            "node": "Marcar enviado Sheet1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ya fue Enviado": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generar PDF (async)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Descargar PDF1": {
+      "main": [
+        [
+          {
+            "node": "Enviar reporte Gmail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Marcar enviado Sheet1": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraer email y dominio1": {
+      "main": [
+        [
+          {
+            "node": "Tiene email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar en Squad Leads GEO": {
+      "main": [
+        [
+          {
+            "node": "Ya fue Enviado GEO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ya fue Enviado GEO": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Esperar 60s GEO": {
+      "main": [
+        [
+          {
+            "node": "Consultar resultado1 GEO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consultar resultado1 GEO": {
+      "main": [
+        [
+          {
+            "node": "¿Sigue procesando?1 GEO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Sigue procesando?1 GEO": {
+      "main": [
+        [
+          {
+            "node": "Esperar 60s GEO",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Descargar PDF1 GEO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Descargar PDF1 GEO": {
+      "main": [
+        [
+          {
+            "node": "Enviar reporte Gmail GEO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar reporte Gmail GEO": {
+      "main": [
+        [
+          {
+            "node": "Marcar enviado Sheet1 GEO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tipo de Diagnostico": {
+      "main": [
+        [
+          {
+            "node": "Buscar en Squad Leads",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TEST GEO (placeholder)": {
+      "main": [
+        [
+          {
+            "node": "Esperar 60s GEO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Marcar enviado Sheet1 GEO": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "IBT Get mensajes1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IBT Enviar \"enviado!\" (PRUEBA)": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "timezone": "America/Argentina/Buenos_Aires",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "08e8d71a-f546-4d5a-bbd0-a544705041a6",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "15414fc2e1874e86a1dff42f7462cdaf6e3b53535657cad06bd34a39bc4f0aae"
+  },
+  "id": "BJUHowEUwbYLD0Rh",
+  "tags": [
+    {
+      "updatedAt": "2026-06-03T13:52:23.787Z",
+      "createdAt": "2026-06-03T13:52:23.787Z",
+      "id": "drOyrVuQs4lJw81h",
+      "name": "diego"
+    }
+  ]
+}

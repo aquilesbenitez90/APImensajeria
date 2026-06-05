@@ -195,9 +195,11 @@ Criterios:
 4. **VERACIDAD de los datos de la empresa** (CRÍTICO):
    FAIL si el overview tiene datos que parecen inventados o demasiado específicos sin verificación (año de fundación, stage de funding, número de productos/clientes, métricas redondas sin fuente, tiempos de respuesta). Si todo el overview suena a "marketing copy genérico" → FAIL.
 
-5. **Coherencia interna + GEOGRAFÍA** (CRÍTICO) — el reporte trata sobre la empresa correcta y las cuentas hacen sentido para ese ICP.
+5. **Coherencia interna + GEOGRAFÍA + VERTICAL** (CRÍTICO) — el reporte trata sobre la empresa correcta y las cuentas hacen sentido para ese ICP.
    FAIL si una cuenta target es la misma empresa mencionada como proof point/cliente del producto en el overview.
    FAIL si una cuenta target está ubicada en un país donde el cliente NO opera / no puede prestar el servicio (mirá la geografía del ICP: las cuentas deben estar en los países de operación del cliente, priorizando el país principal).
+   FAIL si la industria/vertical real de una cuenta target está claramente FUERA de las verticales del ICP definido en la página 1 (overview + perfil objetivo). Ejemplos reales de incoherencia a rechazar: una agencia de marketing, una aseguradora, una empresa de energía o cualquier rubro ajeno coladas cuando el ICP apuntaba a otro vertical. Inferí la industria de la cuenta a partir de su nombre, su cargo y el contexto del ángulo/hook; si NO podés determinarla con razonable certeza, NO marques FAIL por este motivo (en duda sobre el rubro, dejá pasar este sub-criterio).
+   (La empresa y la industria de la card son datos REALES de Sales Navigator: NUNCA los marques como "inventados" ni "sospechosos". Acá SOLO evaluás la INCOHERENCIA del rubro contra el ICP, no su veracidad.)
 
 6. **Personalización del ÁNGULO y el HOOK** (CRÍTICO — esto lo escribe la IA):
    - Cada card con ángulo y hook ÚNICOS y específicos de ESA persona/empresa, con un pain concreto.
@@ -540,9 +542,31 @@ function _parseProfile(res){
   return { headcount: hc?parseInt(hc.replace(/,/g,''),10):null, headRich };
 }
 // Parsea resultados de búsqueda de EMPRESAS: id=NUMERO "Nombre" Industria (NNN employees, ?)
+// Headcount puede venir como "442", "1,5 mil+", "10 mil+" (es-MX). Normaliza a entero.
+function _parseHC(raw){
+  if(!raw) return null;
+  const mil = /mil/i.test(raw);
+  const s = String(raw).toLowerCase().replace(/mil/,'').replace(/\+/g,'').trim().replace(/\./g,'').replace(',','.');
+  const n = parseFloat(s);
+  if(isNaN(n)) return null;
+  return Math.round(mil ? n*1000 : n);
+}
 function _parseCompanies(res){
-  return [...String(res||'').matchAll(/id=([0-9]+)\s+"([^"]+)"\s+(.*?)\s*\(\s*(\d[\d.,]*)?\s*employees/g)]
-    .map(x=>({ id:x[1], name:x[2], industry:(x[3]||'').trim(), headcount: x[4]?parseInt(x[4].replace(/[.,]/g,''),10):null }));
+  return [...String(res||'').matchAll(/id=([0-9]+)\s+"([^"]+)"\s+(.*?)\s*\(\s*([^)]*?)\s*employees/g)]
+    .map(x=>({ id:x[1], name:x[2], industry:(x[3]||'').trim(), headcount: _parseHC(x[4]) }));
+}
+// Sales Navigator NO acepta rangos de headcount arbitrarios: solo estos brackets fijos.
+// Pasar {min:100,max:100000} hace fallar la query (error 500) → 0 cuentas-ancla.
+const _HC_BRACKETS = [
+  {min:1,max:10},{min:11,max:50},{min:51,max:200},{min:201,max:500},
+  {min:501,max:1000},{min:1001,max:5000},{min:5001,max:10000},{min:10001}
+];
+// Devuelve los brackets válidos que cubren "hcMin o más".
+function _hcDesde(hcMin){
+  const m = Number(hcMin) || 0;
+  if(m <= 1) return _HC_BRACKETS.slice();
+  const sel = _HC_BRACKETS.filter(b => b.max === undefined || b.max >= m);
+  return sel.length ? sel : [{min:10001}];
 }
 function _sizeBoost(hc, tamMin){
   if(hc==null) return 0;
@@ -651,10 +675,12 @@ async function sourceCandidates(plan, cliente){
   const hcMin = tamMin > 0 ? Math.max(11, Math.round(tamMin*0.5)) : 11;
   let cuentas = [];
   if(indIds.length && geoLocOrNull){
-    const baseCo = { category:'companies', profilesLimit:25, location:{include:geoLocOrNull}, industry:{include:indIds}, headcount:[{min:hcMin, max:100000}] };
-    try{ cuentas = _parseCompanies(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); }catch{}
+    const baseCo = { category:'companies', profilesLimit:25, location:{include:geoLocOrNull}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
+    try{ cuentas = _parseCompanies(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); }
+    catch(e){ console.warn('[SOURCE] companies (con señal) falló:', e.message); }
     if(cuentas.length < NUM_CUENTAS*2){   // la señal recortó demasiado para este vertical: recall sin señal
-      try{ const more=_parseCompanies(await callMCP('search_sales_navigator_filtered', baseCo)); for(const c of more) if(!cuentas.some(x=>x.id===c.id)) cuentas.push(c); }catch{}
+      try{ const more=_parseCompanies(await callMCP('search_sales_navigator_filtered', baseCo)); for(const c of more) if(!cuentas.some(x=>x.id===c.id)) cuentas.push(c); }
+      catch(e){ console.warn('[SOURCE] companies (sin señal) falló:', e.message); }
     }
   }
   cuentas = cuentas.filter(c => c.name && !_esComp(c.name));   // no anclar en un competidor/proveedor
@@ -1115,28 +1141,27 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
     let cleanHtml = limpiarHtml(renderReport(data));
     if (!cleanHtml) throw new Error('No se pudo renderizar el reporte');
 
-    let pdfBuffer = await renderizarPdf(cleanHtml);
-    let pageCount = await contarPaginas(pdfBuffer);
+    // El juez evalúa el HTML; el PDF se genera una sola vez al final y SOLO si queda apto.
+    let judgeResult = await runJudge(cleanHtml, null);
 
-    let judgeResult = await runJudge(cleanHtml, pageCount);
-
-    if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
-      console.log(`[Job ${jobId}] Juez rechazó ${judgeResult.score}/8 — aplicando fixes...`);
+    // Si el juez rechaza, reintenta re-seleccionando con los fixes. NO se renderiza PDF en
+    // el medio: solo HTML + juez. Configurable con MAX_FIX_ITERS (default 1).
+    const MAX_FIX = parseInt(process.env.MAX_FIX_ITERS || '1', 10);
+    for (let intento = 1; intento <= MAX_FIX && judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0; intento++) {
+      console.log(`[Job ${jobId}] Juez rechazó ${judgeResult.score}/8 — fix ${intento}/${MAX_FIX}...`);
       try {
         const fixedData = await seleccionarConRetry({ cliente, plan, pool, fixes: judgeResult.fixes });
-        const compFixed = _cuentaCompletas(fixedData), compPrev = _cuentaCompletas(data);
-        if (compFixed >= compPrev) {
-          data = fixedData;
-          cleanHtml = limpiarHtml(renderReport(data));
-          pdfBuffer = await renderizarPdf(cleanHtml);
-          pageCount = await contarPaginas(pdfBuffer);
-          console.log(`[Job ${jobId}] Re-validando con el juez después de fixes...`);
-          judgeResult = await runJudge(cleanHtml, pageCount);
-        } else {
-          console.warn(`[FIX] el fix dio ${compFixed} cards completas vs ${compPrev} previas — conservo el reporte previo.`);
+        if (_cuentaCompletas(fixedData) < _cuentaCompletas(data)) {
+          console.warn(`[FIX] el fix dio menos cards completas — conservo el previo y corto.`);
+          break;
         }
+        data = fixedData;
+        cleanHtml = limpiarHtml(renderReport(data));
+        console.log(`[Job ${jobId}] Re-validando con el juez...`);
+        judgeResult = await runJudge(cleanHtml, null);
       } catch (e) {
         console.warn(`[FIX] Falló, conservo el reporte previo:`, e.message);
+        break;
       }
     }
 
@@ -1165,11 +1190,19 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
       ? `[INTEGRIDAD] OK: ${cardsValidas} cards completas + juez APROBADO.`
       : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} completas, juez ${judgeResult.veredicto}.`);
 
+    // El PDF se renderiza una sola vez y SOLO si el reporte quedó apto. Si está rechazado
+    // no se genera y el job no expone pdf_base64, así n8n no tiene nada que mandar.
+    let pdfBuffer = null, pageCount = null;
+    if (aptoEnvio) {
+      pdfBuffer = await renderizarPdf(cleanHtml);
+      pageCount = await contarPaginas(pdfBuffer);
+    }
+
     logTokenCost(`Job ${jobId}`);
 
     jobs.set(jobId, {
       status: 'ok',
-      pdf_base64: pdfBuffer.toString('base64'),
+      pdf_base64: pdfBuffer ? pdfBuffer.toString('base64') : null,
       empresa: empresaFinal,
       anclado: cliente.anclado,
       cliente_resuelto: cliente,
@@ -1187,7 +1220,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
       tokens_cache_write: _stats().total.cache_write, tokens_cache_read: _stats().total.cache_read,
       finishedAt: Date.now()
     });
-    console.log(`========== Job ${jobId} - OK ${pageCount} páginas, juez FINAL ${judgeResult.veredicto} ${judgeResult.score}/8 ==========\n`);
+    console.log(`========== Job ${jobId} - ${aptoEnvio ? `OK ${pageCount} páginas` : 'NO apto (sin PDF)'}, juez FINAL ${judgeResult.veredicto} ${judgeResult.score}/8 ==========\n`);
   } catch (err) {
     console.error(`[Job ${jobId}] Error:`, err);
     jobs.set(jobId, { status: 'error', error: err.message, finishedAt: Date.now() });
@@ -1266,25 +1299,24 @@ app.post('/generar-reporte', async (req, res) => {
     let cleanHtml = limpiarHtml(renderReport(data));
     if (!cleanHtml) return res.status(500).json({ error: 'No se pudo renderizar el reporte' });
 
-    let pdfBuffer = await renderizarPdf(cleanHtml);
-    let pageCount = await contarPaginas(pdfBuffer);
-    let judgeResult = await runJudge(cleanHtml, pageCount);
+    // El juez evalúa el HTML; el PDF se genera abajo y solo si quedó apto.
+    let judgeResult = await runJudge(cleanHtml, null);
 
-    if (judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0) {
+    // Si el juez rechaza, reintenta re-seleccionando con los fixes (sin renderizar PDF en el medio).
+    const MAX_FIX = parseInt(process.env.MAX_FIX_ITERS || '1', 10);
+    for (let intento = 1; intento <= MAX_FIX && judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0; intento++) {
       try {
         const fixedData = await seleccionarConRetry({ cliente, plan, pool, fixes: judgeResult.fixes });
-        const compFixed = _cuentaCompletas(fixedData), compPrev = _cuentaCompletas(data);
-        if (compFixed >= compPrev) {
-          data = fixedData;
-          cleanHtml = limpiarHtml(renderReport(data));
-          pdfBuffer = await renderizarPdf(cleanHtml);
-          pageCount = await contarPaginas(pdfBuffer);
-          judgeResult = await runJudge(cleanHtml, pageCount);
-        } else {
-          console.warn(`[FIX] el fix dio ${compFixed} cards completas vs ${compPrev} previas — conservo el reporte previo.`);
+        if (_cuentaCompletas(fixedData) < _cuentaCompletas(data)) {
+          console.warn(`[FIX] el fix dio menos cards completas — conservo el previo y corto.`);
+          break;
         }
+        data = fixedData;
+        cleanHtml = limpiarHtml(renderReport(data));
+        judgeResult = await runJudge(cleanHtml, null);
       } catch (e) {
         console.warn(`[FIX] Falló, conservo el reporte previo:`, e.message);
+        break;
       }
     }
 
@@ -1313,11 +1345,18 @@ app.post('/generar-reporte', async (req, res) => {
       ? `[INTEGRIDAD] OK: ${cardsValidas} cards completas + juez APROBADO.`
       : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} completas, juez ${judgeResult.veredicto}.`);
 
+    // PDF solo si quedó apto; si está rechazado se devuelve pdf_base64 null.
+    let pdfBuffer = null, pageCount = null;
+    if (aptoEnvio) {
+      pdfBuffer = await renderizarPdf(cleanHtml);
+      pageCount = await contarPaginas(pdfBuffer);
+    }
+
     logTokenCost('generar-reporte');
 
     return res.json({
       status: 'ok',
-      pdf_base64: pdfBuffer.toString('base64'),
+      pdf_base64: pdfBuffer ? pdfBuffer.toString('base64') : null,
       reporte: (evalMode || debug) ? data : undefined, // solo en modo eval: objeto estructurado para inspección
       empresa: empresaFinal,
       anclado: cliente.anclado,
