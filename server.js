@@ -643,6 +643,19 @@ async function sourceCandidates(plan, cliente){
 
   // dedupe + descartes (decisor real, no la propia empresa del cliente, no competidores)
   const competidores = (Array.isArray(icp.competidores)?icp.competidores:[]).map(_norm).filter(c=>c.length>=4);
+  // Términos del PRODUCTO que el cliente vende y que, en el NOMBRE de otra empresa, la delatan como
+  // proveedor/competidor (ej. "explosivos", "voladura", "staffing"). SALVAGUARDA anti-falso-positivo:
+  // descartamos cualquier término que coincida con el VERTICAL del comprador (icp.industrias), para no
+  // eliminar clientes legítimos (caso NOCNOK: vende "software inmobiliario" y sus clientes son inmobiliarias).
+  const _indNorm = (Array.isArray(icp.industrias)?icp.industrias:[]).map(_norm).filter(Boolean);
+  const _raiz = w => w.slice(0, Math.max(5, w.length - 2));  // recorta género/plural (-o/-a/-s/-es) para comparar
+  const compTerminos = (Array.isArray(icp.competidor_terminos)?icp.competidor_terminos:[])
+    .map(_norm).filter(t => {
+      if(t.length < 4) return false;
+      const rt = _raiz(t);
+      // descartá el término si comparte raíz con un VERTICAL del comprador (ej. "inmobiliaria" ~ "inmobiliario")
+      return !_indNorm.some(ind => { const ri=_raiz(ind); return ind.includes(t)||t.includes(ind)||rt.startsWith(ri)||ri.startsWith(rt); });
+    });
   const vistos=new Set(); const out=[]; const empCliente=_norm((cliente&&cliente.empresa)||'');
   for(const p of pool){
     if(!p.id || vistos.has(p.id)) continue; vistos.add(p.id);
@@ -650,6 +663,7 @@ async function sourceCandidates(plan, cliente){
     const emp=_empresaDeHeadline(p.head)||'';
     if(empCliente && emp && _mismaEmpresa(empCliente, emp)) continue;
     if(emp && _esCompetidor(emp, competidores)){ console.warn(`[SOURCE] descartado por COMPETIDOR: ${p.name} @ ${emp}`); continue; }
+    if(emp && compTerminos.length){ const en=_norm(emp); if(compTerminos.some(t=>en.includes(t))){ console.warn(`[SOURCE] descartado por TÉRMINO de producto en empresa (proveedor/competidor): ${p.name} @ ${emp}`); continue; } }
     const cerca = homeGeo && _norm(p.loc||'').includes(homeGeo) ? 1 : 0;
     out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos) });
   }
@@ -715,7 +729,8 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   REGLA DE ORO: no subas ni bajes el nivel respecto de lo que dice la fuente. Si DISTINTAS fuentes difieren en el nivel de un mismo país (ej. una dice "opera en" y otra "se está expandiendo a"), usá SIEMPRE el nivel MÁS BAJO/conservador (en ese caso, "expansión reciente"), nunca el más optimista. El stat de países (si lo ponés) cuenta los consolidados + los recientes reales (NO los aspiracionales), y el texto y el stat tienen que COINCIDIR: si decís que opera/se expande en 3 países, el stat dice 3, no 2. Si no estás seguro de un país, no lo cuentes en ningún lado, pero que texto y stat coincidan.
 - INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar las VERTICALES ANCLA reales donde están los COMPRADORES del cliente (las mismas que marcás ALTA en "prioridades"). El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Banca", "Administración de propiedades"). NO pongas el rubro del propio cliente ni industrias genéricas. EVITÁ verticales industriales/pesadas amplias (ej. "Construcción", "Manufactura", "Minería", "Cemento") salvo que sean LITERALMENTE el comprador: arrastran jefes de mantenimiento de planta que consumen el servicio puertas adentro pero NO son el canal de compra. Ante la duda, preferí las verticales donde el producto del cliente se compra o se revende.
 - TAMAÑO (para que salgan empresas ANCLA, no micro-empresas): "tamano_min" tiene que ser un número real de empleados que refleje el ICP. Si el ICP son empresas medianas y grandes / marcas ancla, poné un piso alto (ej: 200). Poné un piso bajo (20-50) SOLO si el ICP son genuinamente PyMEs/micro. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva.
-- COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas que compiten DIRECTO con el cliente (venden/ofrecen lo mismo). El sistema EXCLUYE de los candidatos a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES que hayas visto en el research (ej. para una empresa de asistencia técnica: otras redes de asistencia como "Iké Asistencia", "Asissprex"). NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque eso descartaría compradores legítimos cuyo cargo menciona esas palabras. Si no identificás competidores claros, dejá la lista vacía.
+- COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas que NO son compradores porque venden/fabrican LO MISMO que el cliente. Buscalos con web_search e incluí TRES tipos: (i) competidores directos de tamaño similar; (ii) FABRICANTES o PROVEEDORES globales del mismo producto (ej. para detonadores/voladura: Enaex, Orica, Dyno Nobel, Sandvik; para staffing de tecnología: Toptal, Turing, Andela, TEKsystems); (iii) distribuidores o integradores que revenden ese producto. Son PARES o RIVALES, no clientes. El sistema EXCLUYE a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES del research. NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque descartaría compradores legítimos. Si no identificás competidores claros, dejá la lista vacía.
+- COMPETIDOR_TERMINOS (filtro de respaldo, usar con cuidado): listá 0-4 términos del PRODUCTO ESPECÍFICO que el cliente fabrica/vende y que, si aparecen en el NOMBRE de otra empresa, casi seguro la delatan como proveedor o competidor (ej. "explosivos", "detonadores", "voladura", "staffing", "proptech"). REGLA CRÍTICA: NO pongas el VERTICAL/industria donde el cliente VENDE: si vende software inmobiliario NO pongas "inmobiliaria"; si le vende a minería NO pongas "minería"; eso descartaría a tus propios compradores. Solo el nombre del producto en sí. Ante la duda, dejá la lista vacía.
 - LARGO (para que el overview entre en 1 página): lead = MÁX 2 oraciones; proof = MÁX 2 oraciones; cada bullet de context = 1 oración corta (máx ~140 caracteres). Sé conciso.
 - _plan.titulos_objetivo es CRÍTICO: el sistema rankea y BUSCA con estas palabras (una por una) dentro del cargo. Palabras SUELTAS (no frases), ES+inglés+abreviaturas. Pensá DOS tipos de comprador y poné términos de AMBOS: (a) el que CONSUME el servicio puertas adentro (operaciones, facilities, mantenimiento, servicios generales, administrador); y (b) el que dentro de la empresa-canal OWNS la línea de producto/relación que mapea con lo que vende el cliente (el comprador de canal). Para (b), usá el NOMBRE del producto/vertical del cliente tal como aparece en cargos del comprador: ej. para una empresa de asistencia domiciliaria, los que en una aseguradora/retailer manejan "hogar", "asistencia", "vivienda", "copropiedad", "siniestros", "líneas personales", "proveedores". NO te quedes solo con los roles de facilities: el comprador de canal (ej. el jefe de línea hogar de una aseguradora) suele ser la mejor cuenta. Si el ICP apunta a empresas chicas donde compra el dueño/CEO, incluí "ceo, founder, owner, dueño, fundador". ORDEN: poné PRIMERO los términos del comprador de canal/producto (b) y después los de facilities (a); el sistema usa los primeros, así que los más valiosos van al frente.
 
@@ -734,7 +749,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "context": [ "bullet 1 (corto)", "bullet 2 (corto)", "bullet 3 (corto)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
   "prioridades": [ "Alta: ...", "Media: ...", "...", "..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA donde se COMPRA/revende el producto, ej: Seguros, Comercio al por menor, Inmobiliario, Administración de propiedades, Banca (evitá industriales amplias tipo Construcción/Manufactura)"], "competidores": ["NOMBRES de empresas competidoras directas a EXCLUIR (que venden lo mismo que el cliente), ej: Iké Asistencia, Asissprex"], "tamano_min": 200 }
+  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA donde se COMPRA/revende el producto, ej: Seguros, Comercio al por menor, Inmobiliario, Administración de propiedades, Banca (evitá industriales amplias tipo Construcción/Manufactura)"], "competidores": ["NOMBRES de empresas competidoras directas a EXCLUIR (que venden lo mismo que el cliente), ej: Iké Asistencia, Asissprex"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA el vertical donde el cliente vende"], "tamano_min": 200 }
 }
 CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
@@ -932,6 +947,7 @@ function armarReporte(plan, seleccion, pool){
       urn: p.id, slug: _slugCos(p.name),
       ubicacion: p.loc || ((plan._plan && plan._plan.geografia) || ''),
       grado: _degOrdinal(p.dist===9?3:p.dist, '2do') + ' grado',
+      headcount: (p.headcount ?? null),
       angulo: _limpia(angulo), hook: _limpia(hook)
     });
   }
@@ -987,6 +1003,29 @@ function _geoIncoherente(data){
     }
   }
   return fuera.length ? { objetivo:[...objetivo], fuera } : null;
+}
+
+// --- TAMAÑO-COHERENCIA (determinística, análoga a geo) ------------------------
+// Compara el headcount real de cada card final contra el tamano_min del ICP.
+// Solo bloquea micro-empresas claramente por debajo del piso (margen 0.5) para no
+// castigar zonas grises. Si el ICP no define tamano_min (>0), no juzga (devuelve null).
+// Enriquece el headcount faltante de las cards finales (get_contact_profile no gasta créditos).
+async function _tamanoIncoherente(data, plan){
+  if(!data) return null;
+  const tamMin = parseInt((plan && plan._plan && plan._plan.tamano_min) || 0, 10) || 0;
+  if(tamMin <= 0) return null;                 // sin piso declarado no podemos juzgar → no bloquear
+  const piso = Math.round(tamMin * 0.5);       // margen: solo micro-empresas claramente por debajo
+  const fuera = [];
+  for(const c of (data.cards||[])){
+    let hc = (c.headcount != null) ? c.headcount : null;
+    if(hc == null && c.urn){
+      try{ hc = _parseProfile(await callMCP('get_contact_profile', { publicIdOrUrl: c.urn })).headcount; }catch{}
+    }
+    if(hc != null && hc < piso){
+      fuera.push(`${c.nombre||'?'} (${c.empresa||'?'}) trabaja en una empresa de ~${hc} empleados, por debajo del piso del ICP (${tamMin}+).`);
+    }
+  }
+  return fuera.length ? { tamMin, fuera } : null;
 }
 
 async function seleccionarConRetry({ cliente, plan, pool, fixes }){
@@ -1069,6 +1108,12 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
       console.warn(`[GEO] Incoherencia país: objetivo=[${geoMal.objetivo.join(', ')}] | ${geoMal.fuera.join(' ')}`);
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
         fixes: [`GEO INCOHERENTE: el reporte apunta a ${geoMal.objetivo.join(', ')} pero hay cuentas en otro país. ${geoMal.fuera.join(' ')} Las cuentas deben estar en el/los país(es) del título e ICP, o hay que ajustar el título/ICP al país real de las cuentas.`].concat(judgeResult.fixes||[]) };
+    }
+    const tamMal = await _tamanoIncoherente(data, plan);
+    if (tamMal) {
+      console.warn(`[TAM] Incoherencia tamaño: piso ${tamMal.tamMin}+ | ${tamMal.fuera.join(' ')}`);
+      judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
+        fixes: [`TAMAÑO INCOHERENTE: el ICP pide empresas de ${tamMal.tamMin}+ empleados pero hay cuentas muy por debajo. ${tamMal.fuera.join(' ')} Reemplazá esas cuentas por empresas que cumplan el tamaño del ICP, o ajustá el título/ICP al tamaño real de las cuentas.`].concat(judgeResult.fixes||[]) };
     }
     const aptoEnvio = cardsValidas >= MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO';
     const descartadas = [];
@@ -1211,6 +1256,12 @@ app.post('/generar-reporte', async (req, res) => {
       console.warn(`[GEO] Incoherencia país: objetivo=[${geoMal.objetivo.join(', ')}] | ${geoMal.fuera.join(' ')}`);
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
         fixes: [`GEO INCOHERENTE: el reporte apunta a ${geoMal.objetivo.join(', ')} pero hay cuentas en otro país. ${geoMal.fuera.join(' ')} Las cuentas deben estar en el/los país(es) del título e ICP, o hay que ajustar el título/ICP al país real de las cuentas.`].concat(judgeResult.fixes||[]) };
+    }
+    const tamMal = await _tamanoIncoherente(data, plan);
+    if (tamMal) {
+      console.warn(`[TAM] Incoherencia tamaño: piso ${tamMal.tamMin}+ | ${tamMal.fuera.join(' ')}`);
+      judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
+        fixes: [`TAMAÑO INCOHERENTE: el ICP pide empresas de ${tamMal.tamMin}+ empleados pero hay cuentas muy por debajo. ${tamMal.fuera.join(' ')} Reemplazá esas cuentas por empresas que cumplan el tamaño del ICP, o ajustá el título/ICP al tamaño real de las cuentas.`].concat(judgeResult.fixes||[]) };
     }
     const aptoEnvio = cardsValidas >= MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO';
     const descartadas = [];
