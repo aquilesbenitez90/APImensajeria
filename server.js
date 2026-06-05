@@ -595,9 +595,9 @@ function _esICsuelto(cargo){
   if(_MARCADOR_DECISION.test(c)) return false;                 // tiene mando -> NO es IC suelto
   // "asesor/a" sí, pero "asesoria" (sustantivo de área/firma) no debe contar
   const esAsesorPersona = /\basesor(a|es|as)?\b/.test(c) && !/\basesoria/.test(c);
-  const ic = /\b(agente|asociad[oa]|especialista|profesional inmobiliario|analista|representante|vendedor|vendedora|consultor|consultora)\b/.test(c)
+  const ic = /\b(agente|agent|asociad[oa]|associate|especialista|specialist|profesional inmobiliario|analista|analyst|representante|representative|realtor|vendedor|vendedora|salesperson|consultor|consultora|consultant)\b/.test(c)
     || esAsesorPersona
-    || /\bejecutiv[oa]\s+de\s+(ventas|cuentas)\b/.test(c);     // "ejecutivo de ventas/cuentas" = IC
+    || /\b(ejecutiv[oa]\s+de\s+(ventas|cuentas)|account\s+executive|sales\s+(rep|representative))\b/.test(c);  // IC en ES/EN ("agent"≠"agente": el MCP trae headlines en inglés)
   return ic;
 }
 // ¿El ICP claramente apunta a GERENCIA/DUEÑO (no a ICs)? Heurística: la función del comprador y/o los
@@ -613,12 +613,14 @@ function _icpPideDecisores(plan){
   // Si CUALQUIER señal del ICP apunta a decisión, tratamos el ICP como "pide decisores".
   return funcionDecide || tituloDecide;
 }
-function _rankFit(head, titulos){
+// ¿El headline contiene alguno de los títulos objetivo del ICP? (match de FUNCIÓN, separado de la seniority).
+function _matchFuncion(head, titulos){
   const h=_norm(head);
   const lista = Array.isArray(titulos) ? titulos : [];
-  const matchFuncion = lista.some(t=>{ const n=_norm(t); return n && n.length>=2 && h.includes(n); });
-  const sen=_rankSenioridad(head);
-  return (matchFuncion ? 100 : 10) + sen;
+  return lista.some(t=>{ const n=_norm(t); return n && n.length>=2 && h.includes(n); });
+}
+function _rankFit(head, titulos){
+  return (_matchFuncion(head, titulos) ? 100 : 10) + _rankSenioridad(head);
 }
 // Calidez de la conexión: 1er grado > 2do > 3ro > fuera de red. Se usa SOLO como desempate
 // (a igual fit/país gana el más cálido), nunca por encima del fit. El skill GTM pide priorizar 2do grado.
@@ -797,6 +799,22 @@ async function sourceCandidates(plan, cliente){
 
   const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
 
+  // SCORING del candidato (UNA sola definición → las 3 llamadas quedan idénticas, sin drift posible).
+  // Principio (auditoría GTM, casos reales Brandtrack/NOCNOK): DECISIÓN y FIT-DE-VERTICAL son los DRIVERS;
+  // el TAMAÑO es piso/tiebreak, NO driver lineal (un gigante off-vertical no debe ganarle a una empresa del
+  // rubro: caso Arcor>Prüne); la calidez (2do grado) pesa. Reemplaza al viejo `fit*3` keyword-céntrico que
+  // aplastaba todo (~315 pts) dejando el fit-de-vertical en apenas +4.
+  //   ancla(+30) = la empresa salió como comprador objetivo del cliente (fit-de-negocio fuerte)
+  //   funcion(+25) = el cargo es del rol buscado | seniority*6 = PREMIA al decisor (no solo castiga al IC)
+  //   tamaño*2 = saturado en el piso | calidez*4 | país*3 | IC suelto −60 = castigo que sí domina
+  const _scoreCand = (c) => (c.ancla?30:0)
+    + (_matchFuncion(c.head, titulos)?25:0)
+    + _rankSenioridad(c.head)*6
+    + _sizeBoost(c.headcount, tamMin)*2
+    + _warmth(c.dist)*4
+    + (c.cerca?3:0)
+    - (c.icSuelto?60:0);
+
   // ===== PASADA A — ACCOUNT-FIRST: cuentas-ancla con señal de compra =====
   // Buscamos EMPRESAS que encajan el ICP (industria + geo + tamaño) y están "en movimiento" (crecimiento de
   // headcount = señal genérica y honesta de que pueden estar comprando). Si la señal recorta de más, recall sin
@@ -891,8 +909,7 @@ async function sourceCandidates(plan, cliente){
     // ROL: si el ICP pide decisores, penalizamos fuerte a los IC sueltos para que los decisores floten arriba
     // del pool que ve la IA. No es descarte (la card sigue disponible si no hay alternativa) -> degradación digna.
     c.icSuelto = pideDecisores && _esICsuelto(c.head);
-    // SCORING: fit y tamaño mandan; la cuenta-ancla y el grado (×2) ahora pesan de verdad, no solo desempatan.
-    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + (c.ancla?4:0) + c.cerca + _warmth(c.dist)*2 - (c.icSuelto?40:0);
+    c.score = _scoreCand(c);
   });
   // piso de tamaño contra el ICP, SIN vaciar el pool
   const cumplen  = top.filter(c => !(c.headcount!=null && c.headcount < PISO));
@@ -933,7 +950,7 @@ async function sourceCandidates(plan, cliente){
         }
         // recomputar el score ahora que el tamaño se conoce (head puede haber cambiado al enriquecer -> reevaluar IC)
         c.icSuelto = pideDecisores && _esICsuelto(c.head);
-        c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + (c.ancla?4:0) + c.cerca + _warmth(c.dist)*2 - (c.icSuelto?40:0);
+        c.score = _scoreCand(c);
       }catch{}
     });
   }
@@ -957,6 +974,17 @@ async function sourceCandidates(plan, cliente){
     const reponer = out.filter(c => !ya.has(c.id) && !(c.headcount!=null && c.headcount < EGREGIO)).slice(0, N_IA - final.length);
     if(reponer.length){ final = final.concat(reponer); }
   }
+
+  // RANKING FINAL: el pool que ve la IA tiene que estar ordenado por score COMPLETO. Los que entraron por el
+  // relleno (out.slice(K)), la cuota de 2do grado o el repoblado egregio y ya traían headcount NUNCA pasaron
+  // por el scoring de arriba (score/icSuelto quedaban undefined) → viajaban con su orden de inserción. Acá
+  // garantizamos score+icSuelto para TODOS y ordenamos: país primero (desempate de geo), después score. No
+  // recorta nada → no expulsa a los que la cuota de 2do grado metió, solo los reordena.
+  for(const c of final){
+    c.icSuelto = pideDecisores && _esICsuelto(c.head);
+    c.score = _scoreCand(c);
+  }
+  final.sort((a,b)=> (b.cerca-a.cerca) || (b.score-a.score) || (b.ancla-a.ancla));
 
   // ROL: contar IC sueltos que llegan al pool de la IA (solo informativo; ya quedaron al fondo por el score).
   // Recalculamos sobre el head final de cada candidata (algunas no pasaron por enriquecimiento -> sin c.icSuelto).
@@ -1715,5 +1743,5 @@ module.exports = {
   validarPlan, sourceCandidates, armarReporte, verificarLinksData,
   parseReporteJSON, _rankFit, _rankSenioridad, _parseProfile, _sizeBoost,
   _norm, _empresaDeHeadline, _empKey, _slugCos, _degOrdinal, _headlineLimpio, _fechaHoy,
-  _esICsuelto, _icpPideDecisores
+  _esICsuelto, _icpPideDecisores, _matchFuncion, _warmth
 };
