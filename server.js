@@ -782,6 +782,46 @@ async function sourceCandidates(plan, cliente){
       if(add.length){ final = final.concat(add); console.log(`[SOURCE] cuota de grado: +${add.length} de 2do grado al pool de la IA.`); }
     }
   }
+
+  // ENRIQUECER TAMAÑO ANTES DE LA IA: el barrido (pasada C) y la cuota de grado meten candidatas con
+  // headcount null (solo el top K se enriqueció arriba). Si llegan así a la IA, el filtro de tamaño no
+  // puede juzgar lo desconocido, la IA elige una micro-empresa y recién el gate final la caza → rechazo total.
+  // Leemos el headcount real de los null de `final` (get_contact_profile es lectura, NO gasta créditos).
+  const faltaHC = final.filter(c => c.headcount==null);
+  if(faltaHC.length){
+    await _mapLimit(faltaHC, CONC, async (c) => {
+      try{
+        const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
+        if(prof.headcount!=null) c.headcount=prof.headcount;
+        if(prof.headRich && prof.headRich.length>=3){
+          c.head=prof.headRich; c.empresa=_empresaDeHeadline(prof.headRich) || c.empresa; c.fit=_rankFit(prof.headRich, titulos);
+        }
+        // recomputar el score ahora que el tamaño se conoce (para que el ranking lo refleje)
+        c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + (c.ancla?4:0) + c.cerca + _warmth(c.dist)*2;
+      }catch{}
+    });
+  }
+
+  // DESCARTE EGREGIO (opción B): el tamaño es señal de VALOR, no de credibilidad. Solo sacamos del pool de la
+  // IA lo EGREGIO: headcount CONOCIDO y < 25% del piso (prácticamente un individuo/micro-agencia). Las de
+  // tamaño desconocido o entre 25%-100% del piso SÍ pueden quedar (el tamaño solo les baja el ranking).
+  const EGREGIO = Math.round(PISO * 0.25);
+  const antes = final.length;
+  final = final.filter(c => {
+    if(c.headcount!=null && c.headcount < EGREGIO){
+      console.warn(`[SOURCE] descartado por tamaño EGREGIO (${c.headcount}<${EGREGIO}, 25% del piso ${PISO}): ${c.name} @ ${c.empresa||'?'}`);
+      return false;
+    }
+    return true;
+  });
+  // Si el descarte egregio dejó el pool corto, lo rellenamos desde `out` (excluyendo lo ya elegido y lo egregio
+  // CONOCIDO), respetando el orden de ranking. No reintroducimos egregios (esa es la regla).
+  if(final.length < antes && final.length < N_IA){
+    const ya = new Set(final.map(c=>c.id));
+    const reponer = out.filter(c => !ya.has(c.id) && !(c.headcount!=null && c.headcount < EGREGIO)).slice(0, N_IA - final.length);
+    if(reponer.length){ final = final.concat(reponer); }
+  }
+
   const n2 = final.filter(c=>c.dist===2).length, nAncla = final.filter(c=>c.ancla).length;
   console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | a la IA ${final.length} (ancla=${nAncla}, 2do=${n2}, terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], piso<${PISO}).`);
   return final;
@@ -816,6 +856,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   • RECIENTE / EN ENTRADA (la fuente dice "se está expandiendo a", "está entrando en", "recién llegó a", "lanzó este año en") → escribilo como "expansión reciente a X" / "está entrando en X". No lo presentes con la misma solidez que un mercado consolidado.
   • SOLO PLAN (la fuente dice "planea", "quiere", "próximamente", "evalúa", sin operar todavía) → NO lo cuentes como país de operación, ni en el texto ni en el stat.
   REGLA DE ORO: no subas ni bajes el nivel respecto de lo que dice la fuente. Si DISTINTAS fuentes difieren en el nivel de un mismo país (ej. una dice "opera en" y otra "se está expandiendo a"), usá SIEMPRE el nivel MÁS BAJO/conservador (en ese caso, "expansión reciente"), nunca el más optimista. El stat de países (si lo ponés) cuenta los consolidados + los recientes reales (NO los aspiracionales), y el texto y el stat tienen que COINCIDIR: si decís que opera/se expande en 3 países, el stat dice 3, no 2. Si no estás seguro de un país, no lo cuentes en ningún lado, pero que texto y stat coincidan.
+  COHERENCIA NUMÉRICA DE PAÍSES (CRÍTICO, defecto recurrente): fijá UNA SOLA lista de países (los consolidados + recientes reales) y usá EXACTAMENTE esa misma lista, con los MISMOS nombres y la MISMA cantidad, en los TRES lugares: (1) el número del stat de países, (2) los países nombrados en h1_post, y (3) los países nombrados en el ICP "Geografía". REGLA INNEGOCIABLE: cada país que cuentes en el número del stat tiene que estar nombrado en h1_post Y en el ICP "Geografía"; y cada país que nombres en h1_post o en el ICP tiene que estar contado en el stat. PROHIBIDO contar un país en el número que no esté escrito en el texto, o nombrar en el texto uno que no esté en el cuenta (ej. contar 4 pero listar solo España, México y Guatemala sin Andorra es un BUG). CIERRE OBLIGATORIO: antes de cerrar el JSON, contá con el dedo los países que nombraste en el ICP "Geografía", verificá que sean los MISMOS que en h1_post, y que ese número sea EXACTAMENTE el del stat de países; si no coinciden, corregilo antes de devolver.
 - INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar las VERTICALES ANCLA reales donde están los COMPRADORES del cliente (las mismas que marcás ALTA en "prioridades"). El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Banca", "Administración de propiedades"). NO pongas el rubro del propio cliente ni industrias genéricas. TAXONOMÍA (CRÍTICO para que el filtro NO se caiga): cada nombre de "industrias" tiene que ser una CATEGORÍA RECONOCIBLE de la taxonomía de industrias de LinkedIn/Sales Navigator (las que el sistema resuelve a un id de filtro), NO una etiqueta hiper-específica, de moda o inventada que no exista como industria. Una etiqueta que no resuelve deja la búsqueda SIN filtro de industria. Preferí siempre la categoría canónica más cercana al COMPRADOR: ej. usá "Ingeniería robótica" / "Robotic Engineering" o "Fabricación de maquinaria de automatización" en vez de "Robotics" a secas. Es válido (y recomendado ante la duda) poner el nombre en español Y/O su equivalente reconocible en inglés. EVITÁ verticales industriales/pesadas amplias (ej. "Construcción", "Manufactura", "Minería", "Cemento") salvo que sean LITERALMENTE el comprador: arrastran jefes de mantenimiento de planta que consumen el servicio puertas adentro pero NO son el canal de compra. Ante la duda, preferí las verticales donde el producto del cliente se compra o se revende.
 - TAMAÑO (para que salgan empresas ANCLA, no micro-empresas): "tamano_min" tiene que ser un número real de empleados que refleje el ICP. Si el ICP son empresas medianas y grandes / marcas ancla, poné un piso alto (ej: 200). Poné un piso bajo (20-50) SOLO si el ICP son genuinamente PyMEs/micro. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva.
 - COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas que NO son compradores porque venden/fabrican LO MISMO que el cliente. Buscalos con web_search e incluí TRES tipos: (i) competidores directos de tamaño similar; (ii) FABRICANTES o PROVEEDORES globales del mismo producto (ej. para detonadores/voladura: Enaex, Orica, Dyno Nobel, Sandvik; para staffing de tecnología: Toptal, Turing, Andela, TEKsystems); (iii) distribuidores o integradores que revenden ese producto. Son PARES o RIVALES, no clientes. El sistema EXCLUYE a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES del research. NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque descartaría compradores legítimos. Si no identificás competidores claros, dejá la lista vacía.
@@ -875,7 +916,7 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 1. FIT de función (LO MÁS IMPORTANTE): el cargo tiene que ser CLARAMENTE del rol que compra lo del cliente. PROHIBIDO elegir gente de OTRA área que la del comprador: si el comprador es de Operaciones/Facilities/Mantenimiento/Administración, NO elijas a nadie de Marketing/Mercadeo/Ventas/Comercial/RR.HH./Finanzas, POR MÁS que la empresa sea una marca top. Un cargo suelto sin función clara ("Mercadeo", "Analista", "Coordinador" a secas) NO sirve. Un "CEO/Dueño" de empresa chica sí sirve porque ahí decide. MEJOR devolver MENOS cuentas (o repetir vertical) que UNA sola de función equivocada: una cuenta mal apuntada quema todo el reporte.
 2. PAÍS: preferí candidatos del PAÍS DEL CLIENTE (van marcados con ★ y vienen primero en la lista). Elegí de otro país de LatAm SOLO si no hay suficientes buenos del país del cliente. NUNCA elijas a alguien de un país donde el cliente no puede prestar el servicio.
 3. Decisor real: nada de analistas, trainees ni juniors.
-4. Empresa ANCLA con fit de ICP: usá los "empleados" que te muestro. Marca grande y conocida emociona; startup desconocida de 8 personas no. Pero si el ICP son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real.
+4. Empresa ANCLA con fit de ICP: usá los "~N empleados" que te muestro para juzgar el TAMAÑO. Marca grande y conocida emociona; startup desconocida de 8 personas no. Pero si el ICP son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real. TAMAÑO (con matiz): a igual fit de función, país y vertical, PREFERÍ las empresas que cumplen el piso de tamaño del ICP por encima de las más chicas. EVITÁ las claramente micro (prácticamente un individuo, ej. 1 a 4 empleados cuando el ICP pide empresas/agencias con equipo) SIEMPRE QUE haya alternativas mejores on-vertical en la lista. PERO el tamaño NO es excluyente: un lead fuerte en los demás ejes (país correcto, rol claramente decisor, on-vertical, contacto cálido) en una empresa SOLO un poco por debajo del piso SÍ sirve y se puede elegir. No descartes un buen decisor por quedar apenas corto de tamaño; descartá solo los casos obviamente micro cuando existen mejores opciones.
 5. Coherencia / credibilidad: si cargo+empresa+ubicación se ve raro, no la elijas.
 6. Grado de conexión: a IGUAL fit y país, preferí SIEMPRE el grado más cálido (1er o 2do grado por encima de 3ro o fuera de red): un 2do grado acepta y responde mucho más porque comparten un contacto. Nunca sacrifiques fit por grado, pero entre candidatos parecidos, el más cálido gana.
 
@@ -914,7 +955,8 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
     const home = p.cerca ? ' ★(país del cliente)' : '';
     return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}`;
   }).join('\n');
-  const ctx = `Cliente: ${(cliente&&cliente.empresa)||plan.h1_company||''}. País del cliente (prioritario): ${(plan._plan&&plan._plan.geografia)||''}. Qué ofrece / proof: ${String(plan.proof||plan.lead||'').slice(0,500)}. Función del comprador: ${(plan._plan&&plan._plan.funcion)||''}.`;
+  const _pisoTam = (plan._plan && parseInt(plan._plan.tamano_min||0,10)) || 0;
+  const ctx = `Cliente: ${(cliente&&cliente.empresa)||plan.h1_company||''}. País del cliente (prioritario): ${(plan._plan&&plan._plan.geografia)||''}. Qué ofrece / proof: ${String(plan.proof||plan.lead||'').slice(0,500)}. Función del comprador: ${(plan._plan&&plan._plan.funcion)||''}.${_pisoTam>0?` Piso de tamaño del ICP: ${_pisoTam}+ empleados (preferí empresas que lo cumplen; evitá las claramente micro salvo que el lead sea fuerte en los demás ejes).`:''}`;
   const fixBloque = (fixes&&fixes.length) ? `\n\nCORRECCIONES del juez (aplicalas re-eligiendo o reescribiendo):\n- ${fixes.join('\n- ')}` : '';
   const messages = [{ role:'user', content:`${ctx}\n\nLISTA REAL DE CANDIDATOS (elegí de ACÁ, por id EXACTO; los ★ son del país del cliente):\n${lista}${fixBloque}\n\nElegí los ${PEDIR_SELECT} MEJORES en ORDEN de prioridad (el mejor primero), de EMPRESAS distintas y priorizando el país del cliente. Devolvé SOLO el JSON {"seleccion":[...]} con EXACTAMENTE ${PEDIR_SELECT} elementos distintos. El sistema arma el reporte con los primeros ${NUM_CUENTAS} válidos, así que los primeros ${NUM_CUENTAS} tienen que ser tus mejores.` }];
   const data = await callClaude({ model:MODEL_GEN, system:_promptSelect(PEDIR_SELECT, NUM_CUENTAS), messages, tools:[], maxTokens:6000 });
@@ -1096,14 +1138,16 @@ function _geoIncoherente(data){
 
 // --- TAMAÑO-COHERENCIA (determinística, análoga a geo) ------------------------
 // Compara el headcount real de cada card final contra el tamano_min del ICP.
-// Solo bloquea micro-empresas claramente por debajo del piso (margen 0.5) para no
-// castigar zonas grises. Si el ICP no define tamano_min (>0), no juzga (devuelve null).
-// Enriquece el headcount faltante de las cards finales (get_contact_profile no gasta créditos).
+// OPCIÓN B (decisión de producto): el tamaño es señal de VALOR, no de credibilidad. Solo bloquea lo EGREGIO:
+// empresas a MENOS del 25% del piso (prácticamente un individuo/micro-agencia). Entre 25% y 100% del piso NO
+// rechaza (el lead pasa; el tamaño solo baja el ranking en el sourcing). Si el ICP no define tamano_min (>0),
+// no juzga (devuelve null). Enriquece el headcount faltante de las cards finales (get_contact_profile no gasta
+// créditos); si no se puede determinar, fail-open por card (no bloquea por lo desconocido).
 async function _tamanoIncoherente(data, plan){
   if(!data) return null;
   const tamMin = parseInt((plan && plan._plan && plan._plan.tamano_min) || 0, 10) || 0;
   if(tamMin <= 0) return null;                 // sin piso declarado no podemos juzgar → no bloquear
-  const piso = Math.round(tamMin * 0.5);       // margen: solo micro-empresas claramente por debajo
+  const piso = Math.round(tamMin * 0.25);      // margen: solo bloquea lo egregio (menos del 25% del piso)
   const fuera = [];
   for(const c of (data.cards||[])){
     let hc = (c.headcount != null) ? c.headcount : null;
@@ -1111,7 +1155,7 @@ async function _tamanoIncoherente(data, plan){
       try{ hc = _parseProfile(await callMCP('get_contact_profile', { publicIdOrUrl: c.urn })).headcount; }catch{}
     }
     if(hc != null && hc < piso){
-      fuera.push(`${c.nombre||'?'} (${c.empresa||'?'}) trabaja en una empresa de ~${hc} empleados, por debajo del piso del ICP (${tamMin}+).`);
+      fuera.push(`${c.nombre||'?'} (${c.empresa||'?'}) trabaja en una empresa de ~${hc} empleados, muy por debajo del piso del ICP (menos del 25% de ${tamMin}+).`);
     }
   }
   return fuera.length ? { tamMin, fuera } : null;
@@ -1199,9 +1243,9 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
     }
     const tamMal = await _tamanoIncoherente(data, plan);
     if (tamMal) {
-      console.warn(`[TAM] Incoherencia tamaño: piso ${tamMal.tamMin}+ | ${tamMal.fuera.join(' ')}`);
+      console.warn(`[TAM] Incoherencia tamaño (egregio, <25% del piso): piso ${tamMal.tamMin}+ | ${tamMal.fuera.join(' ')}`);
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
-        fixes: [`TAMAÑO INCOHERENTE: el ICP pide empresas de ${tamMal.tamMin}+ empleados pero hay cuentas muy por debajo. ${tamMal.fuera.join(' ')} Reemplazá esas cuentas por empresas que cumplan el tamaño del ICP, o ajustá el título/ICP al tamaño real de las cuentas.`].concat(judgeResult.fixes||[]) };
+        fixes: [`TAMAÑO INCOHERENTE: el ICP pide empresas de ${tamMal.tamMin}+ empleados pero hay cuentas MUY por debajo (menos del 25% del piso, prácticamente un individuo). ${tamMal.fuera.join(' ')} Reemplazá esas cuentas por empresas que cumplan el tamaño del ICP, o ajustá el título/ICP al tamaño real de las cuentas.`].concat(judgeResult.fixes||[]) };
     }
     const aptoEnvio = cardsValidas >= MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO';
     const descartadas = [];
@@ -1354,9 +1398,9 @@ app.post('/generar-reporte', async (req, res) => {
     }
     const tamMal = await _tamanoIncoherente(data, plan);
     if (tamMal) {
-      console.warn(`[TAM] Incoherencia tamaño: piso ${tamMal.tamMin}+ | ${tamMal.fuera.join(' ')}`);
+      console.warn(`[TAM] Incoherencia tamaño (egregio, <25% del piso): piso ${tamMal.tamMin}+ | ${tamMal.fuera.join(' ')}`);
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
-        fixes: [`TAMAÑO INCOHERENTE: el ICP pide empresas de ${tamMal.tamMin}+ empleados pero hay cuentas muy por debajo. ${tamMal.fuera.join(' ')} Reemplazá esas cuentas por empresas que cumplan el tamaño del ICP, o ajustá el título/ICP al tamaño real de las cuentas.`].concat(judgeResult.fixes||[]) };
+        fixes: [`TAMAÑO INCOHERENTE: el ICP pide empresas de ${tamMal.tamMin}+ empleados pero hay cuentas MUY por debajo (menos del 25% del piso, prácticamente un individuo). ${tamMal.fuera.join(' ')} Reemplazá esas cuentas por empresas que cumplan el tamaño del ICP, o ajustá el título/ICP al tamaño real de las cuentas.`].concat(judgeResult.fixes||[]) };
     }
     const aptoEnvio = cardsValidas >= MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO';
     const descartadas = [];
