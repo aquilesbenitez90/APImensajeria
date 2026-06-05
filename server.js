@@ -539,6 +539,11 @@ function _parseProfile(res){
   headRich=headRich.replace(/\s*@\s*\?\s*$/,'').trim();
   return { headcount: hc?parseInt(hc.replace(/,/g,''),10):null, headRich };
 }
+// Parsea resultados de búsqueda de EMPRESAS: id=NUMERO "Nombre" Industria (NNN employees, ?)
+function _parseCompanies(res){
+  return [...String(res||'').matchAll(/id=([0-9]+)\s+"([^"]+)"\s+(.*?)\s*\(\s*(\d[\d.,]*)?\s*employees/g)]
+    .map(x=>({ id:x[1], name:x[2], industry:(x[3]||'').trim(), headcount: x[4]?parseInt(x[4].replace(/[.,]/g,''),10):null }));
+}
 function _sizeBoost(hc, tamMin){
   if(hc==null) return 0;
   if(tamMin && tamMin>0) return hc>=tamMin ? 2 : (hc>=tamMin*0.5 ? 1 : 0);
@@ -594,8 +599,8 @@ async function sourceCandidates(plan, cliente){
     try{ const id=(String(await callMCP('resolve_sales_navigator_id',{type:'SALES_INDUSTRY',keywords:ind,limit:1})).match(/id="?([0-9]+)"?/)||[])[1]; if(id && !indIds.includes(id)) indIds.push(id); }catch{}
   }
 
-  // SIN filtro de grado: el filtro de grado de Sales Nav no es confiable (1st->0, 2nd mezcla 3ro).
-  // Traemos por FIT (país + término de rol + industria ancla) y leemos el grado real (DISTANCE) de cada perfil.
+  // SIN filtro de grado en el search (no es confiable: 1st->0, 2nd mezcla 3ro). Traemos por FIT
+  // y leemos el grado real (DISTANCE) de cada perfil; el grado se prioriza en el RANKING, no en el filtro.
   async function buscarUno(locIds, conIndustria, kwUnico){
     const f={ category:'people', profilesLimit:50 };
     if(kwUnico) f.keywords = kwUnico;                       // UNA sola palabra/término (multi-palabra da 0)
@@ -604,25 +609,18 @@ async function sourceCandidates(plan, cliente){
     if(conIndustria && indIds.length) f.industry={ include: indIds };
     try{ return _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{ return []; }
   }
-  // Une los resultados de buscar cada término de rol por separado (dedupe por id).
-  // Los términos se lanzan en PARALELO con tope CONC (rápido sin que el MCP rate-limitee).
+  // Une los resultados de buscar cada término de rol por separado (dedupe por id), en PARALELO con tope CONC.
   const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '4', 10);
   async function buscar(locIds, conIndustria){
     if(!terminos.length) return await buscarUno(locIds, conIndustria, null);
     const listas = await _mapLimit(terminos, CONC, t => buscarUno(locIds, conIndustria, t));
     const acc=[]; const vis=new Set();
-    for(const lista of listas){
-      for(const p of (lista||[])){
-        if(p.id && !vis.has(p.id)){ vis.add(p.id); acc.push(p); }
-      }
-    }
+    for(const lista of listas){ for(const p of (lista||[])){ if(p.id && !vis.has(p.id)){ vis.add(p.id); acc.push(p); } } }
     return acc;
   }
-
   const _validosHome = arr => arr.filter(p => _rankSenioridad(p.head) >= 2 && _norm(p.loc||'').includes(homeGeo)).length;
 
   // GEOGRAFÍA: país principal PRIMERO + países donde el cliente HOY opera (cercanos).
-  // Se buscan TODOS juntos para tener el mejor pool posible; el orden final (cerca-first) prioriza el país principal.
   const homeId  = await locId(geografia);
   const homeLoc = homeId ? [homeId] : null;
   const opsIds  = [];
@@ -631,61 +629,91 @@ async function sourceCandidates(plan, cliente){
   const geoLocOrNull = geoLoc.length ? geoLoc : null;
   const HOME_MIN = parseInt(process.env.SOURCE_HOME_MIN || String(NUM_CUENTAS + 2), 10);
 
-  // 1) país principal + cercanos + industrias ancla (mejor fit; el país principal manda en el orden)
-  let pool = await buscar(geoLocOrNull, true);
-  console.log(`[SOURCE] geo [${[geografia,...secundarias].join(', ')||'-'}] + ind [${(icp.industrias||[]).join(', ')||'-'}]: ${pool.length} perfiles (${_validosHome(pool)} decisores en ${geografia}).`);
-
-  // 2) si el país principal queda corto de decisores, misma geo sin filtro de industria (recall)
-  if(_validosHome(pool) < HOME_MIN){
-    pool = pool.concat(await buscar(geoLocOrNull, false));
-    console.log(`[SOURCE] recall sin industria: total ${pool.length} (${_validosHome(pool)} decisores en ${geografia}).`);
-  }
-
-  // dedupe + descartes (decisor real, no la propia empresa del cliente, no competidores)
+  // Competidores a EXCLUIR (se calculan ANTES porque también filtran las cuentas-ancla).
   const competidores = (Array.isArray(icp.competidores)?icp.competidores:[]).map(_norm).filter(c=>c.length>=4);
-  // Términos del PRODUCTO que el cliente vende y que, en el NOMBRE de otra empresa, la delatan como
-  // proveedor/competidor (ej. "explosivos", "voladura", "staffing"). SALVAGUARDA anti-falso-positivo:
-  // descartamos cualquier término que coincida con el VERTICAL del comprador (icp.industrias), para no
-  // eliminar clientes legítimos (caso NOCNOK: vende "software inmobiliario" y sus clientes son inmobiliarias).
   const _indNorm = (Array.isArray(icp.industrias)?icp.industrias:[]).map(_norm).filter(Boolean);
-  const _raiz = w => w.slice(0, Math.max(5, w.length - 2));  // recorta género/plural (-o/-a/-s/-es) para comparar
+  const _raiz = w => w.slice(0, Math.max(5, w.length - 2));  // recorta género/plural para comparar raíces
   const compTerminos = (Array.isArray(icp.competidor_terminos)?icp.competidor_terminos:[])
     .map(_norm).filter(t => {
       if(t.length < 4) return false;
       const rt = _raiz(t);
-      // descartá el término si comparte raíz con un VERTICAL del comprador (ej. "inmobiliaria" ~ "inmobiliario")
+      // SALVAGUARDA: no uses como filtro un término que sea el VERTICAL del comprador (ej. "inmobiliaria" ~ "inmobiliario").
       return !_indNorm.some(ind => { const ri=_raiz(ind); return ind.includes(t)||t.includes(ind)||rt.startsWith(ri)||ri.startsWith(rt); });
     });
+  const _esComp = (emp) => { const e=_norm(emp||''); if(!e) return false; return _esCompetidor(e, competidores) || compTerminos.some(t=>e.includes(t)); };
+
+  const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
+
+  // ===== PASADA A — ACCOUNT-FIRST: cuentas-ancla con señal de compra =====
+  // Buscamos EMPRESAS que encajan el ICP (industria + geo + tamaño) y están "en movimiento" (crecimiento de
+  // headcount = señal genérica y honesta de que pueden estar comprando). Si la señal recorta de más, recall sin
+  // señal. Las cuentas-ancla sesgan el ranking hacia clientes reales, no hacia ICs sueltos de cualquier empresa.
+  const hcMin = tamMin > 0 ? Math.max(11, Math.round(tamMin*0.5)) : 11;
+  let cuentas = [];
+  if(indIds.length && geoLocOrNull){
+    const baseCo = { category:'companies', profilesLimit:25, location:{include:geoLocOrNull}, industry:{include:indIds}, headcount:[{min:hcMin, max:100000}] };
+    try{ cuentas = _parseCompanies(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); }catch{}
+    if(cuentas.length < NUM_CUENTAS*2){   // la señal recortó demasiado para este vertical: recall sin señal
+      try{ const more=_parseCompanies(await callMCP('search_sales_navigator_filtered', baseCo)); for(const c of more) if(!cuentas.some(x=>x.id===c.id)) cuentas.push(c); }catch{}
+    }
+  }
+  cuentas = cuentas.filter(c => c.name && !_esComp(c.name));   // no anclar en un competidor/proveedor
+  const anclaIds     = cuentas.map(c=>c.id).filter(Boolean).slice(0, 20);
+  const anclaNombres = new Set(cuentas.map(c=>_empKey(c.name)).filter(Boolean));
+  const anclaHC      = new Map(cuentas.map(c=>[_empKey(c.name), c.headcount]));
+  console.log(`[SOURCE] cuentas-ancla: ${cuentas.length}${cuentas.length?` (${cuentas.slice(0,8).map(c=>c.name).join(', ')}${cuentas.length>8?'…':''})`:''}.`);
+
+  // ===== PASADA B — DECISORES dentro de las cuentas-ancla (fit alto, empresa controlada) =====
+  let enCuentas = [];
+  if(anclaIds.length){
+    const f={ category:'people', profilesLimit:50, company:{include: anclaIds} };
+    if(geoLocOrNull) f.location={include:geoLocOrNull};
+    if(terminos.length) f.jobPosition={ include: terminos };   // acota a los cargos objetivo dentro de la cuenta
+    try{ enCuentas = _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{}
+  }
+
+  // ===== PASADA C — BARRIDO people-first amplio (captura el 2do grado DISPERSO de la red) =====
+  let barrido = await buscar(geoLocOrNull, true);
+  if(_validosHome(barrido) < HOME_MIN) barrido = barrido.concat(await buscar(geoLocOrNull, false));
+
+  // Unimos: cuentas-ancla primero (fit), después el barrido (warm disperso). Dedupe en el loop por id.
+  const pool = [...enCuentas, ...barrido];
+  console.log(`[SOURCE] pool bruto: ${enCuentas.length} en cuentas-ancla + ${barrido.length} barrido = ${pool.length}.`);
+
+  // dedupe + descartes (decisor real, no la propia empresa del cliente, no competidores) + marca ancla
   const vistos=new Set(); const out=[]; const empCliente=_norm((cliente&&cliente.empresa)||'');
   for(const p of pool){
     if(!p.id || vistos.has(p.id)) continue; vistos.add(p.id);
     if(_rankSenioridad(p.head) < 1) continue;                 // descarta asistente/analista/becario/junior
     const emp=_empresaDeHeadline(p.head)||'';
     if(empCliente && emp && _mismaEmpresa(empCliente, emp)) continue;
-    if(emp && _esCompetidor(emp, competidores)){ console.warn(`[SOURCE] descartado por COMPETIDOR: ${p.name} @ ${emp}`); continue; }
-    if(emp && compTerminos.length){ const en=_norm(emp); if(compTerminos.some(t=>en.includes(t))){ console.warn(`[SOURCE] descartado por TÉRMINO de producto en empresa (proveedor/competidor): ${p.name} @ ${emp}`); continue; } }
+    if(emp && _esComp(emp)){ console.warn(`[SOURCE] descartado por COMPETIDOR/proveedor: ${p.name} @ ${emp}`); continue; }
     const cerca = homeGeo && _norm(p.loc||'').includes(homeGeo) ? 1 : 0;
-    out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos) });
+    const ancla = (emp && anclaNombres.has(_empKey(emp))) ? 1 : 0;
+    const hcPre = ancla ? (anclaHC.get(_empKey(emp)) ?? null) : null;   // headcount ya conocido de la cuenta-ancla
+    out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, ancla, headcount:hcPre, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos) });
   }
-  // orden por FIT (el grado NO entra): primero locales, después fit, después seniority
-  out.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.rank-a.rank));
+  // orden inicial: país y cuenta-ancla mandan; después fit; el grado ya cuenta (warmth) antes que la seniority
+  out.sort((a,b)=> (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.rank-a.rank));
 
-  // enriquecer el top por cargo y tamaño
-  const K = parseInt(process.env.SOURCE_ENRICH_TOP || '10', 10);
+  // enriquecer el top por cargo y tamaño (solo los que no tienen headcount ya de la cuenta-ancla)
+  const K = parseInt(process.env.SOURCE_ENRICH_TOP || '12', 10);
   const noCache = String(process.env.SOURCE_ENRICH_NOCACHE||'').toLowerCase()==='true';
-  const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
   const PISO   = tamMin > 0 ? tamMin : parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
   const top = out.slice(0, K);
   await _mapLimit(top, CONC, async (c) => {
-    try{
-      const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
-      if(prof.headcount!=null) c.headcount=prof.headcount;
-      if(prof.headRich && prof.headRich.length>=3){
-        c.head=prof.headRich; c.empresa=_empresaDeHeadline(prof.headRich) || c.empresa; c.fit=_rankFit(prof.headRich, titulos);
-      }
-    }catch{}
+    if(c.headcount==null){
+      try{
+        const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
+        if(prof.headcount!=null) c.headcount=prof.headcount;
+        if(prof.headRich && prof.headRich.length>=3){
+          c.head=prof.headRich; c.empresa=_empresaDeHeadline(prof.headRich) || c.empresa; c.fit=_rankFit(prof.headRich, titulos);
+        }
+      }catch{}
+    }
     c.cerca = homeGeo && _norm(c.loc||'').includes(homeGeo) ? 1 : 0;
-    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + c.cerca + _warmth(c.dist);   // fit y tamaño mandan; el grado solo desempata
+    // SCORING: fit y tamaño mandan; la cuenta-ancla y el grado (×2) ahora pesan de verdad, no solo desempatan.
+    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + (c.ancla?4:0) + c.cerca + _warmth(c.dist)*2;
   });
   // piso de tamaño contra el ICP, SIN vaciar el pool
   const cumplen  = top.filter(c => !(c.headcount!=null && c.headcount < PISO));
@@ -693,9 +721,25 @@ async function sourceCandidates(plan, cliente){
   for(const p of fueraTam) console.warn(`[SOURCE] fuera de ICP por tamaño (${p.headcount}<${PISO}): ${p.name} @ ${p.empresa||'?'}`);
   const topICP = (cumplen.length >= NUM_CUENTAS) ? cumplen : top;
   if(cumplen.length < NUM_CUENTAS) console.warn(`[SOURCE] piso ${PISO} dejó ${cumplen.length}/${NUM_CUENTAS} -> relajo el piso para no quedar corto.`);
-  topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.score-a.score));
-  const final = topICP.concat(out.slice(K)).slice(0, 12);
-  console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | devueltos ${final.length} (terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], fn=${fnId||'-'}, piso<${PISO}).`);
+  topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.score-a.score) || (b.fit-a.fit));
+
+  // Pasamos MÁS candidatos a la IA (18) para que tenga de dónde elegir cuenta-ancla + warm.
+  const N_IA = parseInt(process.env.SOURCE_TO_IA || '18', 10);
+  let final = topICP.concat(out.slice(K)).slice(0, N_IA);
+  // CUOTA DE GRADO: el 2do grado convierte mucho más. Si quedó poco 2do grado pero existe en el pool, metelo
+  // (priorizando cuenta-ancla y fit). No es filtro duro: solo garantiza presencia de warm cuando lo hay.
+  const DESEADOS2 = parseInt(process.env.SOURCE_MIN_2ND || '4', 10);
+  const segundos = out.filter(c => c.dist===2);
+  if(segundos.length){
+    const ya = new Set(final.map(c=>c.id));
+    const faltan = DESEADOS2 - final.filter(c=>c.dist===2).length;
+    if(faltan > 0){
+      const add = segundos.filter(c=>!ya.has(c.id)).sort((a,b)=>(b.ancla-a.ancla)||(b.fit-a.fit)).slice(0, faltan);
+      if(add.length){ final = final.concat(add); console.log(`[SOURCE] cuota de grado: +${add.length} de 2do grado al pool de la IA.`); }
+    }
+  }
+  const n2 = final.filter(c=>c.dist===2).length, nAncla = final.filter(c=>c.ancla).length;
+  console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | a la IA ${final.length} (ancla=${nAncla}, 2do=${n2}, terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], piso<${PISO}).`);
   return final;
 }
 
