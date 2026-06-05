@@ -33,6 +33,8 @@ const crypto = require('crypto');
 const puppeteer = require('puppeteer');
 const { PDFDocument } = require('pdf-lib');
 const { renderReport } = require('./render.js'); // plantilla fija + datos JSON -> HTML
+const fs = require('fs');
+const path = require('path');
 
 // ---------------------------------------------------------------------------
 // Configuración
@@ -85,6 +87,53 @@ function _setStage(s) { const st = _statsALS.getStore(); if (st) st.currentStage
 
 function costoDe({ input, output, cache_write, cache_read }) {
   return (input * 3 + output * 15 + cache_write * 3.75 + cache_read * 0.30) / 1e6;
+}
+
+// ---------------------------------------------------------------------------
+// LOG DE RESULTADOS (JSONL) — una línea estructurada por job para análisis con IA.
+// OJO Railway: el filesystem es EFÍMERO; para que NO se borre en cada deploy, montá un
+// volumen y seteá RESULT_LOG_PATH al path del volumen (ej. /data/resultados.jsonl).
+// Si no, escribe junto al server y se pierde al redeploy.
+// ---------------------------------------------------------------------------
+const RESULT_LOG = process.env.RESULT_LOG_PATH || path.join(__dirname, 'resultados.jsonl');
+function _registrarResultado(rec){
+  try{
+    fs.appendFile(RESULT_LOG, JSON.stringify(rec) + '\n', e => { if(e) console.warn('[LOG] no pude escribir resultado:', e.message); });
+  }catch(e){ console.warn('[LOG] error registrando resultado:', e.message); }
+}
+// Construye el registro de un job. NO incluye el PDF (pesa). Incluye el ICP y las cards
+// (empresa/cargo/grado/tamaño) + calidez, que es lo que la IA usa para detectar patrones.
+function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnvio, pageCount, error }){
+  const t = _stats().total;
+  const icp = (plan && plan._plan) || {};
+  const cards = (((data && data.cards) || [])).map(c => ({
+    empresa: c.empresa, nombre: c.nombre, cargo: c.cargo, grado: c.grado,
+    ubicacion: c.ubicacion, urn: c.urn, headcount: (c.headcount ?? null)
+  }));
+  const warm = cards.filter(c => /1er|2do/.test(c.grado || '')).length;
+  return {
+    ts: new Date().toISOString(),
+    jobId: jobId || null,
+    status: error ? 'error' : 'ok',
+    error: error || undefined,
+    empresa: (cliente && cliente.empresa) || (input && input.empresa) || '',
+    dominio: (input && input.dominio) || '',
+    email: (input && input.email) || '',
+    profileId: (input && input.profileId) || null,
+    anclado: !!(cliente && cliente.anclado),
+    veredicto: judgeResult && judgeResult.veredicto,
+    score: judgeResult ? judgeResult.score : null,
+    apto_envio: !!aptoEnvio,
+    cards_validas: _cuentaCompletas(data),
+    total_cards: cards.length,
+    warm,                       // cards en 1er/2do grado (calidez): mejor predictor de conversión
+    paginas: pageCount ?? null,
+    icp: { funcion: icp.funcion || '', geografia: icp.geografia || '', geografias: icp.geografias || [], industrias: icp.industrias || [], tamano_min: icp.tamano_min || 0 },
+    juez_fixes: (judgeResult && judgeResult.fixes) || [],
+    cards,
+    costo: +costoDe(t).toFixed(4),
+    tokens: { ...t }
+  };
 }
 
 function logTokenCost(label) {
@@ -604,14 +653,26 @@ async function sourceCandidates(plan, cliente){
     .filter(t=>t.length>=3)
     .slice(0,6);
 
-  async function locId(nombrePais){
+  // Devuelve TODOS los ids que son EL PAÍS (country-level), no uno solo. Sales Navigator a veces tiene
+  // varios nodos para el mismo país por variantes de escritura (ej. "Mexico" VACÍO y "México, Mexico"
+  // POBLADO); quedarse con uno solo por match exacto perdía el nodo con datos. País-level = la parte
+  // antes de la primera coma, normalizada, === _norm(nombrePais). Así excluimos estados ("New Mexico,
+  // United States" -> "new mexico"), ciudades ("Mexico City, Mexico") y provincias ("Jalisco, Mexico").
+  async function locIds(nombrePais){
     try{
+      const objetivo = _norm(nombrePais);
       const txt = String(await callMCP('resolve_sales_navigator_id',{type:'LOCATION',keywords:nombrePais,limit:8}));
       const matches = [...txt.matchAll(/id="?([0-9]+)"?\s+"([^"]+)"/g)].map(m=>({id:m[1],name:m[2]}));
-      const exacto = matches.find(m=> _norm(m.name)===_norm(nombrePais)); // "Colombia", NO "Antioquia, Colombia"
-      if(!exacto && matches[0]) console.warn(`[SOURCE] LOCATION "${nombrePais}": sin match exacto de país, uso "${matches[0].name}".`);
-      return (exacto||matches[0])?.id || null;
-    }catch{ return null; }
+      const paisLevel = matches.filter(m => _norm(String(m.name).split(',')[0]) === objetivo);
+      const ids = [...new Set(paisLevel.map(m=>m.id))];
+      if(ids.length){
+        console.log(`[SOURCE] LOCATION "${nombrePais}" -> ${ids.length} ids país-level: ${ids.join(', ')}`);
+        return ids;
+      }
+      // Ningún match país-level: fallback al primer match (comportamiento previo) con aviso.
+      if(matches[0]) console.warn(`[SOURCE] LOCATION "${nombrePais}": sin match país-level, uso "${matches[0].name}" (${matches[0].id}).`);
+      return matches[0] ? [matches[0].id] : [];
+    }catch{ return []; }
   }
   let fnId=null;
   try{ fnId=(String(await callMCP('resolve_sales_navigator_id',{type:'FUNCTION',keywords:funcion,limit:3})).match(/id="?([A-Za-z0-9_]+)"?/)||[])[1]||null; }catch{}
@@ -645,11 +706,12 @@ async function sourceCandidates(plan, cliente){
   const _validosHome = arr => arr.filter(p => _rankSenioridad(p.head) >= 2 && _norm(p.loc||'').includes(homeGeo)).length;
 
   // GEOGRAFÍA: país principal PRIMERO + países donde el cliente HOY opera (cercanos).
-  const homeId  = await locId(geografia);
-  const homeLoc = homeId ? [homeId] : null;
+  const homeLoc = await locIds(geografia);    // todos los ids país-level del país principal
   const opsIds  = [];
-  for(const g of secundarias){ const id = await locId(g); if(id && id!==homeId && !opsIds.includes(id)) opsIds.push(id); }
-  const geoLoc  = [...(homeLoc||[]), ...opsIds];
+  for(const g of secundarias){
+    for(const id of await locIds(g)){ if(!homeLoc.includes(id) && !opsIds.includes(id)) opsIds.push(id); }
+  }
+  const geoLoc  = [...new Set([...homeLoc, ...opsIds])];
   const geoLocOrNull = geoLoc.length ? geoLoc : null;
   const HOME_MIN = parseInt(process.env.SOURCE_HOME_MIN || String(NUM_CUENTAS + 2), 10);
 
@@ -825,6 +887,22 @@ async function sourceCandidates(plan, cliente){
   const n2 = final.filter(c=>c.dist===2).length, nAncla = final.filter(c=>c.ancla).length;
   console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | a la IA ${final.length} (ancla=${nAncla}, 2do=${n2}, terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], piso<${PISO}).`);
   return final;
+}
+
+// Wrapper con retry para absorber HIPOS TRANSITORIOS del MCP: vimos casos (ej. NOCNOK) donde TODAS las
+// llamadas al MCP de un job devolvieron vacío (rate-limit/hipo), no por un ICP malo — las mismas búsquedas
+// funcionan segundos después. Si el pool sale vacío, esperamos y reintentamos una vez. Si igual sale vacío,
+// devolvemos [] y el caller maneja el "0 candidatos" como siempre.
+async function sourceConRetry(plan, cliente){
+  const reintentos = parseInt(process.env.SOURCE_RETRY_ON_EMPTY || '1', 10);
+  const delay = parseInt(process.env.SOURCE_RETRY_DELAY_MS || '6000', 10);
+  let pool = await sourceCandidates(plan, cliente);
+  for(let i=0; i<reintentos && (!pool || !pool.length); i++){
+    console.warn(`[SOURCE] pool vacío, reintento en ${delay}ms (posible hipo transitorio del MCP)...`);
+    await new Promise(r => setTimeout(r, delay));
+    pool = await sourceCandidates(plan, cliente);
+  }
+  return pool || [];
 }
 
 // FASE 1 — IA: research + ICP + página 1. Prompt parametrizado por N.
@@ -1197,7 +1275,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
 
     const fechaHoy = _fechaHoy();
     const plan = await runPlan({ empresa: empresaFinal, dominio, email, nombre, cliente, fechaHoy });
-    const pool = await sourceCandidates(plan, cliente);
+    const pool = await sourceConRetry(plan, cliente);
     if (!pool.length) throw new Error(`Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.`);
     let data = await seleccionarConRetry({ cliente, plan, pool });
 
@@ -1283,10 +1361,12 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
       tokens_cache_write: _stats().total.cache_write, tokens_cache_read: _stats().total.cache_read,
       finishedAt: Date.now()
     });
+    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId }, cliente, plan, data, judgeResult, aptoEnvio, pageCount }));
     console.log(`========== Job ${jobId} - ${aptoEnvio ? `OK ${pageCount} páginas` : 'NO apto (sin PDF)'}, juez FINAL ${judgeResult.veredicto} ${judgeResult.score}/8 ==========\n`);
   } catch (err) {
     console.error(`[Job ${jobId}] Error:`, err);
     jobs.set(jobId, { status: 'error', error: err.message, finishedAt: Date.now() });
+    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId }, error: err.message }));
   }
   });
 }
@@ -1355,7 +1435,7 @@ app.post('/generar-reporte', async (req, res) => {
     const empresaFinal = cliente.empresa || empresa || dominio;
     const fechaHoy = _fechaHoy();
     const plan = await runPlan({ empresa: empresaFinal, dominio, email, nombre: nombre || '', cliente, fechaHoy });
-    const pool = await sourceCandidates(plan, cliente);
+    const pool = await sourceConRetry(plan, cliente);
     if (!pool.length) return res.status(422).json({ error: `Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.` });
     let data = await seleccionarConRetry({ cliente, plan, pool });
 
@@ -1416,6 +1496,7 @@ app.post('/generar-reporte', async (req, res) => {
     }
 
     logTokenCost('generar-reporte');
+    _registrarResultado(_recResultado({ input: { email, dominio, empresa, profileId }, cliente, plan, data, judgeResult, aptoEnvio, pageCount }));
 
     return res.json({
       status: 'ok',
@@ -1439,12 +1520,25 @@ app.post('/generar-reporte', async (req, res) => {
     });
   } catch (err) {
     console.error(err);
+    _registrarResultado(_recResultado({ input: { email, dominio, empresa, profileId }, error: err.message }));
     return res.status(500).json({ error: err.message });
   }
   });
 });
 
 app.get('/health', (req, res) => res.json({ ok: true, jobs_activos: jobs.size, cuentas: NUM_CUENTAS }));
+
+// Descarga del log de resultados (JSONL). ?tail=N devuelve solo las últimas N líneas.
+// Cada línea es un job estructurado, listo para analizar con IA.
+app.get('/resultados-log', (req, res) => {
+  try {
+    if (!fs.existsSync(RESULT_LOG)) return res.status(404).json({ error: 'sin resultados todavía', path: RESULT_LOG });
+    let txt = fs.readFileSync(RESULT_LOG, 'utf8');
+    const tail = parseInt(req.query.tail || '0', 10);
+    if (tail > 0) txt = txt.trim().split('\n').slice(-tail).join('\n') + '\n';
+    res.type('text/plain').send(txt);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
