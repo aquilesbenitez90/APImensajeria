@@ -583,6 +583,36 @@ function _rankSenioridad(head){
   if(/\b(analyst|analista|trainee|intern|becari|pasant|junior|assistant|asistente|associate)\b/.test(h)) return 0;
   return 2;
 }
+// Marcadores de DECISIÓN: si el cargo trae alguno, la persona decide (gerencia/dueño/jefatura), aunque el
+// texto también diga "agente". Se usa como salvavidas en _esICsuelto y como detector en _icpPideDecisores.
+const _MARCADOR_DECISION = /\b(dueno|owner|founder|co founder|cofounder|director|directora|gerente|jefe|jefa|head|vp|vice|vicepresidente|chief|c level|ceo|coo|cfo|cto|cmo|broker|socio|presidenta?|propietari[oa]|lider|leader|manager)\b/;
+// ¿El cargo es un CONTRIBUIDOR INDIVIDUAL / usuario final SIN marcador de decisión? (caso NOCNOK: "agente",
+// "asociado", "especialista en propiedades"). Si tiene un marcador de decisión NO es IC suelto, aunque diga
+// "agente". "asesor" cuenta como IC pero NO "asesoria" (firma/área). Reusa _norm (sin tildes, minúsculas).
+function _esICsuelto(cargo){
+  const c = _norm(cargo);
+  if(!c) return false;
+  if(_MARCADOR_DECISION.test(c)) return false;                 // tiene mando -> NO es IC suelto
+  // "asesor/a" sí, pero "asesoria" (sustantivo de área/firma) no debe contar
+  const esAsesorPersona = /\basesor(a|es|as)?\b/.test(c) && !/\basesoria/.test(c);
+  const ic = /\b(agente|asociad[oa]|especialista|profesional inmobiliario|analista|representante|vendedor|vendedora|consultor|consultora)\b/.test(c)
+    || esAsesorPersona
+    || /\bejecutiv[oa]\s+de\s+(ventas|cuentas)\b/.test(c);     // "ejecutivo de ventas/cuentas" = IC
+  return ic;
+}
+// ¿El ICP claramente apunta a GERENCIA/DUEÑO (no a ICs)? Heurística: la función del comprador y/o los
+// títulos objetivo traen marcador de decisión y NO son roles de IC. Si el ICP legítimamente busca ICs
+// (ej. todos los títulos son "agente/analista"), devuelve false y NO penalizamos.
+function _icpPideDecisores(plan){
+  const p = (plan && plan._plan) || {};
+  const funcion = _norm(p.funcion || '');
+  const titulos = Array.isArray(p.titulos_objetivo) ? p.titulos_objetivo : [];
+  const textoTitulos = titulos.map(t=>_norm(t)).filter(Boolean);
+  const funcionDecide = _MARCADOR_DECISION.test(funcion);
+  const tituloDecide  = textoTitulos.some(t => _MARCADOR_DECISION.test(t));
+  // Si CUALQUIER señal del ICP apunta a decisión, tratamos el ICP como "pide decisores".
+  return funcionDecide || tituloDecide;
+}
 function _rankFit(head, titulos){
   const h=_norm(head);
   const lista = Array.isArray(titulos) ? titulos : [];
@@ -672,6 +702,9 @@ async function sourceCandidates(plan, cliente){
   const homeGeo   = _norm(geografia||'');
   const funcion   = icp.funcion;
   const titulos   = Array.isArray(icp.titulos_objetivo) ? icp.titulos_objetivo : [];
+  // ¿El ICP pide gerencia/dueño? Solo entonces penalizamos a los contribuidores individuales (caso NOCNOK).
+  // Si el ICP legítimamente apunta a ICs, pideDecisores=false y NO se penaliza nada (CONDICIONAL).
+  const pideDecisores = _icpPideDecisores(plan);
 
   // países donde el cliente opera (secundarios), sin el principal
   const todas = (Array.isArray(icp.geografias) && icp.geografias.length ? icp.geografias : [geografia]).filter(Boolean);
@@ -855,8 +888,11 @@ async function sourceCandidates(plan, cliente){
       }catch{}
     }
     c.cerca = homeGeo && _norm(c.loc||'').includes(homeGeo) ? 1 : 0;
+    // ROL: si el ICP pide decisores, penalizamos fuerte a los IC sueltos para que los decisores floten arriba
+    // del pool que ve la IA. No es descarte (la card sigue disponible si no hay alternativa) -> degradación digna.
+    c.icSuelto = pideDecisores && _esICsuelto(c.head);
     // SCORING: fit y tamaño mandan; la cuenta-ancla y el grado (×2) ahora pesan de verdad, no solo desempatan.
-    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + (c.ancla?4:0) + c.cerca + _warmth(c.dist)*2;
+    c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + (c.ancla?4:0) + c.cerca + _warmth(c.dist)*2 - (c.icSuelto?40:0);
   });
   // piso de tamaño contra el ICP, SIN vaciar el pool
   const cumplen  = top.filter(c => !(c.headcount!=null && c.headcount < PISO));
@@ -895,8 +931,9 @@ async function sourceCandidates(plan, cliente){
         if(prof.headRich && prof.headRich.length>=3){
           c.head=prof.headRich; c.empresa=_empresaDeHeadline(prof.headRich) || c.empresa; c.fit=_rankFit(prof.headRich, titulos);
         }
-        // recomputar el score ahora que el tamaño se conoce (para que el ranking lo refleje)
-        c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + (c.ancla?4:0) + c.cerca + _warmth(c.dist)*2;
+        // recomputar el score ahora que el tamaño se conoce (head puede haber cambiado al enriquecer -> reevaluar IC)
+        c.icSuelto = pideDecisores && _esICsuelto(c.head);
+        c.score = c.fit*3 + _sizeBoost(c.headcount, tamMin)*3 + (c.ancla?4:0) + c.cerca + _warmth(c.dist)*2 - (c.icSuelto?40:0);
       }catch{}
     });
   }
@@ -919,6 +956,13 @@ async function sourceCandidates(plan, cliente){
     const ya = new Set(final.map(c=>c.id));
     const reponer = out.filter(c => !ya.has(c.id) && !(c.headcount!=null && c.headcount < EGREGIO)).slice(0, N_IA - final.length);
     if(reponer.length){ final = final.concat(reponer); }
+  }
+
+  // ROL: contar IC sueltos que llegan al pool de la IA (solo informativo; ya quedaron al fondo por el score).
+  // Recalculamos sobre el head final de cada candidata (algunas no pasaron por enriquecimiento -> sin c.icSuelto).
+  if(pideDecisores){
+    const icEnPool = final.filter(c => _esICsuelto(c.head)).length;
+    console.log(`[ROL] ICP pide decisores | IC sueltos en el pool a la IA: ${icEnPool}/${final.length} (penalizados en el ranking).`);
   }
 
   const n2 = final.filter(c=>c.dist===2).length, nAncla = final.filter(c=>c.ancla).length;
@@ -1074,7 +1118,7 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 ## Cómo elegir (en este orden)
 1. FIT de función Y de empresa (LO MÁS IMPORTANTE): el FIT no es solo el cargo. (a) FIT de función: el cargo tiene que ser CLARAMENTE del rol que compra lo del cliente. PROHIBIDO elegir gente de OTRA área que la del comprador: si el comprador es de Operaciones/Facilities/Mantenimiento/Administración, NO elijas a nadie de Marketing/Mercadeo/Ventas/Comercial/RR.HH./Finanzas, POR MÁS que la empresa sea una marca top. Un cargo suelto sin función clara ("Mercadeo", "Analista", "Coordinador" a secas) NO sirve. Un "CEO/Dueño" de empresa chica sí sirve porque ahí decide. (b) FIT de empresa (comprador ideal): la EMPRESA de la card tiene que pasar el test de "Comprador ideal" del contexto, es decir, ser realmente un comprador/canal del producto, no solo compartir vertical. Preguntate: ¿esta empresa COMPRA, REVENDE o ALOJA lo del cliente, o solo está en el mismo rubro? Si NO podés determinar que la empresa pasa el test del comprador ideal, PREFERÍ otra empresa que SÍ lo pase. Es PREFERENCIAL, no un rechazo duro: si no hay alternativas mejores en la lista, podés igual elegirla; no vacíes el pool por esto. MEJOR devolver MENOS cuentas (o repetir vertical) que UNA sola de función o empresa equivocada: una cuenta mal apuntada quema todo el reporte.
 2. PAÍS: preferí candidatos del PAÍS DEL CLIENTE (van marcados con ★ y vienen primero en la lista). Elegí de otro país de LatAm SOLO si no hay suficientes buenos del país del cliente. NUNCA elijas a alguien de un país donde el cliente no puede prestar el servicio.
-3. Decisor real: nada de analistas, trainees ni juniors.
+3. Decisor real (PREFERENCIAL, no excluyente): cuando la "Función del comprador" del contexto apunta a gerencia/dueño (quien AUTORIZA y FIRMA la compra), PREFERÍ cargos de DECISIÓN: director, gerente, jefe, head, VP, C-level (CEO/COO/etc.), dueño, fundador, propietario, socio, broker/agente PRINCIPAL que decide. EVITÁ los cargos de CONTRIBUIDOR INDIVIDUAL / usuario final que NO autorizan la compra ("agente", "asociado", "especialista", "profesional inmobiliario" suelto, "analista", "representante", "asesor", "vendedor", "ejecutivo de ventas/cuentas"): ese rol USA el producto pero no lo compra, así que le venderías a quien no firma. MATIZ (importante, no es rechazo duro): a IGUALDAD de fit de función, país y vertical, el que DECIDE la compra GANA al contribuidor individual; pero si en la lista NO hay decisores disponibles para una empresa, es PREFERIBLE elegir el mejor IC disponible que devolver menos cuentas (degradación digna). Y si el ICP legítimamente apunta a ICs (ej. el comprador ES el agente o el dueño-operador de una empresa chica), el IC SÍ sirve. Igual que siempre: nada de trainees ni juniors.
 4. Empresa ANCLA con fit de ICP: usá los "~N empleados" que te muestro para juzgar el TAMAÑO. Marca grande y conocida emociona; startup desconocida de 8 personas no. Pero si el ICP son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real. TAMAÑO (con matiz): a igual fit de función, país y vertical, PREFERÍ las empresas que cumplen el piso de tamaño del ICP por encima de las más chicas. EVITÁ las claramente micro (prácticamente un individuo, ej. 1 a 4 empleados cuando el ICP pide empresas/agencias con equipo) SIEMPRE QUE haya alternativas mejores on-vertical en la lista. PERO el tamaño NO es excluyente: un lead fuerte en los demás ejes (país correcto, rol claramente decisor, on-vertical, contacto cálido) en una empresa SOLO un poco por debajo del piso SÍ sirve y se puede elegir. No descartes un buen decisor por quedar apenas corto de tamaño; descartá solo los casos obviamente micro cuando existen mejores opciones.
 5. Coherencia / credibilidad: si cargo+empresa+ubicación se ve raro, no la elijas.
 6. Grado de conexión: a IGUAL fit y país, preferí SIEMPRE el grado más cálido (1er o 2do grado por encima de 3ro o fuera de red): un 2do grado acepta y responde mucho más porque comparten un contacto. Nunca sacrifiques fit por grado, pero entre candidatos parecidos, el más cálido gana.
@@ -1200,20 +1244,25 @@ function armarReporte(plan, seleccion, pool, senales){
   const titulos = (plan._plan && plan._plan.titulos_objetivo) || [];
   const byId = new Map(pool.map(p=>[p.id, p]));
   const cards=[]; const usados=new Set(); const usadasEmp=new Set();
-  for(const s of (seleccion||[])){
-    if(cards.length >= NUM_CUENTAS) break;
+  // ROL: solo cuando el ICP pide gerencia/dueño preferimos NO tomar IC sueltos si hay decisores disponibles.
+  const pideDecisores = _icpPideDecisores(plan);
+
+  // Intenta materializar UNA card desde la selección de la IA. Devuelve la card (sin pushear) o null si no
+  // pasa los guards. NO muta estado salvo cuando `commit` es true (reserva id/empresa). Así podemos correr
+  // dos pasadas (decisores primero, IC sueltos como fallback) sin tocar la lógica de cada guard.
+  function intentarCard(s, { commit }){
     const p = byId.get(s.id);
-    if(!p){ console.warn(`[SELECT] id fuera del pool, ignorado: ${s.id}`); continue; }
-    if(usados.has(s.id)){ console.warn(`[SELECT] id DUPLICADO, ignorado: ${p.name}`); continue; }
+    if(!p){ console.warn(`[SELECT] id fuera del pool, ignorado: ${s.id}`); return null; }
+    if(usados.has(s.id)){ if(commit) console.warn(`[SELECT] id DUPLICADO, ignorado: ${p.name}`); return null; }
     const angulo=String(s.angulo||'').trim(), hook=String(s.hook||'').trim();
-    if(!angulo || !hook){ console.warn(`[SELECT] card sin ángulo/hook, descartada: ${p.name}`); continue; }
+    if(!angulo || !hook){ if(commit) console.warn(`[SELECT] card sin ángulo/hook, descartada: ${p.name}`); return null; }
     const empresa = p.empresa || _empresaDeHeadline(p.head) || '';
-    if(!empresa){ console.warn(`[SELECT] card sin empresa real, descartada: ${p.name}`); continue; }
+    if(!empresa){ if(commit) console.warn(`[SELECT] card sin empresa real, descartada: ${p.name}`); return null; }
 
     // --- GUARDA DE FUNCIÓN: el cargo tiene que mostrar la función objetivo o ser un decisor ---
     if(!_rolRelevante(String(p.head||'').split('@')[0], titulos)){
-      console.warn(`[SELECT] card DESCARTADA por FUNCIÓN equivocada/irrelevante: ${p.name} ("${String(p.head||'').slice(0,50)}")`);
-      continue;
+      if(commit) console.warn(`[SELECT] card DESCARTADA por FUNCIÓN equivocada/irrelevante: ${p.name} ("${String(p.head||'').slice(0,50)}")`);
+      return null;
     }
 
     // --- GUARD ANTI-MEZCLA: el ángulo/hook tienen que ser de ESTA persona/empresa ---
@@ -1223,23 +1272,55 @@ function armarReporte(plan, seleccion, pool, senales){
     const empTokens = empN.split(' ').filter(w => w.length >= 4);
     const angCoherente = (primerNombre.length >= 3 && angN.includes(primerNombre)) || empTokens.some(w => angN.includes(w));
     if(!hookNombra || !angCoherente){
-      console.warn(`[SELECT] card DESCARTADA por MEZCLA (no corresponde a ${p.name} @ ${empresa}) | hook="${hook.slice(0,70)}"`);
-      continue;
+      if(commit) console.warn(`[SELECT] card DESCARTADA por MEZCLA (no corresponde a ${p.name} @ ${empresa}) | hook="${hook.slice(0,70)}"`);
+      return null;
     }
     // --- fin guards ---
 
     const empKey = _empKey(empresa);
-    if(empKey && usadasEmp.has(empKey)){ console.warn(`[SELECT] empresa DUPLICADA, ignorada: ${p.name} @ ${empresa}`); continue; }
-    usados.add(s.id);
-    if(empKey) usadasEmp.add(empKey);
-    cards.push({
+    if(empKey && usadasEmp.has(empKey)){ if(commit) console.warn(`[SELECT] empresa DUPLICADA, ignorada: ${p.name} @ ${empresa}`); return null; }
+    if(commit){ usados.add(s.id); if(empKey) usadasEmp.add(empKey); }
+    return {
       empresa, nombre: p.name, cargo: _cargoCorto(p.head, titulos),
       urn: p.id, slug: _slugCos(p.name),
       ubicacion: p.loc || ((plan._plan && plan._plan.geografia) || ''),
       grado: _degOrdinal(p.dist===9?3:p.dist, '2do') + ' grado',
       headcount: (p.headcount ?? null),
       angulo: _limpia(angulo), hook: _limpia(hook)
-    });
+    };
+  }
+
+  if(pideDecisores){
+    // GUARDA PREFERENCIAL: dos pasadas. (1) Solo decisores de la selección. (2) IC sueltos como fallback, SOLO
+    // para llenar lo que falte. Así, si hay un decisor que pasa los demás guards (empresa distinta/geo/fit), la
+    // card de IC suelto NO se toma. Si el pool es TODO IC, igual se llenan cards (degradación digna, no se vacía).
+    const idEsIC = s => { const p = byId.get(s.id); return p && _esICsuelto(String(p.head||'').split('@')[0]); };
+    const decisores = (seleccion||[]).filter(s => !idEsIC(s));
+    const ics       = (seleccion||[]).filter(s =>  idEsIC(s));
+    for(const s of decisores){
+      if(cards.length >= NUM_CUENTAS) break;
+      const card = intentarCard(s, { commit:true });
+      if(card) cards.push(card);
+    }
+    // ¿Quedan slots y existen IC sueltos seleccionables? Avisamos por qué los tomamos (no hubo más decisores).
+    const faltan = NUM_CUENTAS - cards.length;
+    if(faltan > 0 && ics.length){
+      console.warn(`[ROL] ${faltan} slot(s) sin decisor disponible -> uso IC sueltos como fallback (degradación digna, no vacío el reporte).`);
+      for(const s of ics){
+        if(cards.length >= NUM_CUENTAS) break;
+        const card = intentarCard(s, { commit:true });
+        if(card){ console.warn(`[ROL] card de IC suelto aceptada por falta de decisor: ${card.nombre} ("${(card.cargo||'').slice(0,40)}").`); cards.push(card); }
+      }
+    } else if(ics.length){
+      console.log(`[ROL] ${ics.length} IC suelto(s) en la selección OMITIDO(s): había decisores suficientes.`);
+    }
+  } else {
+    // ICP no pide decisores (o apunta legítimamente a ICs): comportamiento original, una sola pasada.
+    for(const s of (seleccion||[])){
+      if(cards.length >= NUM_CUENTAS) break;
+      const card = intentarCard(s, { commit:true });
+      if(card) cards.push(card);
+    }
   }
   if(cards.length < NUM_CUENTAS) console.warn(`[SELECT] ⚠️ solo ${cards.length}/${NUM_CUENTAS} cards válidas tras dedupe/guards.`);
   const { _plan, ...base } = plan;
@@ -1632,5 +1713,6 @@ if (require.main === module) {
 module.exports = {
   validarPlan, sourceCandidates, armarReporte, verificarLinksData,
   parseReporteJSON, _rankFit, _rankSenioridad, _parseProfile, _sizeBoost,
-  _norm, _empresaDeHeadline, _empKey, _slugCos, _degOrdinal, _headlineLimpio, _fechaHoy
+  _norm, _empresaDeHeadline, _empKey, _slugCos, _degOrdinal, _headlineLimpio, _fechaHoy,
+  _esICsuelto, _icpPideDecisores
 };
