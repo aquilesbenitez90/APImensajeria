@@ -183,18 +183,39 @@ function contarYLoguearWebSearch(data, stage) {
 // ---------------------------------------------------------------------------
 // MCP IBT con logs
 // ---------------------------------------------------------------------------
+// TIMEOUT por llamada MCP: una llamada patológica (vimos get_contact_profile tardando 250s) colgaba el
+// job ENTERO porque fetch no aborta solo. Cada llamada se corta con AbortController. get_contact_profile
+// corre muchos en paralelo durante el enriquecimiento y fue el que se disparó → timeout más corto.
+const MCP_TIMEOUT_MS         = parseInt(process.env.MCP_TIMEOUT_MS || '45000', 10);
+const MCP_PROFILE_TIMEOUT_MS = parseInt(process.env.MCP_PROFILE_TIMEOUT_MS || '30000', 10);
+const _mcpTimeoutDe = (toolName) => toolName === 'get_contact_profile' ? MCP_PROFILE_TIMEOUT_MS : MCP_TIMEOUT_MS;
+
 async function callMCP(toolName, args) {
   console.log(`[MCP] Llamando ${toolName} con args:`, JSON.stringify(args).substring(0, 200));
-  const res = await fetch(MCP_URL, {
-    method: 'POST',
-    headers: IBT_HEADERS,
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      method: 'tools/call',
-      params: { name: toolName, arguments: args },
-      id: Date.now()
-    })
-  });
+  const ms = _mcpTimeoutDe(toolName);
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  let res;
+  try {
+    res = await fetch(MCP_URL, {
+      method: 'POST',
+      headers: IBT_HEADERS,
+      signal: ac.signal,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: { name: toolName, arguments: args },
+        id: Date.now()
+      })
+    });
+  } catch (e) {
+    // AbortError = se cortó por timeout. Lo logueamos (los catch de los callers son silenciosos) y
+    // re-lanzamos: el caller que ya está envuelto en try/catch devuelve vacío y el pool sigue.
+    if (e && e.name === 'AbortError') console.error(`[MCP] ${toolName} ABORTADA por timeout (${ms}ms).`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   const text = await res.text();
   const match = text.match(/data: ({.*})\n\n/);
   if (!match) {
@@ -431,6 +452,29 @@ async function runJudge(html, pageCount) {
 // ---------------------------------------------------------------------------
 function _stripTags(s){return (s||'').replace(/<[^>]+>/g,' ').replace(/&[a-z]+;/gi,' ').replace(/\s+/g,' ').trim();}
 function _norm(s){return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();}
+
+// GEO: el loc de LinkedIn casi nunca trae el nombre del pa\u00eds para US/UK/etc. ("Atlanta y alrededores",
+// "Dallas-Fort Worth", "Greater London") \u2192 un includes("united states") da SIEMPRE 0 y rompe `cerca`
+// (que es el primer criterio de todos los sorts). Para esos pa\u00edses damos un set de alias/variantes con las
+// que S\u00cd aparecen textualmente. En LatAm el pa\u00eds s\u00ed aparece en el loc ("M\u00e9xico", "Argentina") y el includes
+// ya andaba; igual sumamos sus variantes para no perder nada. _norm() ya saca puntos/acentos ("u.s."\u2192"u s").
+// OJO: solo tokens NO ambiguos. Las siglas de 2 letras como "us"/"uk" se descartaron a propósito porque
+// _norm hace includes de SUBSTRING y "us" matchea dentro de "houston"/"australia" (falso positivo de cerca).
+const _GEO_ALIASES = {
+  'united states':        ['united states','estados unidos','ee uu','eeuu','usa','u s a'],
+  'estados unidos':       ['united states','estados unidos','ee uu','eeuu','usa','u s a'],
+  'united kingdom':       ['united kingdom','reino unido','england','great britain','scotland','wales'],
+  'reino unido':          ['united kingdom','reino unido','england','great britain','scotland','wales'],
+  'united arab emirates': ['united arab emirates','emiratos arabes unidos','uae','u a e'],
+  'south korea':          ['south korea','corea del sur'],
+  'czech republic':       ['czech republic','czechia','republica checa'],
+};
+// Alias normalizados para un pa\u00eds dado. Si no est\u00e1 en la tabla, el set es solo su propio _norm.
+function _geoAliasSet(nombrePais){
+  const n = _norm(nombrePais);
+  const lista = _GEO_ALIASES[n] || [n];
+  return new Set(lista.map(_norm).filter(Boolean));
+}
 function _profileName(txt){return ((txt||'').match(/Profile:\s*(.+?)\s*(?:\[profileId|\u2014|@|$)/i)||[])[1]?.trim()||'';}
 function _esc(s){return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');}
 function _degOrdinal(n,sample){if(/[\u00b0\u00ba]/.test(sample))return n+'\u00b0';const w={1:'1er',2:'2do',3:'3er'}[n]||(n+'do');return /[A-Z\u00c1\u00c9\u00cd\u00d3\u00da]{2,}/.test(sample)?w.toUpperCase():w;}
@@ -712,6 +756,19 @@ async function sourceCandidates(plan, cliente){
   const todas = (Array.isArray(icp.geografias) && icp.geografias.length ? icp.geografias : [geografia]).filter(Boolean);
   const secundarias = todas.filter(g => _norm(g) !== homeGeo).slice(0, 5);
 
+  // CERCANÍA al país del cliente. El includes(homeGeo) frágil daba `cerca=0` para TODO el pool US/UK porque
+  // el loc de LinkedIn es la ciudad ("Atlanta y alrededores"), nunca "united states". Estrategia:
+  //  - UN solo país (sin secundarias): TODO el pool vino del filtro de homeLoc → cerca=1 para todos (seguro).
+  //  - multi-país: includes con set de ALIAS del país principal (homeAliases) como fallback textual.
+  const unSoloPais = secundarias.length === 0;
+  const homeAliases = _geoAliasSet(geografia);
+  const _esCerca = (loc) => {
+    if (unSoloPais) return 1;                 // todo el pool ya está filtrado al país del cliente
+    const l = _norm(loc || ''); if (!l) return 0;
+    for (const a of homeAliases) if (a && l.includes(a)) return 1;
+    return 0;
+  };
+
   // TÉRMINOS de rol: Sales Navigator NO tolera keywords multi-palabra (las trata como frase casi-exacta
   // y devuelve 0). Buscamos UN término por vez y unimos. Cada título objetivo es un término (1-2 palabras).
   // Hasta 6 para que entren tanto los roles de facilities como los del producto/canal del cliente.
@@ -772,7 +829,7 @@ async function sourceCandidates(plan, cliente){
     for(const lista of listas){ for(const p of (lista||[])){ if(p.id && !vis.has(p.id)){ vis.add(p.id); acc.push(p); } } }
     return acc;
   }
-  const _validosHome = arr => arr.filter(p => _rankSenioridad(p.head) >= 2 && _norm(p.loc||'').includes(homeGeo)).length;
+  const _validosHome = arr => arr.filter(p => _rankSenioridad(p.head) >= 2 && _esCerca(p.loc)).length;
 
   // GEOGRAFÍA: país principal PRIMERO + países donde el cliente HOY opera (cercanos).
   const homeLoc = await locIds(geografia);    // todos los ids país-level del país principal
@@ -882,7 +939,7 @@ async function sourceCandidates(plan, cliente){
     const emp=_empresaDeHeadline(p.head)||'';
     if(empCliente && emp && _mismaEmpresa(empCliente, emp)) continue;
     if(emp && _esComp(emp)){ console.warn(`[SOURCE] descartado por COMPETIDOR/proveedor: ${p.name} @ ${emp}`); continue; }
-    const cerca = homeGeo && _norm(p.loc||'').includes(homeGeo) ? 1 : 0;
+    const cerca = _esCerca(p.loc);
     const ancla = (emp && anclaNombres.has(_empKey(emp))) ? 1 : 0;
     const hcPre = ancla ? (anclaHC.get(_empKey(emp)) ?? null) : null;   // headcount ya conocido de la cuenta-ancla
     out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, ancla, headcount:hcPre, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos) });
@@ -905,7 +962,7 @@ async function sourceCandidates(plan, cliente){
         }
       }catch{}
     }
-    c.cerca = homeGeo && _norm(c.loc||'').includes(homeGeo) ? 1 : 0;
+    c.cerca = _esCerca(c.loc);
     // ROL: si el ICP pide decisores, penalizamos fuerte a los IC sueltos para que los decisores floten arriba
     // del pool que ve la IA. No es descarte (la card sigue disponible si no hay alternativa) -> degradación digna.
     c.icSuelto = pideDecisores && _esICsuelto(c.head);
@@ -1088,7 +1145,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   • SOLO PLAN (la fuente dice "planea", "quiere", "próximamente", "evalúa", sin operar todavía) → NO lo cuentes como país de operación, ni en el texto ni en el stat.
   REGLA DE ORO: no subas ni bajes el nivel respecto de lo que dice la fuente. Si DISTINTAS fuentes difieren en el nivel de un mismo país (ej. una dice "opera en" y otra "se está expandiendo a"), usá SIEMPRE el nivel MÁS BAJO/conservador (en ese caso, "expansión reciente"), nunca el más optimista. El stat de países (si lo ponés) cuenta los consolidados + los recientes reales (NO los aspiracionales), y el texto y el stat tienen que COINCIDIR: si decís que opera/se expande en 3 países, el stat dice 3, no 2. Si no estás seguro de un país, no lo cuentes en ningún lado, pero que texto y stat coincidan.
   COHERENCIA NUMÉRICA DE PAÍSES (CRÍTICO, defecto recurrente): fijá UNA SOLA lista de países (los consolidados + recientes reales) y usá EXACTAMENTE esa misma lista, con los MISMOS nombres y la MISMA cantidad, en los TRES lugares: (1) el número del stat de países, (2) los países nombrados en h1_post, y (3) los países nombrados en el ICP "Geografía". REGLA INNEGOCIABLE: cada país que cuentes en el número del stat tiene que estar nombrado en h1_post Y en el ICP "Geografía"; y cada país que nombres en h1_post o en el ICP tiene que estar contado en el stat. PROHIBIDO contar un país en el número que no esté escrito en el texto, o nombrar en el texto uno que no esté en el cuenta (ej. contar 4 pero listar solo España, México y Guatemala sin Andorra es un BUG). CIERRE OBLIGATORIO: antes de cerrar el JSON, contá con el dedo los países que nombraste en el ICP "Geografía", verificá que sean los MISMOS que en h1_post, y que ese número sea EXACTAMENTE el del stat de países; si no coinciden, corregilo antes de devolver.
-- INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar las VERTICALES ANCLA reales donde están los COMPRADORES del cliente (las mismas que marcás ALTA en "prioridades"). El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Banca", "Administración de propiedades"). NO pongas el rubro del propio cliente ni industrias genéricas. TAXONOMÍA (CRÍTICO para que el filtro NO se caiga): cada nombre de "industrias" tiene que ser una CATEGORÍA RECONOCIBLE de la taxonomía de industrias de LinkedIn/Sales Navigator (las que el sistema resuelve a un id de filtro), NO una etiqueta hiper-específica, de moda o inventada que no exista como industria. Una etiqueta que no resuelve deja la búsqueda SIN filtro de industria. Preferí siempre la categoría canónica más cercana al COMPRADOR: ej. usá "Ingeniería robótica" / "Robotic Engineering" o "Fabricación de maquinaria de automatización" en vez de "Robotics" a secas. Es válido (y recomendado ante la duda) poner el nombre en español Y/O su equivalente reconocible en inglés. EVITÁ verticales industriales/pesadas amplias (ej. "Construcción", "Manufactura", "Minería", "Cemento") salvo que sean LITERALMENTE el comprador: arrastran jefes de mantenimiento de planta que consumen el servicio puertas adentro pero NO son el canal de compra. Ante la duda, preferí las verticales donde el producto del cliente se compra o se revende.
+- INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar SOLO las VERTICALES de prioridad ALTA donde están los COMPRADORES del cliente (las MISMAS que marcás "Alta:" en "prioridades", ni una más). PROHIBIDO meter en "industrias" las verticales "Media:" ni ninguna secundaria/aspiracional: esas van EXCLUSIVAMENTE en "prioridades" como contexto, NUNCA en "industrias" porque "industrias" es el filtro de búsqueda y meter una Media diluye el pool con cuentas de menor fit. El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Banca", "Administración de propiedades"). NO pongas el rubro del propio cliente ni industrias genéricas. TAXONOMÍA (CRÍTICO para que el filtro NO se caiga): cada nombre de "industrias" tiene que ser una CATEGORÍA RECONOCIBLE de la taxonomía de industrias de LinkedIn/Sales Navigator (las que el sistema resuelve a un id de filtro), NO una etiqueta hiper-específica, de moda o inventada que no exista como industria. Una etiqueta que no resuelve deja la búsqueda SIN filtro de industria. Preferí siempre la categoría canónica más cercana al COMPRADOR: ej. usá "Ingeniería robótica" / "Robotic Engineering" o "Fabricación de maquinaria de automatización" en vez de "Robotics" a secas. Es válido (y recomendado ante la duda) poner el nombre en español Y/O su equivalente reconocible en inglés. EVITÁ verticales industriales/pesadas amplias (ej. "Construcción", "Manufactura", "Minería", "Cemento") salvo que sean LITERALMENTE el comprador: arrastran jefes de mantenimiento de planta que consumen el servicio puertas adentro pero NO son el canal de compra. Ante la duda, preferí las verticales donde el producto del cliente se compra o se revende.
 - TAMAÑO (para que salgan empresas ANCLA, no micro-empresas): "tamano_min" tiene que ser un número real de empleados que refleje el ICP. Si el ICP son empresas medianas y grandes / marcas ancla, poné un piso alto (ej: 200). Poné un piso bajo (20-50) SOLO si el ICP son genuinamente PyMEs/micro. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva.
 - COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas que NO son compradores porque venden/fabrican LO MISMO que el cliente. Buscalos con web_search e incluí TRES tipos: (i) competidores directos de tamaño similar; (ii) FABRICANTES o PROVEEDORES globales del mismo producto (ej. para detonadores/voladura: Enaex, Orica, Dyno Nobel, Sandvik; para staffing de tecnología: Toptal, Turing, Andela, TEKsystems); (iii) distribuidores o integradores que revenden ese producto. Son PARES o RIVALES, no clientes. El sistema EXCLUYE a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES del research. NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque descartaría compradores legítimos. Si no identificás competidores claros, dejá la lista vacía.
 - COMPETIDOR_TERMINOS (filtro de respaldo, usar con cuidado): listá 0-4 términos del PRODUCTO ESPECÍFICO que el cliente fabrica/vende y que, si aparecen en el NOMBRE de otra empresa, casi seguro la delatan como proveedor o competidor (ej. "explosivos", "detonadores", "voladura", "staffing", "proptech"). REGLA CRÍTICA: NO pongas el VERTICAL/industria donde el cliente VENDE: si vende software inmobiliario NO pongas "inmobiliaria"; si le vende a minería NO pongas "minería"; eso descartaría a tus propios compradores. Solo el nombre del producto en sí. Ante la duda, dejá la lista vacía.
@@ -1145,17 +1202,19 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 
 ## Cómo elegir (en este orden)
 1. FIT de función Y de empresa (LO MÁS IMPORTANTE): el FIT no es solo el cargo. (a) FIT de función: el cargo tiene que ser CLARAMENTE del rol que compra lo del cliente. PROHIBIDO elegir gente de OTRA área que la del comprador: si el comprador es de Operaciones/Facilities/Mantenimiento/Administración, NO elijas a nadie de Marketing/Mercadeo/Ventas/Comercial/RR.HH./Finanzas, POR MÁS que la empresa sea una marca top. Un cargo suelto sin función clara ("Mercadeo", "Analista", "Coordinador" a secas) NO sirve. Un "CEO/Dueño" de empresa chica sí sirve porque ahí decide. (b) FIT de empresa (comprador ideal): la EMPRESA de la card tiene que pasar el test de "Comprador ideal" del contexto, es decir, ser realmente un comprador/canal del producto, no solo compartir vertical. Preguntate: ¿esta empresa COMPRA, REVENDE o ALOJA lo del cliente, o solo está en el mismo rubro? Si NO podés determinar que la empresa pasa el test del comprador ideal, PREFERÍ otra empresa que SÍ lo pase. Es PREFERENCIAL, no un rechazo duro: si no hay alternativas mejores en la lista, podés igual elegirla; no vacíes el pool por esto. MEJOR devolver MENOS cuentas (o repetir vertical) que UNA sola de función o empresa equivocada: una cuenta mal apuntada quema todo el reporte.
-2. PAÍS: preferí candidatos del PAÍS DEL CLIENTE (van marcados con ★ y vienen primero en la lista). Elegí de otro país de LatAm SOLO si no hay suficientes buenos del país del cliente. NUNCA elijas a alguien de un país donde el cliente no puede prestar el servicio.
-3. Decisor real (PREFERENCIAL, no excluyente): cuando la "Función del comprador" del contexto apunta a gerencia/dueño (quien AUTORIZA y FIRMA la compra), PREFERÍ cargos de DECISIÓN: director, gerente, jefe, head, VP, C-level (CEO/COO/etc.), dueño, fundador, propietario, socio, broker/agente PRINCIPAL que decide. EVITÁ los cargos de CONTRIBUIDOR INDIVIDUAL / usuario final que NO autorizan la compra ("agente", "asociado", "especialista", "profesional inmobiliario" suelto, "analista", "representante", "asesor", "vendedor", "ejecutivo de ventas/cuentas"): ese rol USA el producto pero no lo compra, así que le venderías a quien no firma. MATIZ (importante, no es rechazo duro): a IGUALDAD de fit de función, país y vertical, el que DECIDE la compra GANA al contribuidor individual; pero si en la lista NO hay decisores disponibles para una empresa, es PREFERIBLE elegir el mejor IC disponible que devolver menos cuentas (degradación digna). Y si el ICP legítimamente apunta a ICs (ej. el comprador ES el agente o el dueño-operador de una empresa chica), el IC SÍ sirve. Igual que siempre: nada de trainees ni juniors.
-4. Empresa ANCLA con fit de ICP: usá los "~N empleados" que te muestro para juzgar el TAMAÑO. Marca grande y conocida emociona; startup desconocida de 8 personas no. Pero si el ICP son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real. TAMAÑO (con matiz): a igual fit de función, país y vertical, PREFERÍ las empresas que cumplen el piso de tamaño del ICP por encima de las más chicas. EVITÁ las claramente micro (prácticamente un individuo, ej. 1 a 4 empleados cuando el ICP pide empresas/agencias con equipo) SIEMPRE QUE haya alternativas mejores on-vertical en la lista. PERO el tamaño NO es excluyente: un lead fuerte en los demás ejes (país correcto, rol claramente decisor, on-vertical, contacto cálido) en una empresa SOLO un poco por debajo del piso SÍ sirve y se puede elegir. No descartes un buen decisor por quedar apenas corto de tamaño; descartá solo los casos obviamente micro cuando existen mejores opciones.
-5. Coherencia / credibilidad: si cargo+empresa+ubicación se ve raro, no la elijas.
-6. Grado de conexión: a IGUAL fit y país, preferí SIEMPRE el grado más cálido (1er o 2do grado por encima de 3ro o fuera de red): un 2do grado acepta y responde mucho más porque comparten un contacto. Nunca sacrifiques fit por grado, pero entre candidatos parecidos, el más cálido gana.
+2. VERTICALES ALTA del ICP: preferí SIEMPRE candidatos cuyas empresas estén en las verticales de prioridad ALTA del contexto (te las paso en "Verticales prioridad ALTA"). Elegí un candidato de una vertical Media/secundaria SOLO si no hay suficientes buenos de las ALTA. A igual fit de función y país, una empresa de vertical ALTA le gana a una de vertical Media.
+3. PAÍS: preferí candidatos del PAÍS DEL CLIENTE (van marcados con ★ y vienen primero en la lista). Elegí de otro país de LatAm SOLO si no hay suficientes buenos del país del cliente. NUNCA elijas a alguien de un país donde el cliente no puede prestar el servicio.
+4. Decisor real (PREFERENCIAL, no excluyente): cuando la "Función del comprador" del contexto apunta a gerencia/dueño (quien AUTORIZA y FIRMA la compra), PREFERÍ cargos de DECISIÓN: director, gerente, jefe, head, VP, C-level (CEO/COO/etc.), dueño, fundador, propietario, socio, broker/agente PRINCIPAL que decide. EVITÁ los cargos de CONTRIBUIDOR INDIVIDUAL / usuario final que NO autorizan la compra ("agente", "asociado", "especialista", "profesional inmobiliario" suelto, "analista", "representante", "asesor", "vendedor", "ejecutivo de ventas/cuentas"): ese rol USA el producto pero no lo compra, así que le venderías a quien no firma. MATIZ (importante, no es rechazo duro): a IGUALDAD de fit de función, país y vertical, el que DECIDE la compra GANA al contribuidor individual; pero si en la lista NO hay decisores disponibles para una empresa, es PREFERIBLE elegir el mejor IC disponible que devolver menos cuentas (degradación digna). Y si el ICP legítimamente apunta a ICs (ej. el comprador ES el agente o el dueño-operador de una empresa chica), el IC SÍ sirve. Igual que siempre: nada de trainees ni juniors.
+5. Empresa ANCLA con fit de ICP: usá los "~N empleados" que te muestro para juzgar el TAMAÑO. Marca grande y conocida emociona; startup desconocida de 8 personas no. Pero si el ICP son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real. TAMAÑO (con matiz): a igual fit de función, país y vertical, PREFERÍ las empresas que cumplen el piso de tamaño del ICP por encima de las más chicas. EVITÁ las claramente micro (prácticamente un individuo, ej. 1 a 4 empleados cuando el ICP pide empresas/agencias con equipo) SIEMPRE QUE haya alternativas mejores on-vertical en la lista. PERO el tamaño NO es excluyente: un lead fuerte en los demás ejes (país correcto, rol claramente decisor, on-vertical, contacto cálido) en una empresa SOLO un poco por debajo del piso SÍ sirve y se puede elegir. No descartes un buen decisor por quedar apenas corto de tamaño; descartá solo los casos obviamente micro cuando existen mejores opciones.
+6. Coherencia / credibilidad: si cargo+empresa+ubicación se ve raro, no la elijas.
+7. Grado de conexión: a IGUAL fit y país, preferí SIEMPRE el grado más cálido (1er o 2do grado por encima de 3ro o fuera de red): un 2do grado acepta y responde mucho más porque comparten un contacto. Nunca sacrifiques fit por grado, pero entre candidatos parecidos, el más cálido gana.
 
 ## Reglas DURAS
 - Elegí SOLO ids que estén en la lista. PROHIBIDO inventar una persona, un id, un cargo o una empresa.
 - LOS ${pedir} ids tienen que ser DISTINTOS. Prohibido repetir la misma persona.
 - EMPRESAS DISTINTAS: cada cuenta es de una empresa DIFERENTE. Si dos son de la misma empresa, quedate con el de mejor fit y completá con otra empresa.
 - PROHIBIDO inventar o inflar el cargo: usá EXACTAMENTE el que figura en la lista. Si dice "Project Manager", es "Project Manager" — no lo asciendas a "Manager de Mantenimiento" ni le inventes MBA, estudios, especialidad ni un rol que no está. No le atribuyas datos (seniority, área, formación) que no estén en lo que te paso.
+- PROHIBIDO atribuir un ÁREA, DEPARTAMENTO, INICIATIVA o ESPECIALIDAD que no aparezca LITERAL en el cargo de la lista. Si el cargo dice solo "Executive Director", NO escribas que "dirige Automation", "lidera Innovation" ni que está "a cargo de Automation e Innovation": esa área NO está en el cargo, te la estás inventando. Hablá del rol GENÉRICO tal como figura ("como Executive Director", "desde su rol de dirección"), NO inventes el QUÉ específico que dirige. Misma regla para el ángulo y para el hook.
 - CADA uno DEBE tener angulo y hook NO vacíos.
 - El ÁNGULO: MÁXIMO 2 oraciones (≤ 320 caracteres), específico de ESA persona/empresa, usando su cargo/empresa/perfil REALES + lo que ofrece el cliente. Corto y al hueso, sin relleno. 100% único por persona.
 - PROHIBIDO copiar/pegar o calcar la estructura de un ángulo a otro. Antes de cerrar, revisá que el nombre y la empresa de cada ángulo sean los de ESE id.
@@ -1168,8 +1227,12 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 - COMPETIDORES: NO elijas personas de empresas que sean COMPETIDORAS directas del cliente (que vendan/ofrezcan lo mismo). Preferí empresas que serían CLIENTES del cliente, no rivales.
 
 ## Output — SOLO JSON (sin texto alrededor)
-{ "seleccion": [ {"id":"<id EXACTO de la lista>", "angulo":"...", "hook":"\\"...\\""} ] }
+{ "seleccion": [ {"id":"<id EXACTO de la lista>", "nombre":"<nombre TEXTUAL del candidato de ESE id, copiado de la lista>", "empresa":"<empresa TEXTUAL del candidato de ESE id, copiada de la lista>", "angulo":"...", "hook":"\\"...\\""} ] }
 EXACTAMENTE ${pedir} elementos distintos, en orden de prioridad. NADA fuera del objeto JSON.
+Los campos "nombre" y "empresa" son OBLIGATORIOS y van copiados TEXTUAL del candidato de ESE id (re-anclan id→persona en el momento de escribir): escribilos JUSTO ANTES de "angulo"/"hook" para que el ángulo y el hook que sigan sean de ESA persona y NO de otra.
+
+## VERIFICACIÓN FINAL (OBLIGATORIA — antes de devolver el JSON)
+VERIFICÁ, elemento por elemento, que el "nombre" y la "empresa" sean los del id elegido (copiados de la lista, no de otro renglón), que el HOOK EMPIECE con el PRIMER NOMBRE de ESE id, y que el ÁNGULO NOMBRE la EMPRESA de ESE id. Si alguno no cumple, REESCRIBILO antes de cerrar: una card con el hook o el ángulo de OTRA persona/empresa (MEZCLA) quema todo el reporte.
 
 ## JSON VÁLIDO (CRÍTICO — si el JSON no parsea, se pierde todo el trabajo)
 - Dentro de "angulo" y "hook" NO uses comillas dobles (") sin escapar. Si necesitás encomillar una palabra o frase dentro del texto, usá comillas simples ('algo') o ninguna. Las ÚNICAS comillas dobles del hook son las dos que lo envuelven (\\"...\\").
@@ -1187,7 +1250,8 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
     return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}`;
   }).join('\n');
   const _pisoTam = (plan._plan && parseInt(plan._plan.tamano_min||0,10)) || 0;
-  const ctx = `Cliente: ${(cliente&&cliente.empresa)||plan.h1_company||''}. País del cliente (prioritario): ${(plan._plan&&plan._plan.geografia)||''}. Qué ofrece / proof: ${String(plan.proof||plan.lead||'').slice(0,500)}. Función del comprador: ${(plan._plan&&plan._plan.funcion)||''}.${(plan._plan&&plan._plan.comprador_ideal)?` Comprador ideal (debe cumplirlo la empresa de cada card): ${plan._plan.comprador_ideal}.`:''}${_pisoTam>0?` Piso de tamaño del ICP: ${_pisoTam}+ empleados (preferí empresas que lo cumplen; evitá las claramente micro salvo que el lead sea fuerte en los demás ejes).`:''}`;
+  const vertAlta = (plan._plan && Array.isArray(plan._plan.industrias) ? plan._plan.industrias.filter(Boolean) : []);
+  const ctx = `Cliente: ${(cliente&&cliente.empresa)||plan.h1_company||''}. País del cliente (prioritario): ${(plan._plan&&plan._plan.geografia)||''}. Qué ofrece / proof: ${String(plan.proof||plan.lead||'').slice(0,500)}. Función del comprador: ${(plan._plan&&plan._plan.funcion)||''}.${(plan._plan&&plan._plan.comprador_ideal)?` Comprador ideal (debe cumplirlo la empresa de cada card): ${plan._plan.comprador_ideal}.`:''}${vertAlta.length?` Verticales prioridad ALTA (preferí SIEMPRE candidatos de estas; elegí de una Media solo si no hay suficientes buenos de las ALTA): ${vertAlta.join(', ')}.`:''}${_pisoTam>0?` Piso de tamaño del ICP: ${_pisoTam}+ empleados (preferí empresas que lo cumplen; evitá las claramente micro salvo que el lead sea fuerte en los demás ejes).`:''}`;
   const fixBloque = (fixes&&fixes.length) ? `\n\nCORRECCIONES del juez (aplicalas re-eligiendo o reescribiendo):\n- ${fixes.join('\n- ')}` : '';
   const messages = [{ role:'user', content:`${ctx}\n\nLISTA REAL DE CANDIDATOS (elegí de ACÁ, por id EXACTO; los ★ son del país del cliente):\n${lista}${fixBloque}\n\nElegí los ${PEDIR_SELECT} MEJORES en ORDEN de prioridad (el mejor primero), de EMPRESAS distintas y priorizando el país del cliente. Devolvé SOLO el JSON {"seleccion":[...]} con EXACTAMENTE ${PEDIR_SELECT} elementos distintos. El sistema arma el reporte con los primeros ${NUM_CUENTAS} válidos, así que los primeros ${NUM_CUENTAS} tienen que ser tus mejores.` }];
   const data = await callClaude({ model:MODEL_GEN, system:_promptSelect(PEDIR_SELECT, NUM_CUENTAS), messages, tools:[], maxTokens:6000 });
@@ -1294,6 +1358,18 @@ function armarReporte(plan, seleccion, pool, senales){
     }
 
     // --- GUARD ANTI-MEZCLA: el ángulo/hook tienen que ser de ESTA persona/empresa ---
+    // Señal ESPEJO (detección temprana): SELECT ahora copia nombre/empresa del id elegido. Si el nombre
+    // espejo NO matchea el name real del id, es mezcla casi segura (la IA escribió contra otro renglón).
+    if(s.nombre){
+      const espejoN = _norm(s.nombre), nameN = _norm(p.name);
+      const primeroEspejo = espejoN.split(' ')[0] || '';
+      const matchEspejo = (espejoN && nameN && (nameN.includes(espejoN) || espejoN.includes(nameN))) ||
+                          (primeroEspejo.length >= 3 && nameN.includes(primeroEspejo));
+      if(!matchEspejo){
+        if(commit) console.warn(`[SELECT] card DESCARTADA por MEZCLA (nombre espejo "${s.nombre}" no corresponde al id ${p.name})`);
+        return null;
+      }
+    }
     const primerNombre = (_norm(p.name).split(' ')[0]) || '';
     const hookN = _norm(hook), angN = _norm(angulo), empN = _norm(empresa);
     const hookNombra = primerNombre.length >= 3 && hookN.includes(primerNombre);
@@ -1407,6 +1483,51 @@ function _geoIncoherente(data){
   return fuera.length ? { objetivo:[...objetivo], fuera } : null;
 }
 
+// --- COHERENCIA DEL CONTEO DE PAÍSES (determinística) -------------------------
+// Defecto recurrente que se escapa al cliente: el número del stat de países (ej. "4") no coincide con la
+// cantidad de países realmente NOMBRADOS en el título (h1_post) y el ICP "Geografía" (ej. solo 3 listados).
+// DECISIÓN DE PRODUCTO: un mismatch de conteo es COSMÉTICO, no un defecto de lead → NORMALIZAR conservador
+// (auto-corregir el número a la cantidad de países efectivamente nombrados) en vez de retener todo el reporte.
+// NUNCA agrega países: solo baja/ajusta el número del stat a lo que el texto ya nombra. Si no se puede
+// normalizar (no hay stat de países, o el texto no nombra ningún país), devuelve {rechazar:true}.
+// MUTA data.stats in place (ajusta el num del stat de países). Devuelve {ajustado, antes, despues} o null.
+function _paisesIncoherente(data){
+  if(!data || !Array.isArray(data.stats)) return null;
+  // 1) Stat de países: label que contiene "pais"/"país" (normalizado saca acentos). No confundir con "ciudad".
+  const idx = data.stats.findIndex(s => s && /\bpais(es)?\b/.test(_norm(s.label||'')));
+  if(idx < 0) return null;                       // no hay stat de países → nada que normalizar, no juzgamos
+  const stat = data.stats[idx];
+  const m = String(stat.num||'').match(/\d+/);
+  if(!m) return null;                            // el num no es numérico (ej. una ciudad) → no juzgamos
+  const declarado = parseInt(m[0], 10);
+  // 2) Países efectivamente NOMBRADOS en h1_post + ICP "Geografía" (unión, sin duplicar).
+  const nombrados = new Set();
+  for(const p of _paisesDeTexto(data.h1_post)) nombrados.add(p);
+  const icpGeo = (data.icp||[]).find(o => o && /geograf/.test(_norm(o.title||o.titulo||'')));
+  if(icpGeo) for(const p of _paisesDeTexto(icpGeo.desc)) nombrados.add(p);
+  const real = nombrados.size;
+  if(declarado === real) return null;            // coherente, nada que hacer
+  if(real <= 0) return { rechazar:true, declarado, real }; // no podemos normalizar a 0 países nombrados
+  // 3) Normalización conservadora: el stat pasa a la cantidad realmente nombrada (sin tocar el texto, sin
+  //    agregar países). Preserva sufijos como "+" si los hubiera (ej. "4+" → "3+").
+  const sufijo = String(stat.num||'').replace(/^\s*\d+/, '');
+  stat.num = `${real}${sufijo}`;
+  return { ajustado:true, antes:declarado, despues:real, paises:[...nombrados] };
+}
+
+// --- GATE DE CALIDEZ (determinístico) -----------------------------------------
+// El caso que MÁS RÁPIDO quema credibilidad: un reporte donde TODAS las cards son 3er grado / fuera de red
+// (0 cálidas). Bloquea SOLO ese extremo. Configurable por env WARM_MIN (default 1; 0 = desactivado).
+// Devuelve {warm, total, min} si NO apto, o null si pasa.
+function _calidezInsuficiente(data){
+  const min = parseInt(process.env.WARM_MIN || '1', 10);
+  if(min <= 0) return null;                      // gate desactivado
+  const cards = (data && data.cards) || [];
+  if(!cards.length) return null;                 // sin cards, otros gates ya lo manejan
+  const warm = cards.filter(c => /1er|2do/.test(String(c.grado||''))).length;
+  return warm < min ? { warm, total: cards.length, min } : null;
+}
+
 // --- TAMAÑO-COHERENCIA (determinística, análoga a geo) ------------------------
 // Compara el headcount real de cada card final contra el tamano_min del ICP.
 // OPCIÓN B (decisión de producto): el tamaño es señal de VALOR, no de credibilidad. Solo bloquea lo EGREGIO:
@@ -1491,7 +1612,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
         }
         data = fixedData;
         cleanHtml = limpiarHtml(renderReport(data));
-        console.log(`[Job ${jobId}] Re-validando con el juez...`);
+        console.log(`[Job ${jobId}] Re-validando con el juez (re-render incluye normalización de países)...`);
         judgeResult = await runJudge(cleanHtml, null);
       } catch (e) {
         console.warn(`[FIX] Falló, conservo el reporte previo:`, e.message);
@@ -1517,6 +1638,24 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
       console.warn(`[TAM] Incoherencia tamaño (egregio, <25% del piso): piso ${tamMal.tamMin}+ | ${tamMal.fuera.join(' ')}`);
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
         fixes: [`TAMAÑO INCOHERENTE: el ICP pide empresas de ${tamMal.tamMin}+ empleados pero hay cuentas MUY por debajo (menos del 25% del piso, prácticamente un individuo). ${tamMal.fuera.join(' ')} Reemplazá esas cuentas por empresas que cumplan el tamaño del ICP, o ajustá el título/ICP al tamaño real de las cuentas.`].concat(judgeResult.fixes||[]) };
+    }
+    // PAÍSES: normaliza (conservador) el num del stat de países a la cantidad realmente nombrada. Solo rechaza
+    // si no se puede normalizar. Si ajustó, re-renderiza para que el PDF/HTML reflejen el número corregido.
+    const paisesMal = _paisesIncoherente(data);
+    if (paisesMal && paisesMal.ajustado) {
+      console.warn(`[PAISES] Conteo incoherente normalizado: stat ${paisesMal.antes} → ${paisesMal.despues} (países nombrados: ${paisesMal.paises.join(', ')}).`);
+      cleanHtml = limpiarHtml(renderReport(data));
+    } else if (paisesMal && paisesMal.rechazar) {
+      console.warn(`[PAISES] No se pudo normalizar (stat=${paisesMal.declarado}, países nombrados=${paisesMal.real}) → RECHAZADO.`);
+      judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
+        fixes: [`CONTEO DE PAÍSES INCOHERENTE: el stat dice ${paisesMal.declarado} países pero el título y el ICP "Geografía" no nombran ninguno reconocible. Hacé que el número del stat, los países de h1_post y los del ICP "Geografía" sean EXACTAMENTE los mismos.`].concat(judgeResult.fixes||[]) };
+    }
+    // CALIDEZ: bloquea SOLO el extremo (0 cards cálidas, todas 3er grado / fuera de red).
+    const warmMal = _calidezInsuficiente(data);
+    if (warmMal) {
+      console.warn(`[WARM] Calidez insuficiente: ${warmMal.warm}/${warmMal.total} cards cálidas (mínimo ${warmMal.min}) → RECHAZADO.`);
+      judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
+        fixes: [`CALIDEZ INSUFICIENTE: las ${warmMal.total} cuentas son 3er grado / fuera de red (0 cálidas). Un reporte 100% frío quema credibilidad. Priorizá decisores en 1er/2do grado (red cercana) aunque haya que repetir vertical.`].concat(judgeResult.fixes||[]) };
     }
     const aptoEnvio = cardsValidas >= MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO';
     const descartadas = [];
@@ -1676,6 +1815,24 @@ app.post('/generar-reporte', async (req, res) => {
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
         fixes: [`TAMAÑO INCOHERENTE: el ICP pide empresas de ${tamMal.tamMin}+ empleados pero hay cuentas MUY por debajo (menos del 25% del piso, prácticamente un individuo). ${tamMal.fuera.join(' ')} Reemplazá esas cuentas por empresas que cumplan el tamaño del ICP, o ajustá el título/ICP al tamaño real de las cuentas.`].concat(judgeResult.fixes||[]) };
     }
+    // PAÍSES: normaliza (conservador) el num del stat de países a la cantidad realmente nombrada. Solo rechaza
+    // si no se puede normalizar. Si ajustó, re-renderiza para que el PDF/HTML reflejen el número corregido.
+    const paisesMal = _paisesIncoherente(data);
+    if (paisesMal && paisesMal.ajustado) {
+      console.warn(`[PAISES] Conteo incoherente normalizado: stat ${paisesMal.antes} → ${paisesMal.despues} (países nombrados: ${paisesMal.paises.join(', ')}).`);
+      cleanHtml = limpiarHtml(renderReport(data));
+    } else if (paisesMal && paisesMal.rechazar) {
+      console.warn(`[PAISES] No se pudo normalizar (stat=${paisesMal.declarado}, países nombrados=${paisesMal.real}) → RECHAZADO.`);
+      judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
+        fixes: [`CONTEO DE PAÍSES INCOHERENTE: el stat dice ${paisesMal.declarado} países pero el título y el ICP "Geografía" no nombran ninguno reconocible. Hacé que el número del stat, los países de h1_post y los del ICP "Geografía" sean EXACTAMENTE los mismos.`].concat(judgeResult.fixes||[]) };
+    }
+    // CALIDEZ: bloquea SOLO el extremo (0 cards cálidas, todas 3er grado / fuera de red).
+    const warmMal = _calidezInsuficiente(data);
+    if (warmMal) {
+      console.warn(`[WARM] Calidez insuficiente: ${warmMal.warm}/${warmMal.total} cards cálidas (mínimo ${warmMal.min}) → RECHAZADO.`);
+      judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
+        fixes: [`CALIDEZ INSUFICIENTE: las ${warmMal.total} cuentas son 3er grado / fuera de red (0 cálidas). Un reporte 100% frío quema credibilidad. Priorizá decisores en 1er/2do grado (red cercana) aunque haya que repetir vertical.`].concat(judgeResult.fixes||[]) };
+    }
     const aptoEnvio = cardsValidas >= MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO';
     const descartadas = [];
     console.log(aptoEnvio
@@ -1743,5 +1900,6 @@ module.exports = {
   validarPlan, sourceCandidates, armarReporte, verificarLinksData,
   parseReporteJSON, _rankFit, _rankSenioridad, _parseProfile, _sizeBoost,
   _norm, _empresaDeHeadline, _empKey, _slugCos, _degOrdinal, _headlineLimpio, _fechaHoy,
-  _esICsuelto, _icpPideDecisores, _matchFuncion, _warmth
+  _esICsuelto, _icpPideDecisores, _matchFuncion, _warmth, _geoAliasSet,
+  _geoIncoherente, _paisesIncoherente, _calidezInsuficiente, _paisesDeTexto
 };
