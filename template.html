@@ -33,50 +33,42 @@ html,body{background:var(--bg);font-family:var(--font);color:var(--ink);-webkit-
 /* ---------- FOOTER ---------- */
 .page-footer{margin-top:auto; padding-top:12px; border-top:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; font-family:var(--mono); font-size:8px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-4); white-space:nowrap}
 
-/* ---------- RIBBON ---------- */
-.ribbon{display:flex; flex-wrap:nowrap; gap:7px; margin-bottom:14px}
-.chip{font-family:var(--mono); font-size:8px; font-weight:500; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-2); background:var(--panel-2); border:1px solid var(--line); padding:5px 9px; border-radius:6px; white-space:nowrap}
-.chip b{color:var(--ink); font-weight:600}
-
-/* ---------- HERO ---------- */
-.eyebrow{font-family:var(--mono); font-size:9px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-3); margin-bottom:12px}
+/* ---------- IDENTIDAD DE EMPRESA (compacta, secundaria) ---------- */
+.eyebrow{font-family:var(--mono); font-size:9px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-3); margin-bottom:10px}
 h1{font-size:31px; font-weight:700; letter-spacing:-.03em; line-height:1.06; margin-bottom:4px}
 h1 .ac{color:var(--accent)}
 h1.ac{color:var(--accent)}
-.h1-sub{font-size:17px; font-weight:600; letter-spacing:-.01em; line-height:1.2; color:var(--ink); margin-bottom:14px}
-.lead{font-size:11.5px; line-height:1.6; color:var(--ink-2); max-width:165mm}
+.h1-sub{font-size:16px; font-weight:600; letter-spacing:-.01em; line-height:1.2; color:var(--ink); margin-bottom:10px}
+.co-line{font-family:var(--mono); font-size:8.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-3); margin-bottom:13px}
+.co-line b{color:var(--ink-2); font-weight:600}
+.lead{font-size:11px; line-height:1.55; color:var(--ink-2); margin-bottom:6px; max-width:172mm}
 .lead b{color:var(--ink); font-weight:600}
+.respaldo{font-size:10px; line-height:1.5; color:var(--ink-3); margin-bottom:20px; max-width:172mm}
+.respaldo b{color:var(--accent); font-weight:600; font-family:var(--mono); font-size:7.5px; letter-spacing:.12em; text-transform:uppercase}
 
-/* ---------- PROOF ---------- */
-.proof{margin:16px 0 16px; background:var(--ink); color:#E9EBF2; border-radius:var(--radius); padding:14px 18px; display:flex; gap:14px; align-items:flex-start}
-.proof .badge{font-family:var(--mono); font-size:8px; font-weight:600; letter-spacing:.14em; background:var(--accent); color:#fff; padding:4px 8px; border-radius:5px; flex:none; margin-top:1px}
-.proof p{font-size:10.5px; line-height:1.55}
-.proof b{color:#fff; font-weight:600}
-
-/* ---------- STATS ---------- */
-.stats{display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:14px}
-.stat{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:14px 15px}
-.stat .num{font-size:25px; font-weight:700; letter-spacing:-.02em; line-height:1}
+/* ---------- STATS (sin cajas, fila con reglas) ---------- */
+.stats{display:flex; gap:32px; margin-bottom:20px; padding:13px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line)}
+.stat .num{font-size:22px; font-weight:700; letter-spacing:-.02em; line-height:1; color:var(--ink)}
 .stat .num .ac{color:var(--accent)}
-.stat .lbl{font-family:var(--mono); font-size:8px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); margin-top:7px}
+.stat .lbl{font-family:var(--mono); font-size:8px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3); margin-top:6px}
 
 /* ---------- SECTION LABEL ---------- */
-.sec-label{font-family:var(--mono); font-size:8.5px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-3); margin-bottom:11px}
+.sec-label{font-family:var(--mono); font-size:8.5px; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--accent); margin-bottom:11px}
 
-/* ---------- ICP GRID ---------- */
-.icp{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px}
-.icp .card{background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius); padding:12px 14px}
-.icp .ic{width:28px; height:28px; border-radius:8px; background:var(--accent-soft); border:1px solid var(--accent-edge); display:flex; align-items:center; justify-content:center; margin-bottom:7px}
-.icp .ic svg{width:16px; height:16px; fill:none; stroke:var(--accent); stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round}
-.icp h3{font-size:12px; font-weight:600; margin-bottom:5px}
-.icp p{font-size:10px; line-height:1.5; color:var(--ink-2)}
+/* ---------- SEÑALES DE MERCADO (protagonista, sin caja) ---------- */
+/* Números reales del MCP (mercado): el dato pop, en acento, sin caja. */
+.mkt-signals{display:flex; flex-wrap:wrap; gap:30px; margin-bottom:16px}
+.ms-v{font-size:21px; font-weight:700; color:var(--accent); letter-spacing:-.02em; line-height:1}
+.ms-l{font-family:var(--mono); font-size:8px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-3); margin-top:6px; max-width:130px; line-height:1.4}
+.signals{list-style:none; display:flex; flex-direction:column; gap:11px; margin-bottom:20px}
+.signals li{font-size:12.5px; line-height:1.55; color:var(--ink); padding-left:20px; position:relative}
+.signals li::before{content:"→"; position:absolute; left:0; color:var(--accent); font-weight:700}
+.signals b{color:var(--ink); font-weight:600}
 
-/* ---------- CONTEXT ---------- */
-.context{background:var(--accent-soft); border:1px solid var(--accent-edge); border-radius:var(--radius); padding:13px 16px; margin-bottom:14px}
-.context ul{list-style:none; display:flex; flex-direction:column; gap:9px}
-.context li{font-size:10.5px; line-height:1.5; color:var(--ink-2); padding-left:18px; position:relative}
-.context li::before{content:"→"; position:absolute; left:0; color:var(--accent); font-weight:600}
-.context b{color:var(--ink); font-weight:600}
+/* ---------- ICP (sin cajas ni iconos) ---------- */
+.icp{display:grid; grid-template-columns:1fr 1fr; gap:13px 30px; margin-bottom:20px}
+.icp h3{font-family:var(--mono); font-size:8.5px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3); margin-bottom:4px}
+.icp p{font-size:11px; line-height:1.5; color:var(--ink-2)}
 
 /* ---------- HOOKS ---------- */
 .hooks{display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:22px}
@@ -84,34 +76,28 @@ h1.ac{color:var(--accent)}
 .hook .h{font-family:var(--mono); font-size:8.5px; font-weight:600; letter-spacing:.12em; color:var(--accent); margin-bottom:8px}
 .hook p{font-size:10px; line-height:1.5; color:var(--ink-2)}
 
-/* ---------- PRIORITY CHIPS ---------- */
-.prio{display:flex; flex-wrap:wrap; gap:8px}
-.prio .p{font-family:var(--mono); font-size:8px; font-weight:500; letter-spacing:.1em; text-transform:uppercase; padding:6px 11px; border-radius:6px; border:1px solid var(--line); color:var(--ink-3); background:var(--panel-2)}
-.prio .p.alta{color:var(--accent); background:var(--accent-soft); border-color:var(--accent-edge)}
-.prio .p.media{color:var(--ink-2); background:var(--panel-2)}
+/* ---------- POR DÓNDE EMPEZAR (lista, sin chips) ---------- */
+.prio{list-style:none; display:flex; flex-direction:column; gap:7px}
+.prio li{font-size:11px; line-height:1.5; color:var(--ink-2); padding-left:18px; position:relative}
+.prio li::before{content:"·"; position:absolute; left:5px; color:var(--accent); font-weight:700; font-size:14px; top:-1px}
 
-/* ---------- ACCOUNT CARDS (compactas: 3 por hoja) ---------- */
-.cards-head{font-family:var(--mono); font-size:8.5px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-3); margin-bottom:10px}
-.acct{border:1px solid var(--line); border-radius:12px; padding:15px 18px 14px; margin-bottom:0; background:var(--panel); position:relative; overflow:hidden}
-.acct::before{content:""; position:absolute; top:0; left:0; right:0; height:3px; background:var(--accent)}
-.cards-wrap{flex:1; display:flex; flex-direction:column; justify-content:space-between; gap:12px}
-.acct:last-of-type{margin-bottom:0}
-.acct-top{display:flex; align-items:center; justify-content:space-between; margin-bottom:11px}
-.acct-co{font-size:16px; font-weight:700; letter-spacing:-.01em}
-.acct-num{font-family:var(--mono); font-size:8.5px; font-weight:600; letter-spacing:.1em; color:var(--accent); background:var(--accent-soft); border:1px solid var(--accent-edge); padding:5px 10px; border-radius:6px}
-.person{display:flex; gap:13px; align-items:center; padding-bottom:11px; border-bottom:1px solid var(--line); margin-bottom:11px}
-.avatar{width:42px; height:42px; border-radius:50%; flex:none; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:600; font-size:14px; letter-spacing:.02em; background:linear-gradient(135deg,#2B4BFF,#1B2E99)}
-.person .nm{font-size:13.5px; font-weight:600; display:flex; align-items:center; gap:6px}
-.person .role{font-size:10px; color:var(--ink-2); margin:2px 0 6px}
-.person .meta{display:flex; flex-wrap:wrap; gap:7px; align-items:center}
-.person .lk{font-family:var(--mono); font-size:9px; color:var(--accent); text-decoration:none}
-.person .tag{font-family:var(--mono); font-size:8px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3); background:var(--panel-2); border:1px solid var(--line); padding:3px 8px; border-radius:5px}
-.spark{color:var(--accent); font-size:12px}
-.angle-label{font-family:var(--mono); font-size:8px; font-weight:500; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3); margin-bottom:6px}
-.angle{font-size:10px; line-height:1.5; color:var(--ink-2); margin-bottom:11px}
-.hook-box{background:var(--accent-soft); border-left:3px solid var(--accent); border-radius:0 8px 8px 0; padding:10px 13px}
-.hook-box .hl{font-family:var(--mono); font-size:8px; font-weight:500; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); margin-bottom:5px}
-.hook-box p{font-size:10px; line-height:1.45; color:var(--ink-2); font-style:italic}
+/* ---------- ACCOUNT CARDS (señal protagonista · sin recuadros) ---------- */
+.cards-head{font-family:var(--mono); font-size:8.5px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-3); margin-bottom:14px}
+.cards-wrap{flex:1; display:flex; flex-direction:column; justify-content:flex-start; gap:22px}
+.acct{padding-top:22px; border-top:1px solid var(--line)}
+.acct:first-of-type{border-top:none; padding-top:4px}
+/* Cabecera de la card: la persona/empresa son METADATO (chico, apagado). La señal manda. */
+.acct-head{display:flex; gap:11px; align-items:baseline; margin-bottom:11px}
+.acct-num{font-family:var(--mono); font-size:11px; font-weight:600; color:var(--accent); flex:none}
+.acct-id{flex:1}
+.acct-id .nm{font-size:12px; font-weight:600; color:var(--ink); letter-spacing:-.01em}
+.acct-id .role{font-weight:400; color:var(--ink-3)}
+.acct-id .meta{font-family:var(--mono); font-size:9px; letter-spacing:.02em; color:var(--ink-3); margin-top:3px}
+.acct-id .lk{color:var(--accent); text-decoration:none}
+/* La SEÑAL: el protagonista visual de la card. */
+.angle-label{font-family:var(--mono); font-size:8px; font-weight:600; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); margin-bottom:6px}
+.angle{font-size:13px; line-height:1.6; color:var(--ink); font-weight:500; margin-bottom:10px}
+.acct-hook{font-size:11px; line-height:1.5; color:var(--ink-2); font-style:italic; margin:0}
 
 @page{size:A4; margin:0}
 @media print{
@@ -127,21 +113,12 @@ h1.ac{color:var(--accent)}
     <div class="logo-pill"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" alt="IBT"></div>
     <span class="doc-date">{{fecha}}</span>
   </header>
-  <div class="ribbon">
-    <span class="chip">{{ribbon1_label}} · <b>{{ribbon1_value}}</b></span>
-    <span class="chip">{{ribbon2_label}} · <b>{{ribbon2_value}}</b></span>
-    <span class="chip">{{ribbon3_label}} · <b>{{ribbon3_value}}</b></span>
-  </div>
-
   <div class="eyebrow">{{eyebrow}}</div>
   <h1 class="ac">{{h1_company}}</h1>
   <p class="h1-sub">{{h1_post}}</p>
+  <p class="co-line">{{ribbon1_label}} · <b>{{ribbon1_value}}</b>&nbsp;&nbsp;·&nbsp;&nbsp;{{ribbon2_label}} · <b>{{ribbon2_value}}</b>&nbsp;&nbsp;·&nbsp;&nbsp;{{ribbon3_label}} · <b>{{ribbon3_value}}</b></p>
   <p class="lead">{{lead}}</p>
-
-  <div class="proof">
-    <span class="badge">RESPALDO</span>
-    <p>{{proof}}</p>
-  </div>
+  <p class="respaldo"><b>Respaldo</b> {{proof}}</p>
 
   <div class="stats">
     <div class="stat"><div class="num">{{stat1_num}}</div><div class="lbl">{{stat1_label}}</div></div>
@@ -150,30 +127,29 @@ h1.ac{color:var(--accent)}
     <div class="stat"><div class="num">{{stat4_num}}</div><div class="lbl">{{stat4_label}}</div></div>
   </div>
 
+  <div class="sec-label">Señales de mercado</div>
+  {{senales_html}}
+  <ul class="signals">
+    <li>{{context1}}</li>
+    <li>{{context2}}</li>
+    <li>{{context3}}</li>
+  </ul>
+
   <div class="sec-label">Perfil del cliente ideal</div>
   <div class="icp">
-    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20c0-3.6 3-5.5 6.5-5.5s6.5 1.9 6.5 5.5"/></svg></div><h3>{{icp1_title}}</h3><p>{{icp1_desc}}</p></div>
-    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="1"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M9 15h2M13 15h2"/></svg></div><h3>{{icp2_title}}</h3><p>{{icp2_desc}}</p></div>
-    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 21s6.5-5.5 6.5-10.5a6.5 6.5 0 1 0-13 0C5.5 15.5 12 21 12 21z"/><circle cx="12" cy="10.5" r="2.3"/></svg></div><h3>{{icp3_title}}</h3><p>{{icp3_desc}}</p></div>
-    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="M3.5 12.5 12 17l8.5-4.5"/></svg></div><h3>{{icp4_title}}</h3><p>{{icp4_desc}}</p></div>
-  </div>
-
-  <div class="sec-label">Contexto de mercado</div>
-  <div class="context">
-    <ul>
-      <li>{{context1}}</li>
-      <li>{{context2}}</li>
-      <li>{{context3}}</li>
-    </ul>
+    <div class="card"><h3>{{icp1_title}}</h3><p>{{icp1_desc}}</p></div>
+    <div class="card"><h3>{{icp2_title}}</h3><p>{{icp2_desc}}</p></div>
+    <div class="card"><h3>{{icp3_title}}</h3><p>{{icp3_desc}}</p></div>
+    <div class="card"><h3>{{icp4_title}}</h3><p>{{icp4_desc}}</p></div>
   </div>
 
   <div class="sec-label">Por dónde empezar</div>
-  <div class="prio">
-    <span class="p alta">{{prio1}}</span>
-    <span class="p media">{{prio2}}</span>
-    <span class="p">{{prio3}}</span>
-    <span class="p">{{prio4}}</span>
-  </div>
+  <ul class="prio">
+    <li>{{prio1}}</li>
+    <li>{{prio2}}</li>
+    <li>{{prio3}}</li>
+    <li>{{prio4}}</li>
+  </ul>
 
   <footer class="page-footer"><span>Inbound-Tools.com ● Análisis de Mercado · {{empresa}}</span><span>Página 1 / 2</span></footer>
 </section>
@@ -183,60 +159,10 @@ h1.ac{color:var(--accent)}
     <div class="logo-pill"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" alt="IBT"></div>
     <span class="doc-date">{{fecha}}</span>
   </header>
-  <div class="cards-head">Clientes potenciales · 01 — 03</div>
+  <div class="cards-head">{{cards_head}}</div>
 
   <div class="cards-wrap">
-  <article class="acct">
-    <div class="acct-top"><div class="acct-co">{{card1_empresa}}</div><span class="acct-num">N.º 01</span></div>
-    <div class="person">
-      <div class="avatar">{{card1_initials}}</div>
-      <div>
-        <div class="nm">{{card1_nombre}}</div>
-        <div class="role">{{card1_cargo}}</div>
-        <div class="meta">
-          <a class="lk" href="https://www.linkedin.com/in/{{card1_urn}}">{{card1_linktext}}</a>
-          <span class="tag">{{card1_ubicacion}}</span><span class="tag">{{card1_grado}}</span>
-        </div>
-      </div>
-    </div>
-    <div class="angle-label">Por qué esta empresa</div>
-    <p class="angle">{{card1_angulo}}</p>
-    <div class="hook-box"><div class="hl">Mensaje sugerido</div><p>{{card1_hook}}</p></div>
-  </article>
-  <article class="acct">
-    <div class="acct-top"><div class="acct-co">{{card2_empresa}}</div><span class="acct-num">N.º 02</span></div>
-    <div class="person">
-      <div class="avatar">{{card2_initials}}</div>
-      <div>
-        <div class="nm">{{card2_nombre}}</div>
-        <div class="role">{{card2_cargo}}</div>
-        <div class="meta">
-          <a class="lk" href="https://www.linkedin.com/in/{{card2_urn}}">{{card2_linktext}}</a>
-          <span class="tag">{{card2_ubicacion}}</span><span class="tag">{{card2_grado}}</span>
-        </div>
-      </div>
-    </div>
-    <div class="angle-label">Por qué esta empresa</div>
-    <p class="angle">{{card2_angulo}}</p>
-    <div class="hook-box"><div class="hl">Mensaje sugerido</div><p>{{card2_hook}}</p></div>
-  </article>
-  <article class="acct">
-    <div class="acct-top"><div class="acct-co">{{card3_empresa}}</div><span class="acct-num">N.º 03</span></div>
-    <div class="person">
-      <div class="avatar">{{card3_initials}}</div>
-      <div>
-        <div class="nm">{{card3_nombre}}</div>
-        <div class="role">{{card3_cargo}}</div>
-        <div class="meta">
-          <a class="lk" href="https://www.linkedin.com/in/{{card3_urn}}">{{card3_linktext}}</a>
-          <span class="tag">{{card3_ubicacion}}</span><span class="tag">{{card3_grado}}</span>
-        </div>
-      </div>
-    </div>
-    <div class="angle-label">Por qué esta empresa</div>
-    <p class="angle">{{card3_angulo}}</p>
-    <div class="hook-box"><div class="hl">Mensaje sugerido</div><p>{{card3_hook}}</p></div>
-  </article>
+{{cards_html}}
   </div>
 
   <footer class="page-footer"><span>Inbound-Tools.com ● Análisis de Mercado · {{empresa}}</span><span>Página 2 / 2</span></footer>

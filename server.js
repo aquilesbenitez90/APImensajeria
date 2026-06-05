@@ -488,6 +488,29 @@ async function contarPaginas(pdfBuffer) {
 function _empresaDeHeadline(txt){let m=(txt||'').match(/@\s*([^·•|(\n]+)/);if(!m)m=(txt||'').match(/\bat\s+([^·•|(\n]+)/i);const e=m?m[1].trim():'';return e==='?'?'':e;}
 function _empresaDeLookup(txt){const m=(txt||'').match(/Company:\s*(.+?)\s*(?:\[|—|\u2014|,|$)/i);return m?m[1].trim():'';}
 function _headcountDe(txt){const m=(txt||'').match(/([\d][\d.,]*)\s*employees/i);return m?(parseInt(m[1].replace(/[.,]/g,''),10)||null):null;}
+// SEÑALES: intenta leer un TOTAL agregado del texto crudo de search_sales_navigator_filtered.
+// El gateway de claude.ai expone paging.total_count en JSON, pero el endpoint /api/mcp del server
+// devuelve TEXTO (otra serialización). NO está garantizado que el texto traiga el total; por eso esto
+// es BEST-EFFORT: cubre formatos plausibles ("total: N", "total_count: N", "N results/resultados/matches")
+// y devuelve null si no encuentra un total fiable. NUNCA fabrica el número. OJO: el grado en el filtro de
+// people trae un total_count basura (ver nota de memoria), por eso solo se usa el total en búsquedas SIN
+// filtro de grado (las que hace el server). Si null → el caller cae a un label honesto sobre lo que SÍ tiene.
+function _totalDe(txt){
+  const s = String(txt||'');
+  let m = s.match(/\btotal[_\s]?count\b\s*[:=]\s*([\d][\d.,]*)/i)
+       || s.match(/\btotal\b\s*[:=]\s*([\d][\d.,]*)/i)
+       || s.match(/([\d][\d.,]*)\s*(?:results?|resultados?|matches|coincidencias|empresas|companies|personas|people)\s*(?:total|en total|encontrad)/i);
+  if(!m) return null;
+  const n = parseInt(String(m[1]).replace(/[.,]/g,''),10);
+  return (Number.isFinite(n) && n>0) ? n : null;
+}
+// Formatea un total grande a algo legible en es-LA (13024 -> "≈13.000"). Conserva exactitud para chicos.
+function _fmtAprox(n){
+  if(n==null) return '';
+  if(n < 1000) return String(n);
+  const r = n>=10000 ? Math.round(n/1000)*1000 : Math.round(n/100)*100;
+  return '≈' + r.toLocaleString('es-MX');
+}
 function _tier(h){if(h==null)return null;if(h<10)return'micro';if(h<50)return'chica';if(h<500)return'media';if(h<5000)return'grande';return'enterprise';}
 function _esEmailGratuito(d){return /(gmail|yahoo|hotmail|outlook|icloud|live|aol|proton|protonmail|gmx)\./i.test((d||'').trim());}
 function _mismaEmpresa(a,b){a=_norm(a);b=_norm(b);if(!a||!b)return false;if(a===b||a.includes(b)||b.includes(a))return true;const ta=new Set(a.split(' ').filter(w=>w.length>2));return b.split(' ').filter(w=>w.length>2).some(w=>ta.has(w));}
@@ -695,13 +718,15 @@ async function sourceCandidates(plan, cliente){
 
   // SIN filtro de grado en el search (no es confiable: 1st->0, 2nd mezcla 3ro). Traemos por FIT
   // y leemos el grado real (DISTANCE) de cada perfil; el grado se prioriza en el RANKING, no en el filtro.
+  // SEÑALES: guardamos el último texto crudo de una búsqueda de people (para leer un total si lo trae el MCP).
+  let txtPeopleSenal = '';
   async function buscarUno(locIds, conIndustria, kwUnico){
     const f={ category:'people', profilesLimit:50 };
     if(kwUnico) f.keywords = kwUnico;                       // UNA sola palabra/término (multi-palabra da 0)
     if(locIds && locIds.length) f.location={ include: locIds };
     if(fnId) f.function={ include:[fnId] };
     if(conIndustria && indIds.length) f.industry={ include: indIds };
-    try{ return _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{ return []; }
+    try{ const txt = String(await callMCP('search_sales_navigator_filtered', f)); if(!txtPeopleSenal) txtPeopleSenal = txt; return _parsePeople(txt); }catch{ return []; }
   }
   // Une los resultados de buscar cada término de rol por separado (dedupe por id), en PARALELO con tope CONC.
   const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '4', 10);
@@ -745,12 +770,15 @@ async function sourceCandidates(plan, cliente){
   // señal. Las cuentas-ancla sesgan el ranking hacia clientes reales, no hacia ICs sueltos de cualquier empresa.
   const hcMin = tamMin > 0 ? Math.max(11, Math.round(tamMin*0.5)) : 11;
   let cuentas = [];
+  // SEÑALES (datos reales del MCP, NUNCA inventados): nos guardamos crudos/conteos para armarlas abajo.
+  let txtCoSenal = '', txtCoBase = '';   // texto crudo de la búsqueda de empresas (para leer un total si lo trae)
+  let nConSenal = 0;                      // cuántas empresas-ancla con crecimiento de headcount (señal de actividad)
   if(indIds.length && geoLocOrNull){
     const baseCo = { category:'companies', profilesLimit:25, location:{include:geoLocOrNull}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
-    try{ cuentas = _parseCompanies(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); }
+    try{ txtCoSenal = String(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); cuentas = _parseCompanies(txtCoSenal); nConSenal = cuentas.length; }
     catch(e){ console.warn('[SOURCE] companies (con señal) falló:', e.message); }
     if(cuentas.length < NUM_CUENTAS*2){   // la señal recortó demasiado para este vertical: recall sin señal
-      try{ const more=_parseCompanies(await callMCP('search_sales_navigator_filtered', baseCo)); for(const c of more) if(!cuentas.some(x=>x.id===c.id)) cuentas.push(c); }
+      try{ txtCoBase = String(await callMCP('search_sales_navigator_filtered', baseCo)); const more=_parseCompanies(txtCoBase); for(const c of more) if(!cuentas.some(x=>x.id===c.id)) cuentas.push(c); }
       catch(e){ console.warn('[SOURCE] companies (sin señal) falló:', e.message); }
     }
   } else if(geoLocOrNull){
@@ -895,7 +923,50 @@ async function sourceCandidates(plan, cliente){
 
   const n2 = final.filter(c=>c.dist===2).length, nAncla = final.filter(c=>c.ancla).length;
   console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | a la IA ${final.length} (ancla=${nAncla}, 2do=${n2}, terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], piso<${PISO}).`);
-  return final;
+
+  // ===== SEÑALES DE MERCADO (datos REALES del MCP, jamás generados por IA) =====
+  // Norte: "más señales de mercado" sin reabrir el agujero de invención. Cada ítem es un dato que sale
+  // textual de una llamada MCP que ya hicimos. Si una señal no se puede obtener REAL, NO se agrega.
+  // El "total de mercado" exacto solo existe si el TEXTO del MCP expone un total agregado (paging.total_count
+  // del gateway NO viaja en el texto del endpoint /api/mcp); cuando no está, caemos a un label HONESTO sobre
+  // lo que SÍ contamos (empresas-ancla / decisores identificados), nunca a "el mercado total".
+  const senales = [];
+  const vertical = (Array.isArray(icp.industrias) && icp.industrias[0]) ? String(icp.industrias[0]).trim() : '';
+  const enGeo = geografia ? ` en ${geografia}` : '';
+  const delVert = vertical ? ` del sector ${vertical.toLowerCase()}` : (funcion ? ` del segmento ${String(funcion).toLowerCase()}` : '');
+
+  // 1) TAMAÑO DE MERCADO — total real de empresas del vertical en la geo SOLO si el texto lo trae; si no,
+  //    label honesto con la cantidad de empresas-ancla que SÍ identificamos (no afirmamos el total del mercado).
+  const totalCo = _totalDe(txtCoBase) || _totalDe(txtCoSenal);
+  if(totalCo && totalCo >= cuentas.length){
+    senales.push({ label:`Empresas${delVert}${enGeo}`, value: _fmtAprox(totalCo) });
+  } else if(cuentas.length){
+    senales.push({ label:`Empresas-ancla identificadas${delVert}${enGeo}`, value: String(cuentas.length) });
+  }
+
+  // 2) SEÑAL DE ACTIVIDAD / COMPRA — empresas-ancla con crecimiento de headcount (pasada A con headcountGrowth:{min:8}).
+  //    Es un conteo real de empresas "en movimiento" (señal honesta de que pueden estar comprando/contratando).
+  if(nConSenal > 0){
+    senales.push({ label:`Empresas${delVert} con crecimiento de plantilla`, value: String(nConSenal) });
+  }
+
+  // 3) POOL DE DECISORES — total real de la función objetivo en el vertical SOLO si el texto trae el total;
+  //    si no, label honesto con los decisores reales que identificamos (pool deduplicado, sin filtro de grado).
+  const totalPe = _totalDe(txtPeopleSenal);
+  if(totalPe && totalPe >= out.length){
+    senales.push({ label:`Decisores de ${funcion}${enGeo}`, value: _fmtAprox(totalPe) });
+  } else if(out.length){
+    senales.push({ label:`Decisores de ${funcion} identificados${enGeo}`, value: String(out.length) });
+  }
+
+  // 4) CERCANÍA DE RED — decisores en 2do grado dentro del pool (calidez = mejor predictor de conversión). Real.
+  const n2pool = out.filter(c=>c.dist===2).length;
+  if(n2pool > 0 && senales.length < 5){
+    senales.push({ label:`Decisores a un contacto de distancia (2do grado)`, value: String(n2pool) });
+  }
+
+  console.log(`[SOURCE] señales (${senales.length}): ${senales.map(s=>`${s.label}=${s.value}`).join(' | ') || '-'} | totalCo=${totalCo??'(texto sin total)'} totalPe=${totalPe??'(texto sin total)'}`);
+  return { pool: final, senales: senales.slice(0, 5) };
 }
 
 // Wrapper con retry para absorber HIPOS TRANSITORIOS del MCP: vimos casos (ej. NOCNOK) donde TODAS las
@@ -905,13 +976,13 @@ async function sourceCandidates(plan, cliente){
 async function sourceConRetry(plan, cliente){
   const reintentos = parseInt(process.env.SOURCE_RETRY_ON_EMPTY || '1', 10);
   const delay = parseInt(process.env.SOURCE_RETRY_DELAY_MS || '6000', 10);
-  let pool = await sourceCandidates(plan, cliente);
-  for(let i=0; i<reintentos && (!pool || !pool.length); i++){
+  let res = await sourceCandidates(plan, cliente);
+  for(let i=0; i<reintentos && (!res || !res.pool || !res.pool.length); i++){
     console.warn(`[SOURCE] pool vacío, reintento en ${delay}ms (posible hipo transitorio del MCP)...`);
     await new Promise(r => setTimeout(r, delay));
-    pool = await sourceCandidates(plan, cliente);
+    res = await sourceCandidates(plan, cliente);
   }
-  return pool || [];
+  return { pool: (res && res.pool) || [], senales: (res && res.senales) || [] };
 }
 
 // FASE 1 — IA: research + ICP + página 1. Prompt parametrizado por N.
@@ -1125,7 +1196,7 @@ function _rolRelevante(cargo, titulos){
   return jefes.some(j=>c.includes(j));
 }
 
-function armarReporte(plan, seleccion, pool){
+function armarReporte(plan, seleccion, pool, senales){
   const titulos = (plan._plan && plan._plan.titulos_objetivo) || [];
   const byId = new Map(pool.map(p=>[p.id, p]));
   const cards=[]; const usados=new Set(); const usadasEmp=new Set();
@@ -1179,7 +1250,10 @@ function armarReporte(plan, seleccion, pool){
   if(Array.isArray(base.apertura))    base.apertura    = base.apertura.map(_limpia);
   if(Array.isArray(base.prioridades)) base.prioridades = base.prioridades.map(_limpia);
   if(Array.isArray(base.icp))         base.icp         = base.icp.map(o => (o && typeof o.desc==='string') ? {...o, desc:_limpia(o.desc)} : o);
-  return { ...base, cards };
+  // SEÑALES DE MERCADO: datos REALES del MCP (sourceCandidates), no generados por IA. Se pegan tal cual.
+  // Si el sourcing no logró ninguna señal real, queda [] (el template/render decide cómo mostrarlo).
+  const senalesReales = Array.isArray(senales) ? senales.filter(s => s && s.label && (s.value!=null && String(s.value).trim()!=='')) : [];
+  return { ...base, cards, senales: senalesReales };
 }
 
 function _cardCompleta(c){
@@ -1249,14 +1323,14 @@ async function _tamanoIncoherente(data, plan){
   return fuera.length ? { tamMin, fuera } : null;
 }
 
-async function seleccionarConRetry({ cliente, plan, pool, fixes }){
+async function seleccionarConRetry({ cliente, plan, pool, fixes, senales }){
   const MIN = parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10);
   const MAX = parseInt(process.env.SELECT_MAX_TRIES || '3', 10);
   let best=null, bestN=-1;
   for(let i=1;i<=MAX;i++){
     const extra = i>1 ? [`INTENTO ${i}: el intento previo no llegó a ${MIN} cuentas completas. Devolvé ${PEDIR_SELECT} ids EXACTOS de la lista (copiá el id tal cual), todos distintos, de EMPRESAS distintas y priorizando el país del cliente, cada uno con empresa real + ángulo + hook.`] : [];
     const seleccion = await runSelectWrite({ cliente, plan, pool, fixes: (fixes||[]).concat(extra) });
-    const data = armarReporte(plan, seleccion, pool);
+    const data = armarReporte(plan, seleccion, pool, senales);
     const n = _cuentaCompletas(data);
     if(n > bestN){ best=data; bestN=n; }
     if(n >= MIN){ if(i>1) console.log(`[SELECT] OK en intento ${i}: ${n} cards completas.`); return data; }
@@ -1285,9 +1359,9 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
 
     const fechaHoy = _fechaHoy();
     const plan = await runPlan({ empresa: empresaFinal, dominio, email, nombre, cliente, fechaHoy });
-    const pool = await sourceConRetry(plan, cliente);
+    const { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) throw new Error(`Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.`);
-    let data = await seleccionarConRetry({ cliente, plan, pool });
+    let data = await seleccionarConRetry({ cliente, plan, pool, senales });
 
     let cleanHtml = limpiarHtml(renderReport(data));
     if (!cleanHtml) throw new Error('No se pudo renderizar el reporte');
@@ -1301,7 +1375,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
     for (let intento = 1; intento <= MAX_FIX && judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0; intento++) {
       console.log(`[Job ${jobId}] Juez rechazó ${judgeResult.score}/8 — fix ${intento}/${MAX_FIX}...`);
       try {
-        const fixedData = await seleccionarConRetry({ cliente, plan, pool, fixes: judgeResult.fixes });
+        const fixedData = await seleccionarConRetry({ cliente, plan, pool, fixes: judgeResult.fixes, senales });
         if (_cuentaCompletas(fixedData) < _cuentaCompletas(data)) {
           console.warn(`[FIX] el fix dio menos cards completas — conservo el previo y corto.`);
           break;
@@ -1445,9 +1519,9 @@ app.post('/generar-reporte', async (req, res) => {
     const empresaFinal = cliente.empresa || empresa || dominio;
     const fechaHoy = _fechaHoy();
     const plan = await runPlan({ empresa: empresaFinal, dominio, email, nombre: nombre || '', cliente, fechaHoy });
-    const pool = await sourceConRetry(plan, cliente);
+    const { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) return res.status(422).json({ error: `Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.` });
-    let data = await seleccionarConRetry({ cliente, plan, pool });
+    let data = await seleccionarConRetry({ cliente, plan, pool, senales });
 
     let cleanHtml = limpiarHtml(renderReport(data));
     if (!cleanHtml) return res.status(500).json({ error: 'No se pudo renderizar el reporte' });
@@ -1459,7 +1533,7 @@ app.post('/generar-reporte', async (req, res) => {
     const MAX_FIX = parseInt(process.env.MAX_FIX_ITERS || '1', 10);
     for (let intento = 1; intento <= MAX_FIX && judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0; intento++) {
       try {
-        const fixedData = await seleccionarConRetry({ cliente, plan, pool, fixes: judgeResult.fixes });
+        const fixedData = await seleccionarConRetry({ cliente, plan, pool, fixes: judgeResult.fixes, senales });
         if (_cuentaCompletas(fixedData) < _cuentaCompletas(data)) {
           console.warn(`[FIX] el fix dio menos cards completas — conservo el previo y corto.`);
           break;

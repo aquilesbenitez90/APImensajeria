@@ -55,6 +55,34 @@ function _isOpaque(s) {
   return /^AC[ow]AA[A-Za-z0-9_-]{6,}$/i.test(String(s || ''));
 }
 
+// Genera el <article> de UNA card. Las cards se renderizan por código (NO por la IA) desde
+// data.cards, así el reporte se adapta a 1, 2 o 3 cuentas sin recuadros vacíos. La estructura
+// HTML es idéntica a la que tenía el template fijo, para no cambiar el diseño de un reporte de 3.
+function _cardArticle(c, i) {
+  c = c || {};
+  const n = i + 1;
+  const num = String(n).padStart(2, '0');
+  const urn  = String(c.urn  || '').replace(/[​-‍﻿­\s]/g, '');
+  const slug = String(c.slug || '').replace(/[​-‍﻿­\s]/g, '');
+  const href = urn || slug;
+  const vis = (slug && !_isOpaque(slug)) ? slug : '';
+  const linktext = vis ? ('linkedin.com/in/' + vis) : 'Ver perfil en LinkedIn ↗';
+  // Empresa + ubicación + grado = METADATO (la persona/empresa van chicas; la SEÑAL manda).
+  const meta = [c.empresa, c.ubicacion, c.grado].map(x => String(x || '').trim()).filter(Boolean).map(_esc).join(' · ');
+  return `  <article class="acct">
+    <div class="acct-head">
+      <span class="acct-num">${num}</span>
+      <div class="acct-id">
+        <div class="nm">${_esc(c.nombre)} <span class="role">· ${_esc(c.cargo)}</span></div>
+        <div class="meta">${meta}${meta ? ' · ' : ''}<a class="lk" href="https://www.linkedin.com/in/${_esc(href)}">${_esc(linktext)}</a></div>
+      </div>
+    </div>
+    <div class="angle-label">Por qué ahora</div>
+    <p class="angle">${_esc(c.angulo)}</p>
+    <p class="acct-hook">→ ${_esc(c.hook)}</p>
+  </article>`;
+}
+
 function flatten(data) {
   const f = {};
   const scalars = ['empresa', 'fecha', 'eyebrow', 'h1_pre', 'h1_company', 'h1_post', 'lead', 'proof'];
@@ -89,6 +117,15 @@ function flatten(data) {
   return f;
 }
 
+// Señales de mercado REALES (de sourceCandidates/MCP, no IA): fila de número + etiqueta.
+// Si no hay señales, devuelve '' (no rompe; queda solo el contexto cualitativo).
+function _senalesHtml(senales) {
+  const arr = Array.isArray(senales) ? senales.filter(s => s && s.label && String(s.value == null ? '' : s.value).trim()) : [];
+  if (!arr.length) return '';
+  const items = arr.map(s => `    <div class="ms"><div class="ms-v">${_esc(s.value)}</div><div class="ms-l">${_esc(s.label)}</div></div>`).join('\n');
+  return `  <div class="mkt-signals">\n${items}\n  </div>`;
+}
+
 function renderReport(data, templatePath) {
   templatePath = templatePath || path.join(__dirname, 'template.html');
   let html = fs.readFileSync(templatePath, 'utf8');
@@ -96,6 +133,18 @@ function renderReport(data, templatePath) {
   for (const k of Object.keys(flat)) {
     html = html.split('{{' + k + '}}').join(_esc(flat[k]));
   }
+  // Cards por código (NO por la IA): se generan desde data.cards, así el reporte se adapta a 1, 2 o 3
+  // cuentas sin dejar recuadros vacíos. cards_html va CRUDO (es HTML, no se escapa).
+  const cards = Array.isArray(data.cards) ? data.cards : [];
+  const cardsHtml = cards.map(_cardArticle).join('\n');
+  const cardsHead = cards.length > 1
+    ? ('Clientes potenciales · 01 — ' + String(cards.length).padStart(2, '0'))
+    : 'Cliente potencial · 01';
+  html = html.split('{{cards_html}}').join(cardsHtml);
+  html = html.split('{{cards_head}}').join(_esc(cardsHead));
+  // Señales de mercado reales (inyección CRUDA, es HTML). Vacío si no hay señales.
+  html = html.split('{{senales_html}}').join(_senalesHtml(data.senales));
+
   // Logo del repo: pisa el base64 embebido en TODAS las páginas (flag g) si el archivo existe.
   const logo = _logoDataUri();
   if (logo) html = html.replace(/src="data:image\/png;base64,[A-Za-z0-9+/=]+"/g, () => 'src="' + logo + '"');
