@@ -42,6 +42,12 @@ const path = require('path');
 const MODEL_GEN = 'claude-sonnet-4-6';
 const MODEL_JUDGE = 'claude-sonnet-4-6';
 
+// Temperatura del JUEZ: baja = veredicto consistente (mismo reporte → mismo veredicto).
+// El juez corría a la temperatura por defecto (1.0), lo que disparaba la varianza
+// APROBADO↔RECHAZADO entre corridas idénticas. 0 = lo más determinístico. Configurable por env.
+const _tempEnv = (v, d) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
+const TEMP_JUDGE = _tempEnv(process.env.TEMP_JUDGE, 0);
+
 // Cantidad de cuentas del reporte. Configurable por env.
 const NUM_CUENTAS = parseInt(process.env.NUM_CUENTAS || '3', 10);
 // Cuántas le pedimos a la IA: sobre-generamos para tener margen tras dedupe (persona + empresa).
@@ -271,13 +277,15 @@ APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concret
 // ---------------------------------------------------------------------------
 // Llamadas a Claude — CON PROMPT CACHING + logging de tokens
 // ---------------------------------------------------------------------------
-async function callClaude({ model, system, messages, tools = [], stopSequences = [], maxTokens = 16000 }) {
+async function callClaude({ model, system, messages, tools = [], stopSequences = [], maxTokens = 16000, temperature }) {
   const body = {
     model,
     max_tokens: maxTokens,
     system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
     messages
   };
+  // Solo se setea si se pasa explícitamente; las llamadas que no la pasan quedan en el default del modelo.
+  if (typeof temperature === 'number') body.temperature = temperature;
 
   if (tools.length > 0) {
     const cachedTools = tools.map((t, i) => (i === tools.length - 1) ? { ...t, cache_control: { type: 'ephemeral' } } : t);
@@ -387,7 +395,8 @@ async function runJudge(html, pageCount) {
       role: 'user',
       content: `Cuentas esperadas: ${NUM_CUENTAS}\nPáginas esperadas: ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}\nPáginas del PDF renderizado: ${pageCount}\n\nHTML del reporte:\n${htmlLite}`
     }],
-    maxTokens: 4000
+    maxTokens: 4000,
+    temperature: TEMP_JUDGE
   });
 
   const raw = data.content.find(b => b.type === 'text')?.text || '';
@@ -924,6 +933,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - AÑO DE FUNDACIÓN (cuidado especial): es un dato que suele estar ambiguo o contradictorio entre fuentes. Ponelo SOLO si una fuente autoritativa y específica lo confirma (la página propia del cliente o su perfil de Endeavor/Crunchbase). Si las fuentes que ves en web_search NO coinciden, o si solo lo viste en directorios genéricos, NO lo afirmes: omití el stat de año y usá otro verificable en su lugar (países de operación, ciudades de cobertura, año de un hito real como un premio o reconocimiento, la cantidad ${N} de cuentas). Nunca elijas "el primero que aparezca": si el cliente tiene un reconocimiento (ej. Endeavor) con un año, ese año es más confiable que un directorio.
 - NOMBRES DE TERCEROS (CRÍTICO para la credibilidad): PROHIBIDO nombrar a una empresa específica como cliente, aliado o socio del cliente (ej. "trabaja con X", "X es cliente", "(cliente verificado)") salvo que web_search lo confirme EXPLÍCITAMENTE en una fuente. Si querés ilustrar el canal o el mercado, hacelo en GENÉRICO ("retailers de mejoramiento del hogar", "aseguradoras con línea hogar") SIN nombre propio y SIN la palabra "verificado". Un nombre de tercero inventado quema el reporte si el prospecto lo chequea.
 - El ICP card "Rol del decisor" y el bloque _plan.funcion deben describir al MISMO comprador.
+- COMPRADOR IDEAL (_plan.comprador_ideal, CRÍTICO para el fit de comprador): redactá en 1-2 oraciones QUÉ TIENE QUE SER CIERTO de una EMPRESA para que compre, revenda o aloje el producto del cliente, como un test de INCLUSIÓN y EXCLUSIÓN derivado del research que ya hiciste. No basta con compartir vertical: describí el mecanismo de compra real (ej. para una marca de joyería que vende vía corners, INCLUYE "retailers y marcas que operan tiendas/corners propios donde colocar el producto" y EXCLUYE "casas de marcas que licencian a terceros o grupos que no alojan marcas externas"). REGLA ANTI FALSO NEGATIVO: si el research es pobre o dudás, redactá el comprador_ideal de forma INCLUSIVA (qué empresas SÍ compran) y agregá el criterio de EXCLUSIÓN SOLO cuando el research lo respalde; nunca inventes una exclusión que deje fuera compradores legítimos. Español neutro, sin guiones.
 - TÍTULO (H1): el CLIENTE va PRIMERO y resaltado. h1_pre = "" (vacío); h1_company = nombre del cliente (lo resaltado, va primero); h1_post = "${N} clientes potenciales en [País o región]" (es un SUBTÍTULO que va DEBAJO del nombre; SIN "·" ni guion al principio). PROHIBIDO "para escalar".
 - IDIOMA: TODO en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.
 - SIN GUIONES (importante): NUNCA uses guiones largos (—) ni guiones (-) como conectores o para incisos, en NINGÚN texto (lead, proof, context, apertura, icp, prioridades). Reemplazalos por comas, paréntesis o dos puntos. Ej: en vez de "servicios técnicos —plomería, electricidad— con cobertura", escribí "servicios técnicos (plomería, electricidad) con cobertura". El texto tiene que sonar humano, no de IA.
@@ -957,7 +967,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "context": [ "bullet 1 (corto)", "bullet 2 (corto)", "bullet 3 (corto)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
   "prioridades": [ "Alta: ...", "Media: ...", "...", "..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA donde se COMPRA/revende el producto, ej: Seguros, Comercio al por menor, Inmobiliario, Administración de propiedades, Banca (evitá industriales amplias tipo Construcción/Manufactura)"], "competidores": ["NOMBRES de empresas competidoras directas a EXCLUIR (que venden lo mismo que el cliente), ej: Iké Asistencia, Asissprex"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA el vertical donde el cliente vende"], "tamano_min": 200 }
+  "_plan": { "funcion": "función del comprador en 1-2 palabras", "comprador_ideal": "1-2 oraciones: QUÉ TIENE QUE SER CIERTO de una empresa para que compre/revenda/aloje lo del cliente, como test de INCLUSIÓN y EXCLUSIÓN derivado del research (ej: 'Compran retailers y marcas que operan tiendas/corners propios donde colocar el producto; NO casas de marcas que licencian a terceros ni grupos que no alojan marcas externas'). Ante research pobre, redactalo INCLUSIVO y agregá la exclusión SOLO si el research la respalda", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA donde se COMPRA/revende el producto, ej: Seguros, Comercio al por menor, Inmobiliario, Administración de propiedades, Banca (evitá industriales amplias tipo Construcción/Manufactura)"], "competidores": ["NOMBRES de empresas competidoras directas a EXCLUIR (que venden lo mismo que el cliente), ej: Iké Asistencia, Asissprex"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA el vertical donde el cliente vende"], "tamano_min": 200 }
 }
 CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
@@ -991,7 +1001,7 @@ function _promptSelect(pedir, usar){ return `# IBT GTM — Fase SELECT (elegir +
 Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo textual, empresa, país y grado de conexión) y el contexto del cliente. Elegís los ${pedir} MEJORES decisores EN ORDEN de prioridad (el mejor primero) y escribís, para cada uno, un ángulo y un hook. El sistema usa los primeros ${usar} válidos.
 
 ## Cómo elegir (en este orden)
-1. FIT de función (LO MÁS IMPORTANTE): el cargo tiene que ser CLARAMENTE del rol que compra lo del cliente. PROHIBIDO elegir gente de OTRA área que la del comprador: si el comprador es de Operaciones/Facilities/Mantenimiento/Administración, NO elijas a nadie de Marketing/Mercadeo/Ventas/Comercial/RR.HH./Finanzas, POR MÁS que la empresa sea una marca top. Un cargo suelto sin función clara ("Mercadeo", "Analista", "Coordinador" a secas) NO sirve. Un "CEO/Dueño" de empresa chica sí sirve porque ahí decide. MEJOR devolver MENOS cuentas (o repetir vertical) que UNA sola de función equivocada: una cuenta mal apuntada quema todo el reporte.
+1. FIT de función Y de empresa (LO MÁS IMPORTANTE): el FIT no es solo el cargo. (a) FIT de función: el cargo tiene que ser CLARAMENTE del rol que compra lo del cliente. PROHIBIDO elegir gente de OTRA área que la del comprador: si el comprador es de Operaciones/Facilities/Mantenimiento/Administración, NO elijas a nadie de Marketing/Mercadeo/Ventas/Comercial/RR.HH./Finanzas, POR MÁS que la empresa sea una marca top. Un cargo suelto sin función clara ("Mercadeo", "Analista", "Coordinador" a secas) NO sirve. Un "CEO/Dueño" de empresa chica sí sirve porque ahí decide. (b) FIT de empresa (comprador ideal): la EMPRESA de la card tiene que pasar el test de "Comprador ideal" del contexto, es decir, ser realmente un comprador/canal del producto, no solo compartir vertical. Preguntate: ¿esta empresa COMPRA, REVENDE o ALOJA lo del cliente, o solo está en el mismo rubro? Si NO podés determinar que la empresa pasa el test del comprador ideal, PREFERÍ otra empresa que SÍ lo pase. Es PREFERENCIAL, no un rechazo duro: si no hay alternativas mejores en la lista, podés igual elegirla; no vacíes el pool por esto. MEJOR devolver MENOS cuentas (o repetir vertical) que UNA sola de función o empresa equivocada: una cuenta mal apuntada quema todo el reporte.
 2. PAÍS: preferí candidatos del PAÍS DEL CLIENTE (van marcados con ★ y vienen primero en la lista). Elegí de otro país de LatAm SOLO si no hay suficientes buenos del país del cliente. NUNCA elijas a alguien de un país donde el cliente no puede prestar el servicio.
 3. Decisor real: nada de analistas, trainees ni juniors.
 4. Empresa ANCLA con fit de ICP: usá los "~N empleados" que te muestro para juzgar el TAMAÑO. Marca grande y conocida emociona; startup desconocida de 8 personas no. Pero si el ICP son PyMEs, una empresa enorme NO sirve aunque sea famosa: priorizá el FIT real. TAMAÑO (con matiz): a igual fit de función, país y vertical, PREFERÍ las empresas que cumplen el piso de tamaño del ICP por encima de las más chicas. EVITÁ las claramente micro (prácticamente un individuo, ej. 1 a 4 empleados cuando el ICP pide empresas/agencias con equipo) SIEMPRE QUE haya alternativas mejores on-vertical en la lista. PERO el tamaño NO es excluyente: un lead fuerte en los demás ejes (país correcto, rol claramente decisor, on-vertical, contacto cálido) en una empresa SOLO un poco por debajo del piso SÍ sirve y se puede elegir. No descartes un buen decisor por quedar apenas corto de tamaño; descartá solo los casos obviamente micro cuando existen mejores opciones.
@@ -1034,7 +1044,7 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
     return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}`;
   }).join('\n');
   const _pisoTam = (plan._plan && parseInt(plan._plan.tamano_min||0,10)) || 0;
-  const ctx = `Cliente: ${(cliente&&cliente.empresa)||plan.h1_company||''}. País del cliente (prioritario): ${(plan._plan&&plan._plan.geografia)||''}. Qué ofrece / proof: ${String(plan.proof||plan.lead||'').slice(0,500)}. Función del comprador: ${(plan._plan&&plan._plan.funcion)||''}.${_pisoTam>0?` Piso de tamaño del ICP: ${_pisoTam}+ empleados (preferí empresas que lo cumplen; evitá las claramente micro salvo que el lead sea fuerte en los demás ejes).`:''}`;
+  const ctx = `Cliente: ${(cliente&&cliente.empresa)||plan.h1_company||''}. País del cliente (prioritario): ${(plan._plan&&plan._plan.geografia)||''}. Qué ofrece / proof: ${String(plan.proof||plan.lead||'').slice(0,500)}. Función del comprador: ${(plan._plan&&plan._plan.funcion)||''}.${(plan._plan&&plan._plan.comprador_ideal)?` Comprador ideal (debe cumplirlo la empresa de cada card): ${plan._plan.comprador_ideal}.`:''}${_pisoTam>0?` Piso de tamaño del ICP: ${_pisoTam}+ empleados (preferí empresas que lo cumplen; evitá las claramente micro salvo que el lead sea fuerte en los demás ejes).`:''}`;
   const fixBloque = (fixes&&fixes.length) ? `\n\nCORRECCIONES del juez (aplicalas re-eligiendo o reescribiendo):\n- ${fixes.join('\n- ')}` : '';
   const messages = [{ role:'user', content:`${ctx}\n\nLISTA REAL DE CANDIDATOS (elegí de ACÁ, por id EXACTO; los ★ son del país del cliente):\n${lista}${fixBloque}\n\nElegí los ${PEDIR_SELECT} MEJORES en ORDEN de prioridad (el mejor primero), de EMPRESAS distintas y priorizando el país del cliente. Devolvé SOLO el JSON {"seleccion":[...]} con EXACTAMENTE ${PEDIR_SELECT} elementos distintos. El sistema arma el reporte con los primeros ${NUM_CUENTAS} válidos, así que los primeros ${NUM_CUENTAS} tienen que ser tus mejores.` }];
   const data = await callClaude({ model:MODEL_GEN, system:_promptSelect(PEDIR_SELECT, NUM_CUENTAS), messages, tools:[], maxTokens:6000 });
