@@ -1429,7 +1429,7 @@ function _nombreArchivoPDF(empresa){
   return `Análisis de Mercado - ${limpia}.pdf`;
 }
 
-async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
+async function procesar(jobId, { email, dominio, empresa, nombre, profileId, evalMode }) {
   return _statsALS.run(_nuevoStats(), async () => {
   try {
     console.log(`\n========== Job ${jobId} - Inicio (${NUM_CUENTAS} cuentas) ==========`);
@@ -1509,6 +1509,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId }) {
     jobs.set(jobId, {
       status: 'ok',
       pdf_base64: pdfBuffer ? pdfBuffer.toString('base64') : null,
+      reporte: evalMode ? data : undefined, // solo en modo eval: objeto estructurado para inspección (async, sin tocar prod)
       empresa: empresaFinal,
       anclado: cliente.anclado,
       cliente_resuelto: cliente,
@@ -1559,7 +1560,7 @@ setInterval(() => {
 }, 30 * 60 * 1000);
 
 app.post('/generar', (req, res) => {
-  const { email, dominio, empresa, nombre, profileId } = req.body || {};
+  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug } = req.body || {};
   if (!empresa && !dominio && !profileId) {
     return res.status(400).json({ error: 'Falta empresa, dominio o profileId' });
   }
@@ -1580,7 +1581,7 @@ app.post('/generar', (req, res) => {
   jobs.set(jobId, { status: 'processing', createdAt: Date.now() });
   if (key) enProgreso.set(key, jobId);
   res.status(202).json({ jobId, status: 'processing' });
-  procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId })
+  procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug })
     .finally(() => { if (key && enProgreso.get(key) === jobId) enProgreso.delete(key); });
 });
 
