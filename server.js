@@ -238,11 +238,23 @@ async function callMCP(toolName, args) {
 
 async function listMCPTools() {
   console.log(`[MCP] Listando tools disponibles...`);
-  const res = await fetch(MCP_URL, {
-    method: 'POST',
-    headers: IBT_HEADERS,
-    body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', params: {}, id: 1 })
-  });
+  // Mismo patrón de timeout que callMCP: sin AbortController, un MCP colgado dejaba este fetch (y el job) pendiente para siempre.
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), MCP_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(MCP_URL, {
+      method: 'POST',
+      headers: IBT_HEADERS,
+      signal: ac.signal,
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', params: {}, id: 1 })
+    });
+  } catch (e) {
+    if (e && e.name === 'AbortError') console.error(`[MCP] listMCPTools ABORTADA por timeout (${MCP_TIMEOUT_MS}ms).`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   const text = await res.text();
   const match = text.match(/data: ({.*})\n\n/);
   if (!match) throw new Error('No se pudo listar tools');
@@ -545,19 +557,32 @@ function limpiarHtml(html) {
   return clean;
 }
 
+// Puppeteer (launch/setContent/pdf) es el hang más probable del pipeline: si Chromium se cuelga,
+// estos await no vuelven nunca. Todo el bloque corre contra un timeout (PDF_TIMEOUT_MS, default 60s);
+// si se dispara, el finally cierra el browser igual para no dejar Chromium colgado y se relanza el error
+// (el caller ya lo maneja).
+const PDF_TIMEOUT_MS = parseInt(process.env.PDF_TIMEOUT_MS || '60000', 10);
+
 async function renderizarPdf(cleanHtml) {
   const browser = await puppeteer.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  let timer;
   try {
-    const page = await browser.newPage();
-    await page.setContent(cleanHtml, { waitUntil: 'networkidle0' });
-    const pdfBuffer = await page.pdf({
-      printBackground: true,
-      preferCSSPageSize: true,
-      margin: { top: '0', bottom: '0', left: '0', right: '0' }
+    const trabajo = (async () => {
+      const page = await browser.newPage();
+      await page.setContent(cleanHtml, { waitUntil: 'networkidle0' });
+      return await page.pdf({
+        printBackground: true,
+        preferCSSPageSize: true,
+        margin: { top: '0', bottom: '0', left: '0', right: '0' }
+      });
+    })();
+    const timeout = new Promise((_, rej) => {
+      timer = setTimeout(() => rej(new Error(`renderizarPdf timeout (>${PDF_TIMEOUT_MS}ms)`)), PDF_TIMEOUT_MS);
     });
-    return pdfBuffer;
+    return await Promise.race([trabajo, timeout]);
   } finally {
-    await browser.close();
+    clearTimeout(timer);
+    await browser.close().catch(e => console.error('[PDF] error cerrando browser:', e.message));
   }
 }
 
@@ -2036,8 +2061,29 @@ app.post('/generar', (req, res) => {
   jobs.set(jobId, { status: 'processing', createdAt: Date.now() });
   if (key) enProgreso.set(key, jobId);
   res.status(202).json({ jobId, status: 'processing' });
-  procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug })
-    .finally(() => { if (key && enProgreso.get(key) === jobId) enProgreso.delete(key); });
+
+  // CINTURÓN GLOBAL: cualquier await sin timeout (presente o futuro) podía dejar el job en "processing"
+  // para siempre; el TTL del Map limpia el registro a 1h pero NO mata el promise de fondo, e infla
+  // jobs_activos. Promise.race contra JOB_TIMEOUT_MS (default 8 min) garantiza que el job SIEMPRE cierra.
+  // No rompe el flujo normal: los jobs que terminan antes resuelven primero y este timeout queda inerte.
+  // procesar() maneja sus propios errores internamente (status:'error'); este race solo cubre el cuelgue total.
+  const JOB_TIMEOUT_MS = parseInt(process.env.JOB_TIMEOUT_MS || '480000', 10);
+  let jobTimer;
+  const timeoutGlobal = new Promise((resolve) => {
+    jobTimer = setTimeout(() => {
+      console.error(`[Job ${jobId}] TIMEOUT GLOBAL (>${JOB_TIMEOUT_MS}ms). Se marca error; el promise de fondo puede seguir, pero el job ya no queda zombie.`);
+      jobs.set(jobId, { status: 'error', error: 'timeout global del job (>8min)', finishedAt: Date.now() });
+      resolve();
+    }, JOB_TIMEOUT_MS);
+  });
+
+  Promise.race([
+    procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug }),
+    timeoutGlobal
+  ]).finally(() => {
+    clearTimeout(jobTimer);
+    if (key && enProgreso.get(key) === jobId) enProgreso.delete(key);
+  });
 });
 
 app.get('/resultado/:jobId', (req, res) => {
