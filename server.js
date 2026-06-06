@@ -48,6 +48,14 @@ const MODEL_JUDGE = 'claude-sonnet-4-6';
 const _tempEnv = (v, d) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
 const TEMP_JUDGE = _tempEnv(process.env.TEMP_JUDGE, 0);
 
+// SELF-CONSISTENCY del juez ("Rating Roulette"): correr N votos independientes y agregar
+// conservadoramente. Un solo voto a T=0 flipea APROBADO↔RECHAZADO en criterios subjetivos
+// (4 veracidad, 6 personalización). JUDGE_VOTES=1 reproduce el comportamiento histórico
+// (1 voto a TEMP_JUDGE). Con N>1, los votos corren a TEMP_JUDGE_VOTE>0 para ser MUESTRAS
+// independientes (a T=0 los N votos serían idénticos y la agregación no aportaría nada).
+const JUDGE_VOTES = Math.max(1, parseInt(process.env.JUDGE_VOTES || '3', 10));
+const TEMP_JUDGE_VOTE = _tempEnv(process.env.TEMP_JUDGE_VOTE, 0.4);
+
 // Cantidad de cuentas del reporte. Configurable por env.
 const NUM_CUENTAS = parseInt(process.env.NUM_CUENTAS || '3', 10);
 // Cuántas le pedimos a la IA: sobre-generamos para tener margen tras dedupe (persona + empresa).
@@ -403,26 +411,22 @@ function _textoJSON(content){
   return texts.join('\n');
 }
 
-async function runJudge(html, pageCount) {
-  _setStage('judge');
-  console.log(`[JUDGE] Evaluando reporte (${pageCount} páginas, esperadas ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}, cuentas ${NUM_CUENTAS})...`);
-  const htmlLite = String(html || '')
-    .replace(/src="data:image\/[a-z]+;base64,[A-Za-z0-9+/=]+"/gi, 'src="[LOGO]"')
-    .replace(/<style>[\s\S]*?<\/style>/i, '<style>/* css omitido para el juez */</style>');
-  const data = await callClaude({
-    model: MODEL_JUDGE,
-    system: SYSTEM_PROMPT_JUDGE,
-    messages: [{
-      role: 'user',
-      content: `Cuentas esperadas: ${NUM_CUENTAS}\nPáginas esperadas: ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}\nPáginas del PDF renderizado: ${pageCount}\n\nHTML del reporte:\n${htmlLite}`
-    }],
-    maxTokens: 4000,
-    temperature: TEMP_JUDGE
-  });
-
-  const raw = data.content.find(b => b.type === 'text')?.text || '';
-  const match = raw.match(/\{[\s\S]*\}/);
+// Un único voto del juez. Devuelve siempre un veredicto normalizado (APROBADO solo 8/8);
+// fail-closed individual: si no parsea o es incoherente → RECHAZADO (nunca lo descartamos).
+async function _judgeVote(htmlLite, pageCount, temperature, voteIdx) {
   try {
+    const data = await callClaude({
+      model: MODEL_JUDGE,
+      system: SYSTEM_PROMPT_JUDGE,
+      messages: [{
+        role: 'user',
+        content: `Cuentas esperadas: ${NUM_CUENTAS}\nPáginas esperadas: ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}\nPáginas del PDF renderizado: ${pageCount}\n\nHTML del reporte:\n${htmlLite}`
+      }],
+      maxTokens: 4000,
+      temperature
+    });
+    const raw = data.content.find(b => b.type === 'text')?.text || '';
+    const match = raw.match(/\{[\s\S]*\}/);
     const parsed = JSON.parse(match ? match[0] : raw);
     const result = {
       veredicto: parsed.veredicto || 'RECHAZADO', // sin veredicto explícito → rechazar (fail-closed)
@@ -432,19 +436,59 @@ async function runJudge(html, pageCount) {
     // Coherencia: el juez solo APRUEBA si pasa los 8/8. Un APROBADO con score<8 es
     // incoherente (o un fallback) → se rechaza por seguridad para no enviar sin revisar.
     if (result.veredicto === 'APROBADO' && result.score < 8) {
-      console.warn(`[JUDGE] Veredicto incoherente (APROBADO ${result.score}/8) → RECHAZADO por seguridad.`);
+      console.warn(`[JUDGE] voto#${voteIdx}: veredicto incoherente (APROBADO ${result.score}/8) → RECHAZADO por seguridad.`);
       result.veredicto = 'RECHAZADO';
       if (!result.fixes.length) result.fixes = ['Veredicto incoherente del juez (APROBADO con score < 8); se rechaza por seguridad.'];
     }
-    console.log(`[JUDGE] Veredicto: ${result.veredicto} ${result.score}/8`);
-    if (result.fixes.length > 0) console.log(`[JUDGE] Fixes: ${result.fixes.join(' | ')}`);
+    console.log(`[JUDGE] voto#${voteIdx}: ${result.veredicto} ${result.score}/8`);
     return result;
   } catch (e) {
-    // FAIL-CLOSED: si el juez no devuelve un veredicto parseable, NO aprobar.
-    // Un error del juez no puede traducirse en un reporte enviado sin revisión.
-    console.error('[JUDGE] No se pudo parsear el veredicto → RECHAZO por seguridad (fail-closed):', e.message);
+    // FAIL-CLOSED individual: un voto que no parsea cuenta como RECHAZADO (no se descarta).
+    console.error(`[JUDGE] voto#${voteIdx}: no se pudo parsear → RECHAZADO por seguridad (fail-closed):`, e.message);
     return { veredicto: 'RECHAZADO', score: 0, fixes: ['El juez no devolvió un veredicto parseable; se rechaza por seguridad para no enviar un reporte sin revisar.'] };
   }
+}
+
+async function runJudge(html, pageCount) {
+  _setStage('judge');
+  console.log(`[JUDGE] Evaluando reporte (${pageCount} páginas, esperadas ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}, cuentas ${NUM_CUENTAS}, votos ${JUDGE_VOTES})...`);
+  const htmlLite = String(html || '')
+    .replace(/src="data:image\/[a-z]+;base64,[A-Za-z0-9+/=]+"/gi, 'src="[LOGO]"')
+    .replace(/<style>[\s\S]*?<\/style>/i, '<style>/* css omitido para el juez */</style>');
+
+  // JUDGE_VOTES===1 → comportamiento histórico: 1 voto a TEMP_JUDGE (0).
+  // N>1 → N votos INDEPENDIENTES a TEMP_JUDGE_VOTE (>0), en PARALELO para no sumar latencia.
+  const tempVoto = JUDGE_VOTES === 1 ? TEMP_JUDGE : TEMP_JUDGE_VOTE;
+  const votos = await Promise.all(
+    Array.from({ length: JUDGE_VOTES }, (_, i) => _judgeVote(htmlLite, pageCount, tempVoto, i + 1))
+  );
+
+  // Agregación CONSERVADORA / fail-closed: APROBADO final SOLO si la MAYORÍA de los votos
+  // dieron APROBADO 8/8 (cada voto ya garantiza 8/8 por la coherencia interna). Empate o
+  // minoría → RECHAZADO. El producto es credibilidad: preferimos reducir falsos APROBADO.
+  const aprueban = votos.filter(v => v.veredicto === 'APROBADO');
+  const rechazan = votos.filter(v => v.veredicto !== 'APROBADO');
+  const mayoriaAprueba = aprueban.length > JUDGE_VOTES / 2;
+
+  let result;
+  if (mayoriaAprueba) {
+    result = { veredicto: 'APROBADO', score: 8, fixes: [] };
+  } else {
+    // Juntamos y deduplicamos los fixes de los votos que RECHAZARON, para que
+    // seleccionarConRetry tenga material concreto con qué corregir.
+    const fixes = [...new Set(rechazan.flatMap(v => v.fixes).map(f => String(f).trim()).filter(Boolean))];
+    const score = rechazan.length ? Math.min(...rechazan.map(v => v.score ?? 0)) : 0;
+    result = {
+      veredicto: 'RECHAZADO',
+      score,
+      fixes: fixes.length ? fixes : ['El juez rechazó el reporte sin fixes explícitos; se rechaza por seguridad.']
+    };
+  }
+
+  console.log(`[JUDGE] votos: APROBADO×${aprueban.length} RECHAZADO×${rechazan.length} → ${result.veredicto}`);
+  console.log(`[JUDGE] Veredicto: ${result.veredicto} ${result.score}/8`);
+  if (result.fixes.length > 0) console.log(`[JUDGE] Fixes: ${result.fixes.join(' | ')}`);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +612,23 @@ function _empKey(emp){
 function _esCompetidor(empresa, competidores){
   const e = _norm(empresa||''); if(!e) return false;
   return (competidores||[]).some(c => c && c.length>=4 && (e.includes(c) || c.includes(e)));
+}
+
+// VERTICALES A EXCLUIR (ruido adyacente): el PLAN puede agregar icp.verticales_excluir (rubros
+// adyacentes que ensucian el pool, ej. geotecnia/militar/consultoría para un cliente de detección).
+// Defensivo: si el campo no existe todavía, _verticalesExcluir(plan) devuelve [] y nada se filtra.
+// Match contra el NOMBRE de empresa Y la industria (texto crudo) del candidato. Términos de >=4 chars
+// para evitar falsos positivos (substring includes). NO debe pisar el vertical legítimo del comprador:
+// eso lo controla el PLAN (no debe listar el propio vertical en verticales_excluir).
+function _verticalesExcluir(plan){
+  const p = (plan && plan._plan) || {};
+  const arr = Array.isArray(p.verticales_excluir) ? p.verticales_excluir : [];
+  return arr.map(_norm).filter(t => t && t.length >= 4);
+}
+// ¿El texto (nombre de empresa / industria / headline) matchea alguna vertical a excluir?
+function _matchVerticalExcluir(txt, excluir){
+  const t = _norm(txt||''); if(!t) return false;
+  return (excluir||[]).some(v => t.includes(v));
 }
 
 async function resolverCliente({ profileId, dominio, empresa }) {
@@ -748,6 +809,7 @@ async function sourceCandidates(plan, cliente){
   const homeGeo   = _norm(geografia||'');
   const funcion   = icp.funcion;
   const titulos   = Array.isArray(icp.titulos_objetivo) ? icp.titulos_objetivo : [];
+  const industriasICP = Array.isArray(icp.industrias) ? icp.industrias : [];   // pista de vertical para _rolRelevante
   // ¿El ICP pide gerencia/dueño? Solo entonces penalizamos a los contribuidores individuales (caso NOCNOK).
   // Si el ICP legítimamente apunta a ICs, pideDecisores=false y NO se penaliza nada (CONDICIONAL).
   const pideDecisores = _icpPideDecisores(plan);
@@ -854,6 +916,11 @@ async function sourceCandidates(plan, cliente){
     });
   const _esComp = (emp) => { const e=_norm(emp||''); if(!e) return false; return _esCompetidor(e, competidores) || compTerminos.some(t=>e.includes(t)); };
 
+  // VERTICALES A EXCLUIR (ruido adyacente del PLAN). Defensivo: [] si el campo no existe todavía.
+  const excluir = _verticalesExcluir(plan);
+  // ¿La empresa/industria/headline del candidato cae en una vertical a excluir?
+  const _offVert = (c) => _matchVerticalExcluir(c.empresa, excluir) || _matchVerticalExcluir(c.head, excluir);
+
   const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
 
   // SCORING del candidato (UNA sola definición → las 3 llamadas quedan idénticas, sin drift posible).
@@ -864,13 +931,32 @@ async function sourceCandidates(plan, cliente){
   //   ancla(+30) = la empresa salió como comprador objetivo del cliente (fit-de-negocio fuerte)
   //   funcion(+25) = el cargo es del rol buscado | seniority*6 = PREMIA al decisor (no solo castiga al IC)
   //   tamaño*2 = saturado en el piso | calidez*4 | país*3 | IC suelto −60 = castigo que sí domina
-  const _scoreCand = (c) => (c.ancla?30:0)
-    + (_matchFuncion(c.head, titulos)?25:0)
-    + _rankSenioridad(c.head)*6
-    + _sizeBoost(c.headcount, tamMin)*2
-    + _warmth(c.dist)*4
-    + (c.cerca?3:0)
-    - (c.icSuelto?60:0);
+  //
+  // REGLA DE ARMADO POR NIVELES (decisión del cliente): se aplica DENTRO del score para que el orden que
+  // ve la IA respete la prioridad EXACTA, en vez de hacerlo solo post-hoc en armarReporte:
+  //   N1 cálido + señal buenísima (on-fit, on-vertical, decisor) -> máxima prioridad (todos los bonos suman).
+  //   N2 cálido + fit ok -> se suma (warmth+score normal).
+  //   N3 frío + fit BUENÍSIMO (on-vertical decisor) -> solo para rellenar: pierde el bono de calidez pero
+  //      conserva el de fit, así flota por encima del frío-mal-fit pero por debajo de cualquier cálido.
+  //   N4 frío + fit flojo / vertical adyacente -> se hunde con penalización fuerte (no debe llegar a la IA).
+  // Señales: _rolRelevante = fit-de-función real (endurecido: función del ICP o decisión+pista de vertical);
+  // _offVert = la empresa/industria cae en una vertical a EXCLUIR del PLAN (ruido adyacente).
+  const _scoreCand = (c) => {
+    const rolOk = _rolRelevante(c.head, titulos, industriasICP);   // fit-de-función real (endurecido)
+    const off   = _offVert(c);                                     // vertical adyacente a excluir
+    const calido = c.dist===1 || c.dist===2;
+    return (c.ancla?30:0)
+      + (_matchFuncion(c.head, titulos)?25:0)
+      + _rankSenioridad(c.head)*6
+      + _sizeBoost(c.headcount, tamMin)*2
+      + _warmth(c.dist)*4
+      + (c.cerca?3:0)
+      - (c.icSuelto?60:0)
+      // N3/N4: la FUNCIÓN equivocada (off-vertical o sin fit real) se hunde ANTES de cortar los 18 a la IA,
+      // para que no llegue. Más fuerte si encima es frío (N4 nunca; N3 frío-buen-fit conserva fit y no se penaliza).
+      - (!rolOk ? (calido ? 25 : 80) : 0)
+      - (off ? (calido ? 30 : 100) : 0);
+  };
 
   // ===== PASADA A — ACCOUNT-FIRST: cuentas-ancla con señal de compra =====
   // Buscamos EMPRESAS que encajan el ICP (industria + geo + tamaño) y están "en movimiento" (crecimiento de
@@ -908,7 +994,16 @@ async function sourceCandidates(plan, cliente){
     for(const lista of listas){ for(const c of (lista||[])) if(c.id && !cuentas.some(x=>x.id===c.id)) cuentas.push(c); }
     console.log(`[SOURCE] sin industria resuelta → ancla por keyword [${kwAncla.join(', ')||'-'}]: ${cuentas.length} empresas (piso hc>=${hcMin}).`);
   }
-  cuentas = cuentas.filter(c => c.name && !_esComp(c.name));   // no anclar en un competidor/proveedor
+  // no anclar en un competidor/proveedor NI en una vertical a EXCLUIR (ruido adyacente del PLAN: el
+  // _parseCompanies trae la industria cruda, así que la chequeamos también contra verticales_excluir).
+  cuentas = cuentas.filter(c => {
+    if(!c.name || _esComp(c.name)) return false;
+    if(excluir.length && (_matchVerticalExcluir(c.name, excluir) || _matchVerticalExcluir(c.industry, excluir))){
+      console.warn(`[SOURCE] cuenta-ancla descartada por VERTICAL EXCLUIDA: ${c.name} (${c.industry||'?'})`);
+      return false;
+    }
+    return true;
+  });
   const anclaIds     = cuentas.map(c=>c.id).filter(Boolean).slice(0, 20);
   const anclaNombres = new Set(cuentas.map(c=>_empKey(c.name)).filter(Boolean));
   const anclaHC      = new Map(cuentas.map(c=>[_empKey(c.name), c.headcount]));
@@ -939,6 +1034,13 @@ async function sourceCandidates(plan, cliente){
     const emp=_empresaDeHeadline(p.head)||'';
     if(empCliente && emp && _mismaEmpresa(empCliente, emp)) continue;
     if(emp && _esComp(emp)){ console.warn(`[SOURCE] descartado por COMPETIDOR/proveedor: ${p.name} @ ${emp}`); continue; }
+    // VERTICAL EXCLUIDA: rubro adyacente-ruido del PLAN (ej. geotecnia/militar/consultoría). Excluimos
+    // directo si la empresa o el headline lo delatan; el resto (detectable solo tras enriquecer) lo hunde
+    // la penalización de _scoreCand vía _offVert. Defensivo: excluir=[] si el PLAN no trae el campo.
+    if(excluir.length && (_matchVerticalExcluir(emp, excluir) || _matchVerticalExcluir(p.head, excluir))){
+      console.warn(`[SOURCE] descartado por VERTICAL EXCLUIDA: ${p.name} @ ${emp||'?'} ("${String(p.head||'').slice(0,40)}")`);
+      continue;
+    }
     const cerca = _esCerca(p.loc);
     const ancla = (emp && anclaNombres.has(_empKey(emp))) ? 1 : 0;
     const hcPre = ancla ? (anclaHC.get(_empKey(emp)) ?? null) : null;   // headcount ya conocido de la cuenta-ancla
@@ -1098,20 +1200,74 @@ async function sourceCandidates(plan, cliente){
   return { pool: final, senales: senales.slice(0, 5) };
 }
 
-// Wrapper con retry para absorber HIPOS TRANSITORIOS del MCP: vimos casos (ej. NOCNOK) donde TODAS las
-// llamadas al MCP de un job devolvieron vacío (rate-limit/hipo), no por un ICP malo — las mismas búsquedas
-// funcionan segundos después. Si el pool sale vacío, esperamos y reintentamos una vez. Si igual sale vacío,
-// devolvemos [] y el caller maneja el "0 candidatos" como siempre.
+// ¿Un candidato del pool es "BUENO"? = cálido (1er/2do grado) Y on-fit (la función matchea el ICP) Y
+// NO off-vertical (su empresa/headline no cae en una vertical a EXCLUIR del PLAN). Es el contador que
+// decide si vale la pena gastar otra pasada de sourcing. Defensivo con campos faltantes.
+function _candBueno(c, titulos, excluir){
+  if(!c) return false;
+  const calido = c.dist===1 || c.dist===2;
+  if(!calido) return false;
+  if(!_matchFuncion(c.head, titulos)) return false;
+  if(excluir && excluir.length && (_matchVerticalExcluir(c.empresa, excluir) || _matchVerticalExcluir(c.head, excluir))) return false;
+  return true;
+}
+
+// MULTI-PASADA ACUMULATIVA ADAPTATIVA: cada llamada al MCP devuelve un pool DISTINTO (LinkedIn no es
+// determinístico), así que correr el sourcing VARIAS veces y ACUMULAR (dedupe por id) cubre mucho más del
+// universo sin subir profilesLimit. PLAN NO se re-ejecuta (el ICP no cambia): solo se repiten las búsquedas
+// MCP. Tras cada pasada contamos los candidatos BUENOS (cálido + on-fit + on-vertical) del pool ACUMULADO;
+// si ya hay >= NUM_CUENTAS buenos, cortamos (cliente fácil = 1 sola pasada → no gasta de más). Si no, otra
+// pasada hasta SOURCE_MAX_PASSES. Es BARATO en tokens (solo MCP, cada llamada con su timeout); el costo es
+// latencia, aceptable. SELECT corre UNA sola vez DESPUÉS, sobre el pool acumulado (tokens planos).
+// Conserva el retry anti-hipo del MCP: si una pasada sale 100% vacía, espera y reintenta esa pasada.
 async function sourceConRetry(plan, cliente){
-  const reintentos = parseInt(process.env.SOURCE_RETRY_ON_EMPTY || '1', 10);
-  const delay = parseInt(process.env.SOURCE_RETRY_DELAY_MS || '6000', 10);
-  let res = await sourceCandidates(plan, cliente);
-  for(let i=0; i<reintentos && (!res || !res.pool || !res.pool.length); i++){
-    console.warn(`[SOURCE] pool vacío, reintento en ${delay}ms (posible hipo transitorio del MCP)...`);
-    await new Promise(r => setTimeout(r, delay));
-    res = await sourceCandidates(plan, cliente);
+  const reintentos   = parseInt(process.env.SOURCE_RETRY_ON_EMPTY || '1', 10);
+  const delay        = parseInt(process.env.SOURCE_RETRY_DELAY_MS || '6000', 10);
+  const MAX_PASSES   = Math.max(1, parseInt(process.env.SOURCE_MAX_PASSES || '3', 10));
+  const titulos = (plan && plan._plan && Array.isArray(plan._plan.titulos_objetivo)) ? plan._plan.titulos_objetivo : [];
+  const excluir = _verticalesExcluir(plan);
+
+  // Acumulador por id. Conservamos el orden de aparición; el ranking final ya lo hizo sourceCandidates.
+  const porId = new Map();
+  let senales = [];
+  const acumular = (res) => {
+    if(res && Array.isArray(res.pool)) for(const c of res.pool){ if(c && c.id && !porId.has(c.id)) porId.set(c.id, c); }
+    if(res && Array.isArray(res.senales) && res.senales.length) senales = res.senales;  // las señales reflejan el último sourcing real
+  };
+
+  for(let pass=1; pass<=MAX_PASSES; pass++){
+    let res = await sourceCandidates(plan, cliente);
+    // anti-hipo: si ESTA pasada salió 100% vacía, esperá y reintentá (las mismas búsquedas andan segundos después).
+    for(let i=0; i<reintentos && (!res || !res.pool || !res.pool.length); i++){
+      console.warn(`[SOURCE] pasada ${pass}: pool vacío, reintento en ${delay}ms (posible hipo transitorio del MCP)...`);
+      await new Promise(r => setTimeout(r, delay));
+      res = await sourceCandidates(plan, cliente);
+    }
+    acumular(res);
+    const buenos = [...porId.values()].filter(c => _candBueno(c, titulos, excluir)).length;
+    console.log(`[SOURCE] pasada ${pass}/${MAX_PASSES}: pool acumulado ${porId.size} | BUENOS (cálido+on-fit+on-vertical) ${buenos}/${NUM_CUENTAS}.`);
+    if(buenos >= NUM_CUENTAS) break;        // adaptativo: cliente fácil corta acá, no gasta pasadas extra
   }
-  return { pool: (res && res.pool) || [], senales: (res && res.senales) || [] };
+
+  // RANKING FINAL del pool acumulado por niveles: cálido+fit primero; frío-buen-fit como relleno; frío-mal-fit
+  // al fondo. Reusamos el orden que cada sourceCandidates ya calculó (score), reforzando con calidez+fit aquí
+  // para que el orden ENTRE pasadas (que vinieron por separado) respete la prioridad. No recorta nada.
+  const acumulado = [...porId.values()];
+  const _nivel = (c) => {
+    const calido = c.dist===1 || c.dist===2;
+    const fit = _matchFuncion(c.head, titulos);
+    const off = excluir.length && (_matchVerticalExcluir(c.empresa, excluir) || _matchVerticalExcluir(c.head, excluir));
+    if(off) return 0;                       // N4: vertical adyacente → al fondo
+    if(calido && fit) return 4;             // N1/N2: cálido + fit
+    if(calido) return 3;                    // cálido sin fit fuerte
+    if(fit) return 2;                       // N3: frío + buen fit (relleno)
+    return 1;                               // frío + fit flojo
+  };
+  acumulado.sort((a,b)=> (_nivel(b)-_nivel(a)) || ((b.score||0)-(a.score||0)) || (b.cerca-a.cerca) || (b.fit-a.fit));
+
+  const N_IA = parseInt(process.env.SOURCE_TO_IA || '18', 10);
+  const pool = acumulado.slice(0, N_IA);
+  return { pool, senales };
 }
 
 // FASE 1 — IA: research + ICP + página 1. Prompt parametrizado por N.
@@ -1130,6 +1286,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - ATRIBUTOS Y CREDENCIALES DEL CLIENTE (caso del principio rector, tan grave como inventar un número): NO le atribuyas al cliente certificaciones, acreditaciones, pólizas, sellos, cumplimientos normativos ni características operativas específicas salvo que web_search lo confirme en una fuente del propio cliente. Esto incluye cosas que "suenan lógicas" pero que no viste: "técnicos certificados en alturas", "pólizas de responsabilidad civil", "proveedor auditado", "certificación ISO", "atención/operación 24/7", "garantía de X horas". Que sea PLAUSIBLE para el rubro NO alcanza: si no salió de una fuente, no lo afirmes. Si querés transmitir formalidad/calidad sin el dato puntual, usá una formulación cualitativa y verificable ("un proveedor formal del segmento", "una red estructurada de técnicos") en vez de inventar la credencial. Una credencial falsa que el prospecto repregunta quema el reporte igual que un nombre de tercero inventado.
 - VERACIDAD (CRÍTICO): PROHIBIDO inventar métricas o datos duros. Esto incluye específicamente: cantidad de categorías/tipos de servicio (ej. "+300 categorías"), totales acumulados (ej. "+470.000 servicios"), tiempos de respuesta ("60 minutos"), %, premios, año de fundación o stage. Si un número NO sale textual de web_search o de una fuente verificable, NO lo pongas en ningún lado (lead, proof, context, apertura, stats, ribbon). Ante la duda, usá una formulación cualitativa SIN número ("amplia cobertura", "varias categorías de servicio"). Es preferible un reporte sin números a uno con números inventados. REGLA DE ORO: antes de cerrar, releé CADA número que escribiste; si no podés señalar la fuente exacta de web_search de donde salió, BORRALO o pasalo a texto cualitativo. El invento más común y MÁS GRAVE es "+300 tipos de servicio" o "+X servicios/clientes": NO lo escribas jamás si no lo viste en una fuente.
 - STATS: que los 4 chips sean datos verificables o estructurales (ej: la cantidad ${N} de cuentas priorizadas, países de operación reales, año de fundación SOLO si lo verificaste). NUNCA rellenes un stat con un número inventado para que "quede lindo". Preferí stats que IMPACTEN y sean verificables (ciudades/países de cobertura, años en el mercado, la cantidad ${N} de cuentas). EVITÁ stats que subvendan al cliente, como su propia cantidad de empleados si es baja.
+- STATS — PROHIBIDO FABRICAR UN NÚMERO CONTANDO TU PROPIO REPORTE (defecto frecuente): un stat numérico SOLO vale si ese número sale TEXTUAL de web_search. NO inventes un stat contando elementos que vos mismo escribiste o dedujiste: prohibido "3 líneas de producto", "3 segmentos atendidos", "4 verticales objetivo", "1 país de operación confirmado", "2 modelos de negocio". Esos números los estás CONTANDO de tu propia redacción, no de una fuente, así que son inventados. ÚNICAS excepciones legítimas que no salen de web_search: (a) la cantidad ${N} de cuentas priorizadas (es un dato del propio reporte, declarado como tal), y (b) el conteo de países de operación SOLO si cada país está confirmado por web_search (ver regla de países). PROHIBIDA la palabra "confirmado/confirmada/confirmados" en el label o el num de un stat si no hay una fuente que lo respalde: no uses "confirmado" para disimular un número que vos dedujiste. Si no juntás 4 números genuinamente verificables, usá stats CUALITATIVOS o ESTRUCTURALES honestos (ej: {"num":"${N}","label":"Cuentas priorizadas"}, {"num":"Multi","label":"País de operación"} o un chip sin número de tipo categoría/modelo) en vez de fabricar cifras.
 - AÑO DE FUNDACIÓN (cuidado especial): es un dato que suele estar ambiguo o contradictorio entre fuentes. Ponelo SOLO si una fuente autoritativa y específica lo confirma (la página propia del cliente o su perfil de Endeavor/Crunchbase). Si las fuentes que ves en web_search NO coinciden, o si solo lo viste en directorios genéricos, NO lo afirmes: omití el stat de año y usá otro verificable en su lugar (países de operación, ciudades de cobertura, año de un hito real como un premio o reconocimiento, la cantidad ${N} de cuentas). Nunca elijas "el primero que aparezca": si el cliente tiene un reconocimiento (ej. Endeavor) con un año, ese año es más confiable que un directorio.
 - NOMBRES DE TERCEROS (CRÍTICO para la credibilidad): PROHIBIDO nombrar a una empresa específica como cliente, aliado o socio del cliente (ej. "trabaja con X", "X es cliente", "(cliente verificado)") salvo que web_search lo confirme EXPLÍCITAMENTE en una fuente. Si querés ilustrar el canal o el mercado, hacelo en GENÉRICO ("retailers de mejoramiento del hogar", "aseguradoras con línea hogar") SIN nombre propio y SIN la palabra "verificado". Un nombre de tercero inventado quema el reporte si el prospecto lo chequea.
 - El ICP card "Rol del decisor" y el bloque _plan.funcion deben describir al MISMO comprador.
@@ -1149,6 +1306,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - TAMAÑO (para que salgan empresas ANCLA, no micro-empresas): "tamano_min" tiene que ser un número real de empleados que refleje el ICP. Si el ICP son empresas medianas y grandes / marcas ancla, poné un piso alto (ej: 200). Poné un piso bajo (20-50) SOLO si el ICP son genuinamente PyMEs/micro. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva.
 - COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas que NO son compradores porque venden/fabrican LO MISMO que el cliente. Buscalos con web_search e incluí TRES tipos: (i) competidores directos de tamaño similar; (ii) FABRICANTES o PROVEEDORES globales del mismo producto (ej. para detonadores/voladura: Enaex, Orica, Dyno Nobel, Sandvik; para staffing de tecnología: Toptal, Turing, Andela, TEKsystems); (iii) distribuidores o integradores que revenden ese producto. Son PARES o RIVALES, no clientes. El sistema EXCLUYE a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES del research. NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque descartaría compradores legítimos. Si no identificás competidores claros, dejá la lista vacía.
 - COMPETIDOR_TERMINOS (filtro de respaldo, usar con cuidado): listá 0-4 términos del PRODUCTO ESPECÍFICO que el cliente fabrica/vende y que, si aparecen en el NOMBRE de otra empresa, casi seguro la delatan como proveedor o competidor (ej. "explosivos", "detonadores", "voladura", "staffing", "proptech"). REGLA CRÍTICA: NO pongas el VERTICAL/industria donde el cliente VENDE: si vende software inmobiliario NO pongas "inmobiliaria"; si le vende a minería NO pongas "minería"; eso descartaría a tus propios compradores. Solo el nombre del producto en sí. Ante la duda, dejá la lista vacía.
+- VERTICALES_EXCLUIR (ruido adyacente del sourcing, NO inventes nada del cliente): listá 2-5 RUBROS ADYACENTES que comparten palabras o suenan parecido al ICP pero que NO son compradores del cliente, para que el sistema los descarte del pool. Son verticales del MERCADO (no del cliente): no estás afirmando nada nuevo sobre el cliente, solo marcando rubros-ruido a EXCLUIR. Ejemplos: para una empresa de voladura minera, excluí "geotecnia", "mecánica de suelos", "militar", "consultoría"; para una marca de joyería retail, excluí "hotelería", "educación". REGLA ANTI FALSO POSITIVO: NUNCA pongas acá el vertical legítimo del comprador (si el comprador está en "Seguros", JAMÁS pongas "seguros") ni un término tan corto/genérico que pueda colarse en nombres de tus compradores. Si no hay rubros adyacentes claros que confundan, dejá la lista VACÍA ([]).
 - LARGO (para que el overview entre en 1 página): lead = MÁX 2 oraciones; proof = MÁX 2 oraciones; cada bullet de context = 1 oración corta (máx ~140 caracteres). Sé conciso.
 - _plan.titulos_objetivo es CRÍTICO: el sistema rankea y BUSCA con estas palabras (una por una) dentro del cargo. Palabras SUELTAS (no frases), ES+inglés+abreviaturas. Pensá DOS tipos de comprador y poné términos de AMBOS: (a) el que CONSUME el servicio puertas adentro (operaciones, facilities, mantenimiento, servicios generales, administrador); y (b) el que dentro de la empresa-canal OWNS la línea de producto/relación que mapea con lo que vende el cliente (el comprador de canal). Para (b), usá el NOMBRE del producto/vertical del cliente tal como aparece en cargos del comprador: ej. para una empresa de asistencia domiciliaria, los que en una aseguradora/retailer manejan "hogar", "asistencia", "vivienda", "copropiedad", "siniestros", "líneas personales", "proveedores". NO te quedes solo con los roles de facilities: el comprador de canal (ej. el jefe de línea hogar de una aseguradora) suele ser la mejor cuenta. Si el ICP apunta a empresas chicas donde compra el dueño/CEO, incluí "ceo, founder, owner, dueño, fundador". ORDEN: poné PRIMERO los términos del comprador de canal/producto (b) y después los de facilities (a); el sistema usa los primeros, así que los más valiosos van al frente.
 
@@ -1167,7 +1325,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "context": [ "bullet 1 (corto)", "bullet 2 (corto)", "bullet 3 (corto)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
   "prioridades": [ "Alta: ...", "Media: ...", "...", "..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras", "comprador_ideal": "1-2 oraciones: QUÉ TIENE QUE SER CIERTO de una empresa para que compre/revenda/aloje lo del cliente, como test de INCLUSIÓN y EXCLUSIÓN derivado del research (ej: 'Compran retailers y marcas que operan tiendas/corners propios donde colocar el producto; NO casas de marcas que licencian a terceros ni grupos que no alojan marcas externas'). Ante research pobre, redactalo INCLUSIVO y agregá la exclusión SOLO si el research la respalda", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA donde se COMPRA/revende el producto, ej: Seguros, Comercio al por menor, Inmobiliario, Administración de propiedades, Banca (evitá industriales amplias tipo Construcción/Manufactura)"], "competidores": ["NOMBRES de empresas competidoras directas a EXCLUIR (que venden lo mismo que el cliente), ej: Iké Asistencia, Asissprex"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA el vertical donde el cliente vende"], "tamano_min": 200 }
+  "_plan": { "funcion": "función del comprador en 1-2 palabras", "comprador_ideal": "1-2 oraciones: QUÉ TIENE QUE SER CIERTO de una empresa para que compre/revenda/aloje lo del cliente, como test de INCLUSIÓN y EXCLUSIÓN derivado del research (ej: 'Compran retailers y marcas que operan tiendas/corners propios donde colocar el producto; NO casas de marcas que licencian a terceros ni grupos que no alojan marcas externas'). Ante research pobre, redactalo INCLUSIVO y agregá la exclusión SOLO si el research la respalda", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA donde se COMPRA/revende el producto, ej: Seguros, Comercio al por menor, Inmobiliario, Administración de propiedades, Banca (evitá industriales amplias tipo Construcción/Manufactura)"], "competidores": ["NOMBRES de empresas competidoras directas a EXCLUIR (que venden lo mismo que el cliente), ej: Iké Asistencia, Asissprex"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA el vertical donde el cliente vende"], "verticales_excluir": ["2-5 rubros ADYACENTES-ruido a EXCLUIR del sourcing (comparten palabras con el ICP pero NO compran), ej. para voladura minera: geotecnia, mecanica de suelos, militar, consultoria; NUNCA el vertical del comprador; [] si no aplica"], "tamano_min": 200 }
 }
 CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
@@ -1215,10 +1373,14 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 - EMPRESAS DISTINTAS: cada cuenta es de una empresa DIFERENTE. Si dos son de la misma empresa, quedate con el de mejor fit y completá con otra empresa.
 - PROHIBIDO inventar o inflar el cargo: usá EXACTAMENTE el que figura en la lista. Si dice "Project Manager", es "Project Manager" — no lo asciendas a "Manager de Mantenimiento" ni le inventes MBA, estudios, especialidad ni un rol que no está. No le atribuyas datos (seniority, área, formación) que no estén en lo que te paso.
 - PROHIBIDO atribuir un ÁREA, DEPARTAMENTO, INICIATIVA o ESPECIALIDAD que no aparezca LITERAL en el cargo de la lista. Si el cargo dice solo "Executive Director", NO escribas que "dirige Automation", "lidera Innovation" ni que está "a cargo de Automation e Innovation": esa área NO está en el cargo, te la estás inventando. Hablá del rol GENÉRICO tal como figura ("como Executive Director", "desde su rol de dirección"), NO inventes el QUÉ específico que dirige. Misma regla para el ángulo y para el hook.
+- PROHIBIDO RE-ENCUADRAR EL ROL HACIA EL COMPRADOR (defecto sutil): NO le atribuyas a la persona la responsabilidad de COMPRA, DECISIÓN o LIDERAZGO de un área que su cargo real NO implica. Un "Head of Design" NO "lidera las compras de [X]"; un "People & Culture Director" NO "decide alianzas/expansión/proveedores"; un "Marketing Manager" NO "gestiona la operación de mantenimiento". Si el cargo es de OTRA función y claramente NO es el comprador del producto del cliente, NO lo fuerces a parecerlo: conectá con lo que ESE rol SÍ hace, o mejor elegí otro candidato cuyo cargo sí sea del comprador. Forzar el encuadre quema el reporte cuando el prospecto lee que le atribuís algo que no es lo suyo.
+- PROHIBIDO INVENTARLE LOGROS/CASOS/MÉTRICAS AL CLIENTE (anti-invención, tan grave como inventar el cargo): el ángulo y el hook conectan el rol con lo que el cliente OFRECE (en presente, cualitativo), NUNCA con un resultado, caso de éxito, implementación, cifra o cliente del cliente que NO esté TEXTUAL en el contexto "Qué ofrece / proof" que te paso. PROHIBIDO escribir cosas tipo "[cliente] redujo X a cero", "implementaciones activas en [sector]", "ya trabaja con empresas como la suya", "logró +X% de", "tiene casos en [vertical]" si eso no figura LITERAL en el contexto. Si el contexto no trae un logro, NO lo inventes: describí qué OFRECE el cliente y cómo eso toca el rol de esa persona. Una métrica o caso inventado del cliente lo quema apenas el prospecto repregunta.
 - CADA uno DEBE tener angulo y hook NO vacíos.
 - El ÁNGULO: MÁXIMO 2 oraciones (≤ 320 caracteres), específico de ESA persona/empresa, usando su cargo/empresa/perfil REALES + lo que ofrece el cliente. Corto y al hueso, sin relleno. 100% único por persona.
 - PROHIBIDO copiar/pegar o calcar la estructura de un ángulo a otro. Antes de cerrar, revisá que el nombre y la empresa de cada ángulo sean los de ESE id.
-- El HOOK: UNA sola oración entre comillas, lista para mandar, empezando por el PRIMER NOMBRE (ej: "Clara, ..."). Los hooks NO pueden compartir la misma fórmula entre sí: cada uno arranca distinto y nombra un pain o contexto CONCRETO y DIFERENTE. Si los releés y suenan iguales, reescribilos.
+- El HOOK: UNA sola oración entre comillas, lista para mandar, empezando por el PRIMER NOMBRE (ej: "Clara, ...").
+- DIVERSIDAD ESTRUCTURAL OBLIGATORIA DE HOOKS (el defecto MÁS frecuente: las cards salen con el mismo esqueleto): los hooks tienen que usar ${pedir} ABERTURAS DISTINTAS de este MENÚ, una forma diferente por card. (1) OBSERVACIÓN concreta sobre su empresa o su cargo ("Clara, vi que en [empresa] el área de [X] viene creciendo..."); (2) PREGUNTA DIRECTA sobre una decisión propia de ESE rol ("Marcos, cómo están resolviendo hoy [decisión del rol] en [empresa]"); (3) AFIRMACIÓN que conecta lo que hace el cliente con lo que esa persona maneja, SIN pregunta ("Lucía, su rol en [empresa] toca de lleno [lo que ofrece el cliente]."). PROHIBIDO que DOS hooks compartan el mismo molde sintáctico: ni los ${pedir} terminando en "¿...?", ni los ${pedir} con la plantilla "[Nombre], en [empresa] el [X] es [adj]", ni los ${pedir} arrancando con la misma palabra después del nombre. Si al releerlos dos suenan calcados, reescribí uno con otra abertura del menú.
+- PROHIBIDO EL CONDICIONAL VACÍO (en ángulo Y hook): nada de "puede ser relevante si...", "podría necesitar...", "pueden requerir...", "puede ser útil...", "quizás le interese", "tal vez le sirva". Ese hedging suena a IA y no dice nada. Si NO tenés una señal concreta de esa persona, NO te la inventes (regla de anti-invención) PERO TAMPOCO hedgees: afirmá EN PRESENTE el punto de contacto REAL entre lo que hace ese rol y lo que el cliente OFRECE (ej. no "como Head of Ops quizás necesite cobertura técnica", sí "como Head of Ops usted gestiona la red de mantenimiento que [cliente] cubre"). Cualitativo, presente, sin "si/podría/quizás".
 - NUNCA menciones el grado de conexión (1er/2do/3er grado) ni inventes datos que no estén en lo que te paso.
 - IDIOMA: ángulo y hook en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos.
 - Texto plano: NADA de markdown (sin **negritas**, sin asteriscos). Solo el objeto JSON.
@@ -1233,6 +1395,7 @@ Los campos "nombre" y "empresa" son OBLIGATORIOS y van copiados TEXTUAL del cand
 
 ## VERIFICACIÓN FINAL (OBLIGATORIA — antes de devolver el JSON)
 VERIFICÁ, elemento por elemento, que el "nombre" y la "empresa" sean los del id elegido (copiados de la lista, no de otro renglón), que el HOOK EMPIECE con el PRIMER NOMBRE de ESE id, y que el ÁNGULO NOMBRE la EMPRESA de ESE id. Si alguno no cumple, REESCRIBILO antes de cerrar: una card con el hook o el ángulo de OTRA persona/empresa (MEZCLA) quema todo el reporte.
+VERIFICÁ ADEMÁS: (a) que las ${pedir} aberturas de los hooks sean ESTRUCTURALMENTE DISTINTAS (no dos con el mismo molde ni todas terminando en "?"); (b) que ningún ángulo/hook use CONDICIONAL VACÍO ("puede/podría/quizás/si necesita"); (c) que NO le atribuyas a la persona una responsabilidad de compra/decisión/liderazgo que su cargo real NO implica (re-encuadre prohibido); (d) que NO le atribuyas al CLIENTE ningún logro, caso, métrica o implementación que no esté TEXTUAL en el contexto "Qué ofrece / proof". Si algo de esto falla, REESCRIBILO antes de cerrar.
 
 ## JSON VÁLIDO (CRÍTICO — si el JSON no parsea, se pierde todo el trabajo)
 - Dentro de "angulo" y "hook" NO uses comillas dobles (") sin escapar. Si necesitás encomillar una palabra o frase dentro del texto, usá comillas simples ('algo') o ninguna. Las ÚNICAS comillas dobles del hook son las dos que lo envuelven (\\"...\\").
@@ -1254,7 +1417,10 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
   const ctx = `Cliente: ${(cliente&&cliente.empresa)||plan.h1_company||''}. País del cliente (prioritario): ${(plan._plan&&plan._plan.geografia)||''}. Qué ofrece / proof: ${String(plan.proof||plan.lead||'').slice(0,500)}. Función del comprador: ${(plan._plan&&plan._plan.funcion)||''}.${(plan._plan&&plan._plan.comprador_ideal)?` Comprador ideal (debe cumplirlo la empresa de cada card): ${plan._plan.comprador_ideal}.`:''}${vertAlta.length?` Verticales prioridad ALTA (preferí SIEMPRE candidatos de estas; elegí de una Media solo si no hay suficientes buenos de las ALTA): ${vertAlta.join(', ')}.`:''}${_pisoTam>0?` Piso de tamaño del ICP: ${_pisoTam}+ empleados (preferí empresas que lo cumplen; evitá las claramente micro salvo que el lead sea fuerte en los demás ejes).`:''}`;
   const fixBloque = (fixes&&fixes.length) ? `\n\nCORRECCIONES del juez (aplicalas re-eligiendo o reescribiendo):\n- ${fixes.join('\n- ')}` : '';
   const messages = [{ role:'user', content:`${ctx}\n\nLISTA REAL DE CANDIDATOS (elegí de ACÁ, por id EXACTO; los ★ son del país del cliente):\n${lista}${fixBloque}\n\nElegí los ${PEDIR_SELECT} MEJORES en ORDEN de prioridad (el mejor primero), de EMPRESAS distintas y priorizando el país del cliente. Devolvé SOLO el JSON {"seleccion":[...]} con EXACTAMENTE ${PEDIR_SELECT} elementos distintos. El sistema arma el reporte con los primeros ${NUM_CUENTAS} válidos, así que los primeros ${NUM_CUENTAS} tienen que ser tus mejores.` }];
-  const data = await callClaude({ model:MODEL_GEN, system:_promptSelect(PEDIR_SELECT, NUM_CUENTAS), messages, tools:[], maxTokens:6000 });
+  // Temperatura un poco más alta SOLO en SELECT: empuja la diversidad estructural de hooks/ángulos (las cards
+  // calcadas son el defecto más frecuente). NO toca PLAN ni el juez (que quedan en el default determinístico).
+  const tempSelect = (() => { const v = parseFloat(process.env.TEMP_GEN); return Number.isFinite(v) ? v : 0.7; })();
+  const data = await callClaude({ model:MODEL_GEN, system:_promptSelect(PEDIR_SELECT, NUM_CUENTAS), messages, tools:[], maxTokens:6000, temperature: tempSelect });
   try{
     const j = parseReporteJSON(_textoJSON(data.content));
     return Array.isArray(j && j.seleccion) ? j.seleccion : [];
@@ -1322,18 +1488,33 @@ function _cargoCorto(head, kws){
   else best = kwSeg || rolSeg || segs[0];
   return cap(best);
 }
-// ¿El cargo muestra la función objetivo o es un decisor genérico? Si no (ej. "Mercadeo", "Analista"
-// suelto cuando el comprador es Operaciones/Facilities), se descarta la card.
-function _rolRelevante(cargo, titulos){
+// ¿El cargo muestra FIT-DE-FUNCIÓN real, o solo seniority genérica? ENDURECIDO (decisión del cliente):
+// antes alcanzaba con CUALQUIER marcador de seniority (gerente/director/...) aunque la función no tuviera
+// nada que ver con el ICP -> dejaba pasar adyacentes (geotecnia, militar, consultora) que el juez después
+// rechaza. Ahora exige:
+//   (a) FIT DE FUNCIÓN real: el cargo contiene un término del ICP (titulos_objetivo), O
+//   (b) marcador de DECISIÓN + alguna pista de vertical (un término del ICP O de las industrias del ICP
+//       en el cargo). La seniority genérica SOLA (ej. "Director" a secas, sin pista de vertical) ya NO basta.
+// Cuando el ICP no aporta señales de vertical (sin titulos ni industrias), caemos al comportamiento previo
+// (marcador de decisión basta) para no vaciar el pool de clientes con ICP pobre.
+function _rolRelevante(cargo, titulos, industrias){
   const c = _norm(cargo);
+  if(!c) return false;
   const kws = (titulos||[]).map(k=>_norm(k)).filter(k=>k.length>=3);
-  if(kws.some(k=>c.includes(k))) return true;
-  const jefes = ['gerente','director','jefe','jefa','head','vp','vice','chief','ceo','coo','cfo','cto','founder','owner','dueno','propietario','presidente','lider','leader','coordinador','coordinadora','manager','responsable','encargado','encargada','administrador','administradora','superintendente'];
-  return jefes.some(j=>c.includes(j));
+  if(kws.some(k=>c.includes(k))) return true;                 // (a) fit de función directo
+  const decide = _MARCADOR_DECISION.test(c);
+  if(!decide) return false;                                   // sin decisión y sin fit -> fuera
+  const indKws = (industrias||[]).map(k=>_norm(k)).filter(k=>k.length>=4);
+  const pistas = kws.concat(indKws);
+  if(!pistas.length) return true;                             // ICP sin señales de vertical -> decisión basta (fallback)
+  // (b) decisión + pista de vertical en el cargo. Si hay pistas pero ninguna aparece, es seniority
+  // genérica off-vertical -> NO relevante (que se hunda antes de llegar a la IA).
+  return pistas.some(k=>c.includes(k));
 }
 
 function armarReporte(plan, seleccion, pool, senales){
   const titulos = (plan._plan && plan._plan.titulos_objetivo) || [];
+  const industrias = (plan._plan && plan._plan.industrias) || [];
   const byId = new Map(pool.map(p=>[p.id, p]));
   const cards=[]; const usados=new Set(); const usadasEmp=new Set();
   // ROL: solo cuando el ICP pide gerencia/dueño preferimos NO tomar IC sueltos si hay decisores disponibles.
@@ -1352,7 +1533,7 @@ function armarReporte(plan, seleccion, pool, senales){
     if(!empresa){ if(commit) console.warn(`[SELECT] card sin empresa real, descartada: ${p.name}`); return null; }
 
     // --- GUARDA DE FUNCIÓN: el cargo tiene que mostrar la función objetivo o ser un decisor ---
-    if(!_rolRelevante(String(p.head||'').split('@')[0], titulos)){
+    if(!_rolRelevante(String(p.head||'').split('@')[0], titulos, industrias)){
       if(commit) console.warn(`[SELECT] card DESCARTADA por FUNCIÓN equivocada/irrelevante: ${p.name} ("${String(p.head||'').slice(0,50)}")`);
       return null;
     }
@@ -1485,11 +1666,18 @@ function _geoIncoherente(data){
 
 // --- COHERENCIA DEL CONTEO DE PAÍSES (determinística) -------------------------
 // Defecto recurrente que se escapa al cliente: el número del stat de países (ej. "4") no coincide con la
-// cantidad de países realmente NOMBRADOS en el título (h1_post) y el ICP "Geografía" (ej. solo 3 listados).
+// cantidad de países realmente NOMBRADOS en el título (h1_post), el ICP "Geografía" y la prosa del lead.
 // DECISIÓN DE PRODUCTO: un mismatch de conteo es COSMÉTICO, no un defecto de lead → NORMALIZAR conservador
 // (auto-corregir el número a la cantidad de países efectivamente nombrados) en vez de retener todo el reporte.
 // NUNCA agrega países: solo baja/ajusta el número del stat a lo que el texto ya nombra. Si no se puede
 // normalizar (no hay stat de países, o el texto no nombra ningún país), devuelve {rechazar:true}.
+//
+// EL LEAD TAMBIÉN CUENTA (residual brandtrack #3: stat=3, ICP/h1=3, pero el lead nombraba 4): la prosa del
+// lead es texto visible que el prospecto lee, así que si nombra países FUERA del set canónico (h1_post + ICP),
+// hay incoherencia visible que NO se arregla normalizando el stat. NO subimos el conteo a lo que dice el lead
+// (eso sería "agregar países" y el lead no es la fuente canónica del conteo): el set canónico sigue siendo
+// h1_post + ICP "Geografía". El lead actúa solo como CHEQUE: si menciona más países que el canónico, no se
+// puede normalizar sin reescribir prosa → {rechazar:true} (devolvemos al juez/fixes en vez de mostrar el bug).
 // MUTA data.stats in place (ajusta el num del stat de países). Devuelve {ajustado, antes, despues} o null.
 function _paisesIncoherente(data){
   if(!data || !Array.isArray(data.stats)) return null;
@@ -1500,15 +1688,22 @@ function _paisesIncoherente(data){
   const m = String(stat.num||'').match(/\d+/);
   if(!m) return null;                            // el num no es numérico (ej. una ciudad) → no juzgamos
   const declarado = parseInt(m[0], 10);
-  // 2) Países efectivamente NOMBRADOS en h1_post + ICP "Geografía" (unión, sin duplicar).
+  // 2) Set CANÓNICO de países: los NOMBRADOS en h1_post + ICP "Geografía" (unión, sin duplicar). Esta es la
+  //    fuente del conteo; el lead NO la amplía (nunca agregamos países), solo la audita en el paso 4.
   const nombrados = new Set();
   for(const p of _paisesDeTexto(data.h1_post)) nombrados.add(p);
   const icpGeo = (data.icp||[]).find(o => o && /geograf/.test(_norm(o.title||o.titulo||'')));
   if(icpGeo) for(const p of _paisesDeTexto(icpGeo.desc)) nombrados.add(p);
   const real = nombrados.size;
-  if(declarado === real) return null;            // coherente, nada que hacer
-  if(real <= 0) return { rechazar:true, declarado, real }; // no podemos normalizar a 0 países nombrados
-  // 3) Normalización conservadora: el stat pasa a la cantidad realmente nombrada (sin tocar el texto, sin
+  // stat numérico > 0 pero el texto no nombra país reconocible: no se puede normalizar. (declarado 0 + 0 nombrados
+  // es coherente y degenerado: cae al chequeo del lead y, si tampoco hay extra, al `declarado === real` de abajo.)
+  if(real <= 0 && declarado > 0) return { rechazar:true, declarado, real };
+  // 3) CHEQUE DEL LEAD (conservador, no agrega países): si la prosa del lead nombra países que NO están en el
+  //    set canónico, queda un mismatch VISIBLE que no se arregla tocando solo el stat → rechazar para fixes.
+  const leadExtra = _paisesDeTexto(data.lead).filter(p => !nombrados.has(p));
+  if(leadExtra.length) return { rechazar:true, declarado, real, leadExtra };
+  if(declarado === real) return null;            // coherente (stat == canónico y lead no agrega), nada que hacer
+  // 4) Normalización conservadora: el stat pasa a la cantidad realmente nombrada (sin tocar el texto, sin
   //    agregar países). Preserva sufijos como "+" si los hubiera (ej. "4+" → "3+").
   const sufijo = String(stat.num||'').replace(/^\s*\d+/, '');
   stat.num = `${real}${sufijo}`;
@@ -1526,6 +1721,39 @@ function _calidezInsuficiente(data){
   if(!cards.length) return null;                 // sin cards, otros gates ya lo manejan
   const warm = cards.filter(c => /1er|2do/.test(String(c.grado||''))).length;
   return warm < min ? { warm, total: cards.length, min } : null;
+}
+
+// ¿Las cards tienen FIT BUENO? = cada card on-vertical (no cae en verticales_excluir) Y con cargo decisor
+// (marcador de decisión). Es la condición que habilita mandar un reporte FRÍO (gate de calidez condicional).
+function _cardsFitBueno(data, plan){
+  const cards = (data && data.cards) || [];
+  if(!cards.length) return false;
+  const excluir = _verticalesExcluir(plan);
+  return cards.every(c => {
+    const cargo = _norm(c.cargo||'');
+    const decisor = _MARCADOR_DECISION.test(cargo);
+    const off = excluir.length && (_matchVerticalExcluir(c.empresa, excluir) || _matchVerticalExcluir(c.cargo, excluir));
+    return decisor && !off;
+  });
+}
+
+// GATE DE CALIDEZ CONDICIONAL AL FIT (decisión del jefe: mandar frío SI el fit es bueno). Resuelve qué hacer
+// con un reporte de 0 cálidas según WARM_GATE_MODE:
+//   off  -> nunca retiene por calidez.
+//   hard -> retiene SIEMPRE que haya 0 cálidas (comportamiento histórico).
+//   soft (default) -> NO retiene si el fit es bueno (juez APROBADO O cards on-vertical decisor): se manda con
+//        flag interno frio_campana_conexion:true (IBT hace campaña de conexión; el grado NO va en el PDF).
+//        Retiene SOLO frío + mal fit (caso que el juez ya rechaza igual).
+// Devuelve { retener:bool, frio:bool } o null si la calidez alcanza (no es un caso frío).
+function _resolverGateCalidez(data, plan, judgeResult){
+  const warmMal = _calidezInsuficiente(data);
+  if(!warmMal) return null;                       // hay suficientes cálidas → no es caso frío
+  const mode = String(process.env.WARM_GATE_MODE || 'soft').toLowerCase();
+  if(mode === 'off')  return { retener:false, frio:true, warmMal };
+  if(mode === 'hard') return { retener:true,  frio:true, warmMal };
+  // soft: el fit bueno habilita mandar frío
+  const fitBueno = (judgeResult && judgeResult.veredicto === 'APROBADO') || _cardsFitBueno(data, plan);
+  return { retener: !fitBueno, frio:true, fitBueno, warmMal };
 }
 
 // --- TAMAÑO-COHERENCIA (determinística, análoga a geo) ------------------------
@@ -1646,21 +1874,32 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
       console.warn(`[PAISES] Conteo incoherente normalizado: stat ${paisesMal.antes} → ${paisesMal.despues} (países nombrados: ${paisesMal.paises.join(', ')}).`);
       cleanHtml = limpiarHtml(renderReport(data));
     } else if (paisesMal && paisesMal.rechazar) {
-      console.warn(`[PAISES] No se pudo normalizar (stat=${paisesMal.declarado}, países nombrados=${paisesMal.real}) → RECHAZADO.`);
+      const fixPaises = (paisesMal.leadExtra && paisesMal.leadExtra.length)
+        ? `CONTEO DE PAÍSES INCOHERENTE: el lead nombra países (${paisesMal.leadExtra.join(', ')}) que NO están en el título (h1_post) ni en el ICP "Geografía". Unificá: el lead, el h1_post, el ICP "Geografía" y el número del stat tienen que nombrar/contar EXACTAMENTE los MISMOS países (reducí, nunca agregues países que el cliente no opera).`
+        : `CONTEO DE PAÍSES INCOHERENTE: el stat dice ${paisesMal.declarado} países pero el título y el ICP "Geografía" no nombran ninguno reconocible. Hacé que el número del stat, los países de h1_post y los del ICP "Geografía" sean EXACTAMENTE los mismos.`;
+      console.warn(`[PAISES] No se pudo normalizar (stat=${paisesMal.declarado}, canónico=${paisesMal.real}${paisesMal.leadExtra&&paisesMal.leadExtra.length?`, lead-extra=${paisesMal.leadExtra.join('/')}`:''}) → RECHAZADO.`);
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
-        fixes: [`CONTEO DE PAÍSES INCOHERENTE: el stat dice ${paisesMal.declarado} países pero el título y el ICP "Geografía" no nombran ninguno reconocible. Hacé que el número del stat, los países de h1_post y los del ICP "Geografía" sean EXACTAMENTE los mismos.`].concat(judgeResult.fixes||[]) };
+        fixes: [fixPaises].concat(judgeResult.fixes||[]) };
     }
-    // CALIDEZ: bloquea SOLO el extremo (0 cards cálidas, todas 3er grado / fuera de red).
-    const warmMal = _calidezInsuficiente(data);
-    if (warmMal) {
-      console.warn(`[WARM] Calidez insuficiente: ${warmMal.warm}/${warmMal.total} cards cálidas (mínimo ${warmMal.min}) → RECHAZADO.`);
-      judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
-        fixes: [`CALIDEZ INSUFICIENTE: las ${warmMal.total} cuentas son 3er grado / fuera de red (0 cálidas). Un reporte 100% frío quema credibilidad. Priorizá decisores en 1er/2do grado (red cercana) aunque haya que repetir vertical.`].concat(judgeResult.fixes||[]) };
+    // CALIDEZ (condicional al fit): un reporte 100% frío NO se retiene si el fit es bueno (se manda con flag
+    // frio_campana_conexion para que IBT haga campaña de conexión). Solo retiene frío + mal fit. WARM_GATE_MODE.
+    let frioCampanaConexion = false;
+    const gateCal = _resolverGateCalidez(data, plan, judgeResult);
+    if (gateCal) {
+      const w = gateCal.warmMal;
+      if (gateCal.retener) {
+        console.warn(`[WARM] Calidez insuficiente + fit no bueno: ${w.warm}/${w.total} cards cálidas (mínimo ${w.min}) → RECHAZADO.`);
+        judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
+          fixes: [`CALIDEZ INSUFICIENTE: las ${w.total} cuentas son 3er grado / fuera de red (0 cálidas) y el fit no es claramente bueno. Priorizá decisores en 1er/2do grado (red cercana) o subí el fit (on-vertical, decisor) aunque haya que repetir vertical.`].concat(judgeResult.fixes||[]) };
+      } else {
+        frioCampanaConexion = true;
+        console.warn(`[WARM] Reporte FRÍO con buen fit (${w.warm}/${w.total} cálidas) → se MANDA con frio_campana_conexion:true (campaña de conexión; el grado NO va en el PDF).`);
+      }
     }
     const aptoEnvio = cardsValidas >= MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO';
     const descartadas = [];
     console.log(aptoEnvio
-      ? `[INTEGRIDAD] OK: ${cardsValidas} cards completas + juez APROBADO.`
+      ? `[INTEGRIDAD] OK: ${cardsValidas} cards completas + juez APROBADO.${frioCampanaConexion?' (frío, campaña de conexión)':''}`
       : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} completas, juez ${judgeResult.veredicto}.`);
 
     // El PDF se renderiza una sola vez y SOLO si el reporte quedó apto. Si está rechazado
@@ -1681,6 +1920,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
       anclado: cliente.anclado,
       cliente_resuelto: cliente,
       apto_envio: aptoEnvio,
+      frio_campana_conexion: frioCampanaConexion,   // reporte frío pero on-fit: IBT corre campaña de conexión
       cards_validas: cardsValidas,
       cards_descartadas: descartadas,
       nombre, email,
@@ -1822,21 +2062,32 @@ app.post('/generar-reporte', async (req, res) => {
       console.warn(`[PAISES] Conteo incoherente normalizado: stat ${paisesMal.antes} → ${paisesMal.despues} (países nombrados: ${paisesMal.paises.join(', ')}).`);
       cleanHtml = limpiarHtml(renderReport(data));
     } else if (paisesMal && paisesMal.rechazar) {
-      console.warn(`[PAISES] No se pudo normalizar (stat=${paisesMal.declarado}, países nombrados=${paisesMal.real}) → RECHAZADO.`);
+      const fixPaises = (paisesMal.leadExtra && paisesMal.leadExtra.length)
+        ? `CONTEO DE PAÍSES INCOHERENTE: el lead nombra países (${paisesMal.leadExtra.join(', ')}) que NO están en el título (h1_post) ni en el ICP "Geografía". Unificá: el lead, el h1_post, el ICP "Geografía" y el número del stat tienen que nombrar/contar EXACTAMENTE los MISMOS países (reducí, nunca agregues países que el cliente no opera).`
+        : `CONTEO DE PAÍSES INCOHERENTE: el stat dice ${paisesMal.declarado} países pero el título y el ICP "Geografía" no nombran ninguno reconocible. Hacé que el número del stat, los países de h1_post y los del ICP "Geografía" sean EXACTAMENTE los mismos.`;
+      console.warn(`[PAISES] No se pudo normalizar (stat=${paisesMal.declarado}, canónico=${paisesMal.real}${paisesMal.leadExtra&&paisesMal.leadExtra.length?`, lead-extra=${paisesMal.leadExtra.join('/')}`:''}) → RECHAZADO.`);
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
-        fixes: [`CONTEO DE PAÍSES INCOHERENTE: el stat dice ${paisesMal.declarado} países pero el título y el ICP "Geografía" no nombran ninguno reconocible. Hacé que el número del stat, los países de h1_post y los del ICP "Geografía" sean EXACTAMENTE los mismos.`].concat(judgeResult.fixes||[]) };
+        fixes: [fixPaises].concat(judgeResult.fixes||[]) };
     }
-    // CALIDEZ: bloquea SOLO el extremo (0 cards cálidas, todas 3er grado / fuera de red).
-    const warmMal = _calidezInsuficiente(data);
-    if (warmMal) {
-      console.warn(`[WARM] Calidez insuficiente: ${warmMal.warm}/${warmMal.total} cards cálidas (mínimo ${warmMal.min}) → RECHAZADO.`);
-      judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
-        fixes: [`CALIDEZ INSUFICIENTE: las ${warmMal.total} cuentas son 3er grado / fuera de red (0 cálidas). Un reporte 100% frío quema credibilidad. Priorizá decisores en 1er/2do grado (red cercana) aunque haya que repetir vertical.`].concat(judgeResult.fixes||[]) };
+    // CALIDEZ (condicional al fit): un reporte 100% frío NO se retiene si el fit es bueno (se manda con flag
+    // frio_campana_conexion para que IBT haga campaña de conexión). Solo retiene frío + mal fit. WARM_GATE_MODE.
+    let frioCampanaConexion = false;
+    const gateCal = _resolverGateCalidez(data, plan, judgeResult);
+    if (gateCal) {
+      const w = gateCal.warmMal;
+      if (gateCal.retener) {
+        console.warn(`[WARM] Calidez insuficiente + fit no bueno: ${w.warm}/${w.total} cards cálidas (mínimo ${w.min}) → RECHAZADO.`);
+        judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
+          fixes: [`CALIDEZ INSUFICIENTE: las ${w.total} cuentas son 3er grado / fuera de red (0 cálidas) y el fit no es claramente bueno. Priorizá decisores en 1er/2do grado (red cercana) o subí el fit (on-vertical, decisor) aunque haya que repetir vertical.`].concat(judgeResult.fixes||[]) };
+      } else {
+        frioCampanaConexion = true;
+        console.warn(`[WARM] Reporte FRÍO con buen fit (${w.warm}/${w.total} cálidas) → se MANDA con frio_campana_conexion:true (campaña de conexión; el grado NO va en el PDF).`);
+      }
     }
     const aptoEnvio = cardsValidas >= MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO';
     const descartadas = [];
     console.log(aptoEnvio
-      ? `[INTEGRIDAD] OK: ${cardsValidas} cards completas + juez APROBADO.`
+      ? `[INTEGRIDAD] OK: ${cardsValidas} cards completas + juez APROBADO.${frioCampanaConexion?' (frío, campaña de conexión)':''}`
       : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} completas, juez ${judgeResult.veredicto}.`);
 
     // PDF solo si quedó apto; si está rechazado se devuelve pdf_base64 null.
@@ -1857,6 +2108,7 @@ app.post('/generar-reporte', async (req, res) => {
       anclado: cliente.anclado,
       cliente_resuelto: cliente,
       apto_envio: aptoEnvio,
+      frio_campana_conexion: frioCampanaConexion,   // reporte frío pero on-fit: IBT corre campaña de conexión
       cards_validas: cardsValidas,
       cards_descartadas: descartadas,
       nombre: nombre || '', email,
@@ -1901,5 +2153,7 @@ module.exports = {
   parseReporteJSON, _rankFit, _rankSenioridad, _parseProfile, _sizeBoost,
   _norm, _empresaDeHeadline, _empKey, _slugCos, _degOrdinal, _headlineLimpio, _fechaHoy,
   _esICsuelto, _icpPideDecisores, _matchFuncion, _warmth, _geoAliasSet,
-  _geoIncoherente, _paisesIncoherente, _calidezInsuficiente, _paisesDeTexto
+  _geoIncoherente, _paisesIncoherente, _calidezInsuficiente, _paisesDeTexto,
+  _rolRelevante, _verticalesExcluir, _matchVerticalExcluir, _candBueno,
+  _cardsFitBueno, _resolverGateCalidez, sourceConRetry
 };
