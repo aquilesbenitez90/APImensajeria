@@ -115,9 +115,26 @@ function _registrarResultado(rec){
     fs.appendFile(RESULT_LOG, JSON.stringify(rec) + '\n', e => { if(e) console.warn('[LOG] no pude escribir resultado:', e.message); });
   }catch(e){ console.warn('[LOG] error registrando resultado:', e.message); }
 }
+// Motivo de rechazo canónico y AGREGABLE (para contar patrones de falla en resultados.jsonl).
+// Devuelve el PRIMER motivo determinístico que disparó, en orden de prioridad:
+//   sourcing_vacio > integridad > geo > paises > tamano > calidez > rol_bajo > juez > ok
+// Recibe los flags ya calculados en el endpoint (las guardas ya corrieron); 'rol_bajo' no
+// tiene guarda determinística en este punto (se descarta antes, en armarReporte) → cae a 'juez'.
+function _motivoRechazo({ aptoEnvio, sourcingVacio, integridadMal, geoMal, paisesMal, tamMal, calidezMal, juezRechazo } = {}){
+  if (sourcingVacio) return 'sourcing_vacio';
+  if (integridadMal) return 'integridad';
+  if (geoMal) return 'geo';
+  if (paisesMal) return 'paises';
+  if (tamMal) return 'tamano';
+  if (calidezMal) return 'calidez';
+  if (aptoEnvio) return 'ok';
+  if (juezRechazo) return 'juez';
+  return 'juez';
+}
+
 // Construye el registro de un job. NO incluye el PDF (pesa). Incluye el ICP y las cards
 // (empresa/cargo/grado/tamaño) + calidez, que es lo que la IA usa para detectar patrones.
-function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnvio, pageCount, error }){
+function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnvio, pageCount, error, motivo_rechazo }){
   const t = _stats().total;
   const icp = (plan && plan._plan) || {};
   const cards = (((data && data.cards) || [])).map(c => ({
@@ -125,11 +142,16 @@ function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnv
     ubicacion: c.ubicacion, urn: c.urn, headcount: (c.headcount ?? null)
   }));
   const warm = cards.filter(c => /1er|2do/.test(c.grado || '')).length;
+  // motivo canónico AGREGABLE. En el branch de error derivamos sourcing_vacio del mensaje
+  // (el pool vacío lanza "Sourcing devolvió 0 candidatos"); el resto lo pasa el endpoint.
+  const motivo = motivo_rechazo
+    || (error ? (/0 candidatos/i.test(error) ? 'sourcing_vacio' : 'error') : undefined);
   return {
     ts: new Date().toISOString(),
     jobId: jobId || null,
     status: error ? 'error' : 'ok',
     error: error || undefined,
+    motivo_rechazo: motivo,
     empresa: (cliente && cliente.empresa) || (input && input.empresa) || '',
     dominio: (input && input.dominio) || '',
     email: (input && input.email) || '',
@@ -2007,8 +2029,17 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
       tokens_cache_write: _stats().total.cache_write, tokens_cache_read: _stats().total.cache_read,
       finishedAt: Date.now()
     });
-    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId }, cliente, plan, data, judgeResult, aptoEnvio, pageCount }));
-    console.log(`========== Job ${jobId} - ${aptoEnvio ? `OK ${pageCount} páginas` : 'NO apto (sin PDF)'}, juez FINAL ${judgeResult.veredicto} ${judgeResult.score}/8 ==========\n`);
+    const motivoRechazo = _motivoRechazo({
+      aptoEnvio,
+      integridadMal: cardsValidas < MIN_CARDS_OK,
+      geoMal: !!geoMal,
+      paisesMal: !!(paisesMal && paisesMal.rechazar),
+      tamMal: !!tamMal,
+      calidezMal: !!(gateCal && gateCal.retener),
+      juezRechazo: judgeResult.veredicto === 'RECHAZADO'
+    });
+    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId }, cliente, plan, data, judgeResult, aptoEnvio, pageCount, motivo_rechazo: motivoRechazo }));
+    console.log(`========== Job ${jobId} - ${aptoEnvio ? `OK ${pageCount} páginas` : 'NO apto (sin PDF)'}, juez FINAL ${judgeResult.veredicto} ${judgeResult.score}/8 (motivo: ${motivoRechazo}) ==========\n`);
   } catch (err) {
     console.error(`[Job ${jobId}] Error:`, err);
     jobs.set(jobId, { status: 'error', error: err.message, finishedAt: Date.now() });
@@ -2192,7 +2223,16 @@ app.post('/generar-reporte', async (req, res) => {
     }
 
     logTokenCost('generar-reporte');
-    _registrarResultado(_recResultado({ input: { email, dominio, empresa, profileId }, cliente, plan, data, judgeResult, aptoEnvio, pageCount }));
+    const motivoRechazo = _motivoRechazo({
+      aptoEnvio,
+      integridadMal: cardsValidas < MIN_CARDS_OK,
+      geoMal: !!geoMal,
+      paisesMal: !!(paisesMal && paisesMal.rechazar),
+      tamMal: !!tamMal,
+      calidezMal: !!(gateCal && gateCal.retener),
+      juezRechazo: judgeResult.veredicto === 'RECHAZADO'
+    });
+    _registrarResultado(_recResultado({ input: { email, dominio, empresa, profileId }, cliente, plan, data, judgeResult, aptoEnvio, pageCount, motivo_rechazo: motivoRechazo }));
 
     return res.json({
       status: 'ok',
@@ -2223,7 +2263,12 @@ app.post('/generar-reporte', async (req, res) => {
   });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, jobs_activos: jobs.size, cuentas: NUM_CUENTAS }));
+app.get('/health', (req, res) => {
+  // jobs_activos = jobs corriendo AHORA (termómetro de zombies); jobs_en_cache = total en el Map
+  // (incluye terminados ok/error hasta el barrido de 1h). jobs.size mezclaba ambos y confundía.
+  let activos = 0; for (const j of jobs.values()) if (j.status === 'processing') activos++;
+  res.json({ ok: true, jobs_activos: activos, jobs_en_cache: jobs.size, cuentas: NUM_CUENTAS });
+});
 
 // Descarga del log de resultados (JSONL). ?tail=N devuelve solo las últimas N líneas.
 // Cada línea es un job estructurado, listo para analizar con IA.
