@@ -301,7 +301,9 @@ Criterios:
 Respondé EXCLUSIVAMENTE con JSON válido, sin markdown, sin texto extra:
 {"veredicto":"APROBADO"|"RECHAZADO","score":<0-8>,"fixes":["fix concreto 1","fix concreto 2"]}
 
-APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concretas.`;
+REGLA DE FORMATO DE "fixes" (CRÍTICA — si el JSON se trunca, se pierde tu voto y se rechaza por seguridad): "fixes" tiene MÁXIMO 2 ítems, cada uno CONCISO (1-2 oraciones, instrucción directa). NO enumeres todos los problemas: priorizá los 2 más graves. NO escribas párrafos largos ni listes card por card; un fix puntual y accionable por ítem.
+
+APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concretas (máximo 2).`;
 
 // ---------------------------------------------------------------------------
 // Llamadas a Claude — CON PROMPT CACHING + logging de tokens
@@ -422,7 +424,7 @@ async function _judgeVote(htmlLite, pageCount, temperature, voteIdx) {
         role: 'user',
         content: `Cuentas esperadas: ${NUM_CUENTAS}\nPáginas esperadas: ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}\nPáginas del PDF renderizado: ${pageCount}\n\nHTML del reporte:\n${htmlLite}`
       }],
-      maxTokens: 4000,
+      maxTokens: 6000,
       temperature
     });
     const raw = data.content.find(b => b.type === 'text')?.text || '';
@@ -1200,14 +1202,22 @@ async function sourceCandidates(plan, cliente){
   return { pool: final, senales: senales.slice(0, 5) };
 }
 
-// ¿Un candidato del pool es "BUENO"? = cálido (1er/2do grado) Y on-fit (la función matchea el ICP) Y
-// NO off-vertical (su empresa/headline no cae en una vertical a EXCLUIR del PLAN). Es el contador que
-// decide si vale la pena gastar otra pasada de sourcing. Defensivo con campos faltantes.
-function _candBueno(c, titulos, excluir){
+// ¿Un candidato del pool es "BUENO"? = "comprador presentable", NO solo "cálido-on-vertical". Exige:
+//   (1) cálido (1er/2do grado),
+//   (2) DECISOR/on-fit real vía _rolRelevante (función del ICP, o decisión + pista de vertical) — un IC suelto
+//       on-vertical NO cuenta: en y.uno 14 procesadores de pago (pares, ICs on-vertical) inflaban el contador
+//       y hacían creer que pass 1 estaba llena → la multi-pasada nunca escalaba y el juez los volteaba 0/8;
+//   (3) NO off-vertical (vertical adyacente a EXCLUIR del PLAN);
+//   (4) NO competidor/proveedor (PAR): Monnet/Payway/Bci no deben inflar el contador. Por eso recibe `esComp`.
+// Es el contador que decide si vale la pena gastar otra pasada de sourcing. Defensivo con campos faltantes.
+function _candBueno(c, titulos, excluir, industrias, esComp){
   if(!c) return false;
   const calido = c.dist===1 || c.dist===2;
   if(!calido) return false;
-  if(!_matchFuncion(c.head, titulos)) return false;
+  // EJE DECISOR/FIT: reusamos _rolRelevante (no solo _matchFuncion) para excluir ICs sueltos on-vertical.
+  if(!_rolRelevante(c.head, titulos, industrias)) return false;
+  if(c.icSuelto) return false;                                   // marca explícita de IC suelto del sourcing
+  if(typeof esComp === 'function' && (esComp(c.empresa) || esComp(c.name))) return false;  // PARES fuera del conteo
   if(excluir && excluir.length && (_matchVerticalExcluir(c.empresa, excluir) || _matchVerticalExcluir(c.head, excluir))) return false;
   return true;
 }
@@ -1226,6 +1236,21 @@ async function sourceConRetry(plan, cliente){
   const MAX_PASSES   = Math.max(1, parseInt(process.env.SOURCE_MAX_PASSES || '3', 10));
   const titulos = (plan && plan._plan && Array.isArray(plan._plan.titulos_objetivo)) ? plan._plan.titulos_objetivo : [];
   const excluir = _verticalesExcluir(plan);
+  // industrias (pista de vertical para _rolRelevante) y detector de PARES (competidor/proveedor) para el conteo
+  // ENDURECIDO de "buenos". Replicamos la MISMA salvaguarda que sourceCandidates: no usar como filtro un término
+  // que sea el vertical del propio comprador (ej. "inmobiliaria"~"inmobiliario").
+  const icp = (plan && plan._plan) || {};
+  const industriasICP = Array.isArray(icp.industrias) ? icp.industrias : [];
+  const _indNorm = industriasICP.map(_norm).filter(Boolean);
+  const _raiz = w => w.slice(0, Math.max(5, w.length - 2));
+  const competidores = (Array.isArray(icp.competidores)?icp.competidores:[]).map(_norm).filter(c=>c.length>=4);
+  const compTerminos = (Array.isArray(icp.competidor_terminos)?icp.competidor_terminos:[])
+    .map(_norm).filter(t => {
+      if(t.length < 4) return false;
+      const rt = _raiz(t);
+      return !_indNorm.some(ind => { const ri=_raiz(ind); return ind.includes(t)||t.includes(ind)||rt.startsWith(ri)||ri.startsWith(rt); });
+    });
+  const esComp = (emp) => { const e=_norm(emp||''); if(!e) return false; return _esCompetidor(e, competidores) || compTerminos.some(t=>e.includes(t)); };
 
   // Acumulador por id. Conservamos el orden de aparición; el ranking final ya lo hizo sourceCandidates.
   const porId = new Map();
@@ -1244,8 +1269,8 @@ async function sourceConRetry(plan, cliente){
       res = await sourceCandidates(plan, cliente);
     }
     acumular(res);
-    const buenos = [...porId.values()].filter(c => _candBueno(c, titulos, excluir)).length;
-    console.log(`[SOURCE] pasada ${pass}/${MAX_PASSES}: pool acumulado ${porId.size} | BUENOS (cálido+on-fit+on-vertical) ${buenos}/${NUM_CUENTAS}.`);
+    const buenos = [...porId.values()].filter(c => _candBueno(c, titulos, excluir, industriasICP, esComp)).length;
+    console.log(`[SOURCE] pasada ${pass}/${MAX_PASSES}: pool acumulado ${porId.size} | BUENOS (cálido+decisor/fit+on-vertical+no-par) ${buenos}/${NUM_CUENTAS}.`);
     if(buenos >= NUM_CUENTAS) break;        // adaptativo: cliente fácil corta acá, no gasta pasadas extra
   }
 
@@ -1290,6 +1315,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - AÑO DE FUNDACIÓN (cuidado especial): es un dato que suele estar ambiguo o contradictorio entre fuentes. Ponelo SOLO si una fuente autoritativa y específica lo confirma (la página propia del cliente o su perfil de Endeavor/Crunchbase). Si las fuentes que ves en web_search NO coinciden, o si solo lo viste en directorios genéricos, NO lo afirmes: omití el stat de año y usá otro verificable en su lugar (países de operación, ciudades de cobertura, año de un hito real como un premio o reconocimiento, la cantidad ${N} de cuentas). Nunca elijas "el primero que aparezca": si el cliente tiene un reconocimiento (ej. Endeavor) con un año, ese año es más confiable que un directorio.
 - NOMBRES DE TERCEROS (CRÍTICO para la credibilidad): PROHIBIDO nombrar a una empresa específica como cliente, aliado o socio del cliente (ej. "trabaja con X", "X es cliente", "(cliente verificado)") salvo que web_search lo confirme EXPLÍCITAMENTE en una fuente. Si querés ilustrar el canal o el mercado, hacelo en GENÉRICO ("retailers de mejoramiento del hogar", "aseguradoras con línea hogar") SIN nombre propio y SIN la palabra "verificado". Un nombre de tercero inventado quema el reporte si el prospecto lo chequea.
 - El ICP card "Rol del decisor" y el bloque _plan.funcion deben describir al MISMO comprador.
+- PLATAFORMA / INFRAESTRUCTURA / API (REGLA CRÍTICA, define industrias y comprador_ideal): si el cliente es una PLATAFORMA, INFRAESTRUCTURA o API que HABILITA una transacción de terceros (orquestación de pagos, logística, identidad/KYC, mensajería, antifraude), el comprador NO es otro proveedor del mismo servicio (par/competidor) sino la EMPRESA QUE USA ese servicio para su propio negocio. Ejemplo: un orquestador de pagos vende a quien COBRA online (ecommerce, marketplace, retailer, aerolínea, SaaS con suscripción), NO a otro PSP/procesador/pasarela. Preguntate SIEMPRE: ¿quién FIRMA EL CHEQUE para usar esto? Esa empresa es el comprador y define "industrias". En estos casos: (1) cargá las verticales del USUARIO del servicio en "industrias" (ej. para orquestador de pagos: Comercio al por menor, Comercio electrónico, Aerolíneas, Software, Marketplaces), NUNCA el rubro de la propia plataforma; (2) cargá los PROVEEDORES/PARES del MISMO servicio (ej. PSPs, procesadores, pasarelas) en "competidores" y/o "competidor_terminos" y/o "verticales_excluir", para que el sourcing los FILTRE y no se cuelen como cuentas.
 - COMPRADOR IDEAL (_plan.comprador_ideal, CRÍTICO para el fit de comprador): redactá en 1-2 oraciones QUÉ TIENE QUE SER CIERTO de una EMPRESA para que compre, revenda o aloje el producto del cliente, como un test de INCLUSIÓN y EXCLUSIÓN derivado del research que ya hiciste. No basta con compartir vertical: describí el mecanismo de compra real (ej. para una marca de joyería que vende vía corners, INCLUYE "retailers y marcas que operan tiendas/corners propios donde colocar el producto" y EXCLUYE "casas de marcas que licencian a terceros o grupos que no alojan marcas externas"). REGLA ANTI FALSO NEGATIVO: si el research es pobre o dudás, redactá el comprador_ideal de forma INCLUSIVA (qué empresas SÍ compran) y agregá el criterio de EXCLUSIÓN SOLO cuando el research lo respalde; nunca inventes una exclusión que deje fuera compradores legítimos. Español neutro, sin guiones.
 - TÍTULO (H1): el CLIENTE va PRIMERO y resaltado. h1_pre = "" (vacío); h1_company = nombre del cliente (lo resaltado, va primero); h1_post = "${N} clientes potenciales en [País o región]" (es un SUBTÍTULO que va DEBAJO del nombre; SIN "·" ni guion al principio). PROHIBIDO "para escalar".
 - IDIOMA: TODO en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.
@@ -1384,7 +1410,7 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 - NUNCA menciones el grado de conexión (1er/2do/3er grado) ni inventes datos que no estén en lo que te paso.
 - IDIOMA: ángulo y hook en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos.
 - Texto plano: NADA de markdown (sin **negritas**, sin asteriscos). Solo el objeto JSON.
-- SIN GUIONES: NUNCA uses guiones largos (—) ni guiones (-) como conectores o incisos en el ángulo ni en el hook. Usá comas, paréntesis o dos puntos. El texto tiene que sonar a persona, no a IA.
+- SIN GUIONES: NUNCA uses guiones largos (—) ni guiones (-) como conectores o incisos en el ángulo ni en el hook. Usá comas, paréntesis o dos puntos. El texto tiene que sonar a persona, no a IA. OJO con el guion PEGADO a una palabra con espacio de un solo lado (el patrón que más se escapa): "su rol -clave en operaciones" o "el área- de mantenimiento" también están PROHIBIDOS; reescribilos con coma o paréntesis ("su rol, clave en operaciones"). El guion SOLO es válido dentro de compuestos legítimos sin espacios (e-commerce, C-level, co-fundador, start-up).
 - ESTILO HUMANO (sutil): los hooks se mandan como si los escribiera una persona real, no una IA impecable. Está bien (y preferible) que ALGÚN hook corto no termine en punto, o que una pregunta casual vaya sin el signo de cierre "?", como cuando uno escribe rápido por chat. Que sea SUTIL y OCASIONAL: a lo sumo UN detalle así por hook, NUNCA en todos. PROHIBIDO errores de ortografía, palabras mal escritas o mayúsculas raras: lo único "relajado" permitido es esa puntuación final blanda. El mensaje tiene que verse profesional y creíble, solo que humano.
 - COMPETIDORES: NO elijas personas de empresas que sean COMPETIDORAS directas del cliente (que vendan/ofrezcan lo mismo). Preferí empresas que serían CLIENTES del cliente, no rivales.
 
@@ -1439,7 +1465,13 @@ function _sinGuiones(s){
   t = t.replace(/\s*[—–]\s*([^—–]+?)\s*[—–]\s*/g, ' ($1) ');
   t = t.replace(/^\s*[—–]\s*/, '');
   t = t.replace(/\s*[—–]\s*/g, ', ');
+  // Guion conector ASCII: lo tratamos como inciso/conector SOLO cuando hay espacio en AL MENOS un lado
+  // ("a - b", "a -b", "a- b"). Eso NO toca compuestos intra-palabra (e-commerce, C-level, co-fundador,
+  // start-up) porque ahí el guion no tiene espacio en ningún lado. \s+-\s+ primero (ambos lados), luego
+  // los casos de un solo lado, para no dejar comas dobles.
   t = t.replace(/\s+-\s+/g, ', ');
+  t = t.replace(/\s+-(?=\S)/g, ', ');   // "texto -inciso"
+  t = t.replace(/(?<=\S)-\s+/g, ', ');  // "inciso- texto"
   t = t.replace(/\s{2,}/g, ' ').replace(/\s+([,.;:?!)])/g, '$1').replace(/\(\s+/g, '(').replace(/,\s*,/g, ',').replace(/\s+,/g, ',').trim();
   return t;
 }
@@ -1539,8 +1571,9 @@ function armarReporte(plan, seleccion, pool, senales){
     }
 
     // --- GUARD ANTI-MEZCLA: el ángulo/hook tienen que ser de ESTA persona/empresa ---
-    // Señal ESPEJO (detección temprana): SELECT ahora copia nombre/empresa del id elegido. Si el nombre
-    // espejo NO matchea el name real del id, es mezcla casi segura (la IA escribió contra otro renglón).
+    // Señal ESPEJO (detección temprana, fail-closed): SELECT copia nombre/empresa del id elegido. Si el
+    // nombre o la empresa espejo NO matchean los datos reales del id, es un cruce id→persona casi seguro
+    // (la IA escribió contra otro renglón). Antes el espejo era decorativo; ahora descarta la card.
     if(s.nombre){
       const espejoN = _norm(s.nombre), nameN = _norm(p.name);
       const primeroEspejo = espejoN.split(' ')[0] || '';
@@ -1549,6 +1582,21 @@ function armarReporte(plan, seleccion, pool, senales){
       if(!matchEspejo){
         if(commit) console.warn(`[SELECT] card DESCARTADA por MEZCLA (nombre espejo "${s.nombre}" no corresponde al id ${p.name})`);
         return null;
+      }
+    }
+    // Espejo de EMPRESA: si la IA copió la empresa del id, tiene que matchear la empresa real del candidato.
+    // Solo validamos cuando ambas tienen tokens útiles (>=4 chars), para no descartar por abreviaturas/sufijos.
+    if(s.empresa){
+      const espejoEmpN = _norm(s.empresa), realEmpN = _norm(empresa);
+      const espejoTok = espejoEmpN.split(' ').filter(w => w.length >= 4);
+      const realTok = realEmpN.split(' ').filter(w => w.length >= 4);
+      if(espejoTok.length && realTok.length){
+        const matchEmp = realEmpN.includes(espejoEmpN) || espejoEmpN.includes(realEmpN) ||
+                         espejoTok.some(w => realTok.includes(w));
+        if(!matchEmp){
+          if(commit) console.warn(`[SELECT] card DESCARTADA por MEZCLA (empresa espejo "${s.empresa}" no corresponde al id ${p.name} @ ${empresa})`);
+          return null;
+        }
       }
     }
     const primerNombre = (_norm(p.name).split(' ')[0]) || '';
