@@ -1426,6 +1426,33 @@ async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
   }
 }
 
+// Wrapper de robustez del PLAN: reintenta SOLO si el PLAN sale inválido (JSON no parsea, viene incompleto,
+// o validarPlan tira). Es un hipo transitorio (web_search/modelo): el reintento corre EN FALLA (raro), así que
+// el costo extra de tokens es marginal. El CAMINO FELIZ (PLAN válido a la primera) hace UNA sola llamada y
+// devuelve igual que runPlan, sin overhead. Si agota los intentos, deja propagar el error (fail-closed: no se
+// inventa un PLAN). NO toca el prompt ni validarPlan.
+async function runPlanConRetry(args){
+  const MAX   = Math.max(1, parseInt(process.env.PLAN_MAX_TRIES || '2', 10));
+  const delay = parseInt(process.env.PLAN_RETRY_DELAY_MS || '2000', 10);
+  let ultimoError;
+  for(let intento=1; intento<=MAX; intento++){
+    try{
+      const plan = await runPlan(args);
+      validarPlan(plan);   // idempotente: confirma que el PLAN está completo antes de seguir
+      return plan;
+    }catch(e){
+      ultimoError = e;
+      if(intento >= MAX){
+        console.warn(`[PLAN] intento ${intento}/${MAX} inválido (${e.message}); agotados los reintentos, propago el error.`);
+        throw e;
+      }
+      console.warn(`[PLAN] intento ${intento}/${MAX} inválido (${e.message}), reintento en ${delay}ms...`);
+      if(delay > 0) await new Promise(r=>setTimeout(r, delay));
+    }
+  }
+  throw ultimoError;   // inalcanzable, pero deja el contrato claro
+}
+
 // FASE 3 — IA: elige + escribe. Prompt parametrizado por (pedir, usar).
 function _promptSelect(pedir, usar){ return `# IBT GTM — Fase SELECT (elegir + escribir)
 
@@ -1911,7 +1938,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
     const empresaFinal = cliente.empresa || empresa;
 
     const fechaHoy = _fechaHoy();
-    const plan = await runPlan({ empresa: empresaFinal, dominio, email, nombre, cliente, fechaHoy });
+    const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre, cliente, fechaHoy });
     const { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) throw new Error(`Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.`);
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
@@ -2132,7 +2159,7 @@ app.post('/generar-reporte', async (req, res) => {
     const cliente = await resolverCliente({ profileId, dominio, empresa: empresa || dominio });
     const empresaFinal = cliente.empresa || empresa || dominio;
     const fechaHoy = _fechaHoy();
-    const plan = await runPlan({ empresa: empresaFinal, dominio, email, nombre: nombre || '', cliente, fechaHoy });
+    const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre: nombre || '', cliente, fechaHoy });
     const { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) return res.status(422).json({ error: `Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.` });
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
@@ -2294,5 +2321,5 @@ module.exports = {
   _esICsuelto, _icpPideDecisores, _matchFuncion, _warmth, _geoAliasSet,
   _geoIncoherente, _paisesIncoherente, _calidezInsuficiente, _paisesDeTexto,
   _rolRelevante, _verticalesExcluir, _matchVerticalExcluir, _candBueno,
-  _cardsFitBueno, _resolverGateCalidez, sourceConRetry
+  _cardsFitBueno, _resolverGateCalidez, sourceConRetry, runPlanConRetry
 };
