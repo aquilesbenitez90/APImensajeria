@@ -882,7 +882,23 @@ function validarPlan(plan){
 async function sourceCandidates(plan, cliente){
   validarPlan(plan);
   const icp = plan._plan;
-  const geografia = icp.geografia;            // país principal del cliente
+  // GEO-COHERENCIA (determinística, defensa en profundidad): el sourcing confía en `geografia` (país PRINCIPAL).
+  // Bug visto (Robotic Crew US): el PLAN devolvió geografia="Argentina" pero geografias=["Estados Unidos"] → se
+  // buscó en el país equivocado (cards argentinas). Si `geografia` NO está en `geografias` (normalizado) hay
+  // contradicción interna: `geografias` es lo que el PLAN identificó como operación real → auto-corregimos el
+  // principal a geografias[0]. NO tocamos el caso normal (geografia ya está en geografias) ni el multi-país legítimo.
+  {
+    const geos = (Array.isArray(icp.geografias) ? icp.geografias : []).filter(g => g && String(g).trim());
+    if (geos.length) {
+      const principal = _norm(icp.geografia || '');
+      const estaEnLista = geos.some(g => _norm(g) === principal);
+      if (!principal || !estaEnLista) {
+        console.warn(`[GEO] geografia incoherente ("${icp.geografia||''}" no está en geografias [${geos.join(', ')}]) → uso "${geos[0]}".`);
+        icp.geografia = geos[0];
+      }
+    }
+  }
+  const geografia = icp.geografia;            // país principal del cliente (ya geo-coherente)
   const homeGeo   = _norm(geografia||'');
   const funcion   = icp.funcion;
   const titulos   = Array.isArray(icp.titulos_objetivo) ? icp.titulos_objetivo : [];
@@ -2171,13 +2187,20 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
       : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} completas, juez ${judgeResult.veredicto}.`);
 
     // ALWAYS_SEND (default true, decisión del negocio): se genera el PDF SIEMPRE, apto o no,
-    // así n8n siempre tiene qué mandar. El veredicto/motivo se sigue logueando (visibilidad),
-    // pero ya no se retiene. Poné ALWAYS_SEND=false para volver al fail-closed (solo apto).
+    // así n8n siempre tiene qué mandar. PERO con PISO de viabilidad: ALWAYS_SEND manda los reportes
+    // "flojos pero viables" (frío, fit dudoso, juez por personalización, países normalizables), NO los
+    // EGREGIAMENTE rotos. Piso: cards en país equivocado (geo) o menos de MIN_VIABLE cards completas
+    // (env nuevo, default 2: 0-1 cards no es un reporte). Si el reporte cae bajo el piso, NO se genera PDF
+    // (pdf_base64 null, como el fail-closed) aunque ALWAYS_SEND esté activo.
     const _alwaysSend = String(process.env.ALWAYS_SEND ?? 'true').toLowerCase() !== 'false';
+    const MIN_VIABLE = parseInt(process.env.MIN_VIABLE || '2', 10);
+    const _pisoRoto = !!geoMal ? 'geo' : (cardsValidas < MIN_VIABLE ? 'integridad' : null);
     let pdfBuffer = null, pageCount = null;
-    if (aptoEnvio || _alwaysSend) {
+    if (aptoEnvio || (_alwaysSend && !_pisoRoto)) {
       pdfBuffer = await renderizarPdf(cleanHtml);
       pageCount = await contarPaginas(pdfBuffer);
+    } else if (_alwaysSend && _pisoRoto) {
+      console.warn(`[ALWAYS_SEND] retenido por piso (${_pisoRoto})`);
     }
 
     logTokenCost(`Job ${jobId}`);
@@ -2422,12 +2445,18 @@ app.post('/generar-reporte', async (req, res) => {
       ? `[INTEGRIDAD] OK: ${cardsValidas} cards completas + juez APROBADO.${frioCampanaConexion?' (frío, campaña de conexión)':''}`
       : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} completas, juez ${judgeResult.veredicto}.`);
 
-    // ALWAYS_SEND (default true): genera el PDF siempre (apto o no), así n8n siempre manda.
+    // ALWAYS_SEND (default true): genera el PDF siempre (apto o no), así n8n siempre manda. PERO con PISO de
+    // viabilidad: manda los "flojos pero viables", NO los EGREGIAMENTE rotos. Piso: cards en país equivocado (geo)
+    // o menos de MIN_VIABLE cards completas (env nuevo, default 2). Bajo el piso → NO se genera PDF (pdf_base64 null).
     const _alwaysSend = String(process.env.ALWAYS_SEND ?? 'true').toLowerCase() !== 'false';
+    const MIN_VIABLE = parseInt(process.env.MIN_VIABLE || '2', 10);
+    const _pisoRoto = !!geoMal ? 'geo' : (cardsValidas < MIN_VIABLE ? 'integridad' : null);
     let pdfBuffer = null, pageCount = null;
-    if (aptoEnvio || _alwaysSend) {
+    if (aptoEnvio || (_alwaysSend && !_pisoRoto)) {
       pdfBuffer = await renderizarPdf(cleanHtml);
       pageCount = await contarPaginas(pdfBuffer);
+    } else if (_alwaysSend && _pisoRoto) {
+      console.warn(`[ALWAYS_SEND] retenido por piso (${_pisoRoto})`);
     }
 
     logTokenCost('generar-reporte');
