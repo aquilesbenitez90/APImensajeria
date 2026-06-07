@@ -32,7 +32,8 @@ function _logoDataUri() {
  *   context: [string]           x3,
  *   apertura:[string]           x3,
  *   prioridades:[string]        x4,
- *   cards:   [{ empresa, nombre, cargo, slug, urn, ubicacion, grado, angulo, hook }] x3
+ *   cards:   [{ empresa, nombre, cargo, slug, urn, ubicacion, grado, angulo, hook, senales? }] x3
+ *     senales (opcional, fase SIGNALS): [{ tipo, texto, fuente, fecha }] — señales de compra CON fuente.
  * }
  * Nota: `urn` es el member URN real (ACwAA...). El href usa urn; el texto visible usa slug.
  * Si urn viene vacío, cae al slug (compatibilidad).
@@ -53,6 +54,20 @@ function _initials(nombre) {
 // Member URN opaco de LinkedIn (ACwAA.../ACoAA...). Los slugs públicos limpios nunca lo son.
 function _isOpaque(s) {
   return /^AC[ow]AA[A-Za-z0-9_-]{6,}$/i.test(String(s || ''));
+}
+
+// Señales de compra por cuenta (opcional, vienen de la fase SIGNALS con fuente). Lista chica bajo la card.
+// Si no hay señales (flag off o ninguna verificable), devuelve '' y la card queda idéntica a antes.
+function _senalesCard(senales) {
+  const arr = Array.isArray(senales) ? senales.filter(s => s && String(s.texto || '').trim()) : [];
+  if (!arr.length) return '';
+  const items = arr.slice(0, 3).map(s => {
+    const tag = String(s.tipo || '').trim();
+    const src = [String(s.fuente || '').trim(), String(s.fecha || '').trim()].filter(Boolean).join(', ');
+    return '      <li class="sig">' + (tag ? '<span class="sig-tag">' + _esc(tag) + '</span>' : '') +
+      _esc(s.texto) + (src ? ' <span class="sig-src">(' + _esc(src) + ')</span>' : '') + '</li>';
+  }).join('\n');
+  return '\n    <div class="angle-label">Señales</div>\n    <ul class="acct-sigs">\n' + items + '\n    </ul>';
 }
 
 // Genera el <article> de UNA card. Las cards se renderizan por código (NO por la IA) desde
@@ -78,7 +93,7 @@ function _cardArticle(c, i) {
       </div>
     </div>
     <div class="angle-label">Por qué ahora</div>
-    <p class="angle">${_esc(c.angulo)}</p>
+    <p class="angle">${_esc(c.angulo)}</p>${_senalesCard(c.senales)}
     <p class="acct-hook">→ ${_esc(c.hook)}</p>
   </article>`;
 }

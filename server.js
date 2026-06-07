@@ -55,6 +55,11 @@ process.on('unhandledRejection', (e) => {
 // ---------------------------------------------------------------------------
 const MODEL_GEN = 'claude-sonnet-4-6';
 const MODEL_JUDGE = 'claude-sonnet-4-6';
+// SEÑALES DE COMPRA por cuenta (opcional, reversible). SIGNALS_MODE=on las activa; la EXTRACCIÓN usa un
+// modelo BARATO (Haiku) porque es leer y extraer, no juzgar. Off por default: cero costo/latencia/riesgo.
+const SIGNALS_MODE = (process.env.SIGNALS_MODE || 'off').toLowerCase();
+const MODEL_SIGNALS = process.env.MODEL_SIGNALS || 'claude-haiku-4-5-20251001';
+const SIGNALS_PER_CARD = parseInt(process.env.SIGNALS_PER_CARD || '3', 10);
 
 // Temperatura del JUEZ: baja = veredicto consistente (mismo reporte → mismo veredicto).
 // El juez corría a la temperatura por defecto (1.0), lo que disparaba la varianza
@@ -326,6 +331,7 @@ Criterios:
 
 4. **VERACIDAD de los datos de la empresa** (CRÍTICO):
    FAIL si el overview tiene datos que parecen inventados o demasiado específicos sin verificación (año de fundación, stage de funding, número de productos/clientes, métricas redondas sin fuente, tiempos de respuesta). Si todo el overview suena a "marketing copy genérico" → FAIL.
+   SEÑALES DE COMPRA (la lista "Señales" bajo cada cuenta, si aparece): vienen CON su fuente y fecha citadas, así que NO las marques como inventadas por ser específicas (la fuente citada ES el respaldo). SOLO marcá FAIL acá si una señal NO muestra ninguna fuente, o si la cifra es absurda o imposible para esa empresa.
 
 5. **Coherencia interna + GEOGRAFÍA + VERTICAL** (CRÍTICO) — el reporte trata sobre la empresa correcta y las cuentas hacen sentido para ese ICP.
    FAIL si una cuenta target es la misma empresa mencionada como proof point/cliente del producto en el overview.
@@ -2071,6 +2077,56 @@ function _nombreArchivoPDF(empresa){
   return `Análisis de Mercado - ${limpia}.pdf`;
 }
 
+// =================== SEÑALES DE COMPRA POR CUENTA (opcional, detrás de SIGNALS_MODE) ===================
+// Para cada card (empresa target REAL ya elegida) busca en web 2 o 3 señales de compra PÚBLICAS y CON FUENTE
+// (inversión, expansión, cambio de ejecutivo, lanzamiento, alianza, hito) que justifican el "por qué ahora".
+// Usa un modelo BARATO (Haiku) porque es EXTRACCIÓN, no juicio. Anti-invención DURO: si no hay señal con fuente
+// real, NO la inventa (devuelve menos o ninguna). Muta data.cards[i].senales. No rompe el pipeline: error o
+// timeout por card -> esa card queda sin señales. No-op si SIGNALS_MODE != 'on'.
+function _promptSignals(){ return `# IBT GTM — Señales de compra (extracción CON fuente)
+
+Te paso UNA empresa y el producto que un proveedor le quiere vender. Buscá en web 2 o 3 SEÑALES DE COMPRA recientes, públicas y VERIFICABLES de esa empresa: hechos que muestren que está en movimiento y podría comprar ahora (rondas de inversión, expansión o nuevas sucursales/países, cambios de ejecutivos relevantes, lanzamientos de producto, alianzas, resultados o hitos).
+
+## Reglas (anti-invención, INNEGOCIABLE)
+- Cada señal TIENE que salir de una fuente real que encontraste con web_search. Devolvé el nombre de la fuente (medio o sitio) y la fecha (Mes Año).
+- PROHIBIDO inventar cifras, fechas, fuentes o hechos. Si no encontrás una señal con respaldo, devolvé MENOS señales o ninguna. Una señal real vale más que tres inventadas.
+- La señal tiene que ser RELEVANTE para por qué esa empresa compraría el producto del proveedor, no un dato al azar.
+- "texto": 1 oración corta y concreta (máx 140 caracteres), español neutro, trato de usted, SIN guiones (— ni -).
+- "tipo": una palabra entre inversion, expansion, ejecutivo, producto, alianza, hito.
+- No repitas la misma señal redactada distinto.
+
+## Salida — SOLO JSON (sin texto ni markdown alrededor)
+{ "senales": [ {"tipo":"...","texto":"...","fuente":"...","fecha":"Mes Año"} ] }
+Máximo 3 señales. Si no hay ninguna verificable, devolvé { "senales": [] }.`; }
+
+async function _senalesDeCuenta(card, prodCtx){
+  const empresa = String(card.empresa||'').trim();
+  if(!empresa) return [];
+  const user = `Empresa target: ${empresa}\nUbicación: ${card.ubicacion||'-'}\nProducto del proveedor que le quiere vender: ${prodCtx || '(general)'}\n\nBuscá señales de compra recientes de "${empresa}" y devolvé el JSON.`;
+  try {
+    const data = await callClaude({ model: MODEL_SIGNALS, system: _promptSignals(), messages:[{ role:'user', content:user }], tools:[WEB_SEARCH_TOOL], maxTokens:1500, temperature:0 });
+    const arr = (data && Array.isArray(data.senales)) ? data.senales : [];
+    // GUARDA DURA anti-invención: solo señales con fuente real y texto; sin fuente -> se tira (no se muestra).
+    return arr.filter(s => s && String(s.texto||'').trim() && String(s.fuente||'').trim())
+              .slice(0, SIGNALS_PER_CARD)
+              .map(s => ({ tipo:String(s.tipo||'').trim(), texto:String(s.texto||'').trim(), fuente:String(s.fuente||'').trim(), fecha:String(s.fecha||'').trim() }));
+  } catch(e){
+    console.warn(`[SIGNALS] "${empresa}" falló: ${e.message}`);
+    return [];
+  }
+}
+
+// Enriquece data.cards con señales de compra (en paralelo). No-op si el flag está off o si ya tienen señales.
+async function enriquecerSenales(data, cliente){
+  if(SIGNALS_MODE !== 'on') return;
+  const cards = (data && Array.isArray(data.cards)) ? data.cards : [];
+  const pend = cards.filter(c => c && !Array.isArray(c.senales));
+  if(!pend.length) return;
+  const prodCtx = String((data && (data.proof || data.lead)) || (cliente && cliente.empresa) || '').slice(0,400);
+  console.log(`[SIGNALS] buscando señales de compra para ${pend.length} cuenta(s) con ${MODEL_SIGNALS}...`);
+  await Promise.all(pend.map(async c => { c.senales = await _senalesDeCuenta(c, prodCtx); }));
+}
+
 async function procesar(jobId, { email, dominio, empresa, nombre, profileId, evalMode }) {
   return _statsALS.run(_nuevoStats(), async () => {
   try {
@@ -2085,6 +2141,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
     const { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) throw new Error(`Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.`);
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
+    await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
 
     let cleanHtml = limpiarHtml(renderReport(data));
     if (!cleanHtml) throw new Error('No se pudo renderizar el reporte');
@@ -2110,6 +2167,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
           break;
         }
         data = fixedData;
+        await enriquecerSenales(data, cliente);   // re-busca señales para las cuentas nuevas del fix
         cleanHtml = limpiarHtml(renderReport(data));
         console.log(`[Job ${jobId}] Re-validando con el juez (re-render incluye normalización de países)...`);
         judgeResult = await runJudge(cleanHtml, null);
@@ -2349,6 +2407,7 @@ app.post('/generar-reporte', async (req, res) => {
     const { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) return res.status(422).json({ error: `Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.` });
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
+    await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
 
     let cleanHtml = limpiarHtml(renderReport(data));
     if (!cleanHtml) return res.status(500).json({ error: 'No se pudo renderizar el reporte' });
@@ -2370,6 +2429,7 @@ app.post('/generar-reporte', async (req, res) => {
           break;
         }
         data = fixedData;
+        await enriquecerSenales(data, cliente);   // re-busca señales para las cuentas nuevas del fix
         cleanHtml = limpiarHtml(renderReport(data));
         judgeResult = await runJudge(cleanHtml, null);
       } catch (e) {
