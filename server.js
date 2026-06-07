@@ -37,6 +37,20 @@ const fs = require('fs');
 const path = require('path');
 
 // ---------------------------------------------------------------------------
+// GUARDAS A NIVEL PROCESO: que un job NUNCA tumbe el server entero.
+// Una excepción suelta en un path async sin catch (o una promesa rechazada sin
+// .catch) mata el proceso por default -> Railway "Stopping Container". Acá las
+// logueamos y seguimos vivos. NO atrapa OOM (el kernel mata el proceso), pero sí
+// cualquier excepción/rechazo JS, que es el caso mucho más común.
+// ---------------------------------------------------------------------------
+process.on('uncaughtException', (e) => {
+  console.error('[CRASH] uncaughtException (no tumbo el server):', e?.stack || e);
+});
+process.on('unhandledRejection', (e) => {
+  console.error('[CRASH] unhandledRejection (no tumbo el server):', e?.stack || e);
+});
+
+// ---------------------------------------------------------------------------
 // Configuración
 // ---------------------------------------------------------------------------
 const MODEL_GEN = 'claude-sonnet-4-6';
@@ -1319,7 +1333,8 @@ function _candViable(c, titulos, excluir, industrias, esComp){
 async function sourceConRetry(plan, cliente){
   const reintentos   = parseInt(process.env.SOURCE_RETRY_ON_EMPTY || '1', 10);
   const delay        = parseInt(process.env.SOURCE_RETRY_DELAY_MS || '6000', 10);
-  const MAX_PASSES   = Math.max(1, parseInt(process.env.SOURCE_MAX_PASSES || '5', 10));
+  // Default bajado de 5 a 3: menos pool en memoria + menos latencia (mitiga OOM). Configurable por env.
+  const MAX_PASSES   = Math.max(1, parseInt(process.env.SOURCE_MAX_PASSES || '3', 10));
   const titulos = (plan && plan._plan && Array.isArray(plan._plan.titulos_objetivo)) ? plan._plan.titulos_objetivo : [];
   const excluir = _verticalesExcluir(plan);
   // industrias (pista de vertical para _rolRelevante) y detector de PARES (competidor/proveedor) para el conteo
@@ -2060,7 +2075,13 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
     // Si el juez rechaza, reintenta re-seleccionando con los fixes. NO se renderiza PDF en
     // el medio: solo HTML + juez. Configurable con MAX_FIX_ITERS (default 1).
     const MAX_FIX = parseInt(process.env.MAX_FIX_ITERS || '1', 10);
-    for (let intento = 1; intento <= MAX_FIX && judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0; intento++) {
+    // CORTE TEMPRANO: si SELECT devolvió 0 cards válidas, NO arrancamos la ronda de fix.
+    // Es tirar tokens/memoria (otro seleccionarConRetry = 3 SELECT + otro juez de N votos) sobre un
+    // reporte vacío que igual va a fallar la guarda de integridad. Cerramos en error abajo.
+    if (_cuentaCompletas(data) === 0) {
+      console.warn(`[Job ${jobId}] SELECT entregó 0 cards válidas — salto la ronda de fix (sería gasto sobre reporte vacío).`);
+    }
+    for (let intento = 1; intento <= MAX_FIX && _cuentaCompletas(data) > 0 && judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0; intento++) {
       console.log(`[Job ${jobId}] Juez rechazó ${judgeResult.score}/8 — fix ${intento}/${MAX_FIX}...`);
       try {
         const fixedData = await seleccionarConRetry({ cliente, plan, pool, fixes: judgeResult.fixes, senales });
@@ -2265,7 +2286,18 @@ app.post('/generar', (req, res) => {
   Promise.race([
     procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug }),
     timeoutGlobal
-  ]).finally(() => {
+  ])
+  // CATCH DEFENSIVO: procesar() maneja sus errores internamente (try/catch -> status:'error'),
+  // pero si alguna vez rechaza (o rechaza el rewrite de países / seleccionarConRetry sin atrapar),
+  // sin este .catch sería un unhandledRejection. Marcamos el job en error y NO re-lanzamos.
+  .catch((err) => {
+    console.error(`[Job ${jobId}] Rechazo no atrapado en el path async (lo absorbo, no tumbo el server):`, err?.stack || err);
+    const prev = jobs.get(jobId);
+    if (!prev || prev.status === 'processing') {
+      jobs.set(jobId, { status: 'error', error: err?.message || String(err), finishedAt: Date.now() });
+    }
+  })
+  .finally(() => {
     clearTimeout(jobTimer);
     if (key && enProgreso.get(key) === jobId) enProgreso.delete(key);
   });
@@ -2299,7 +2331,11 @@ app.post('/generar-reporte', async (req, res) => {
 
     // Si el juez rechaza, reintenta re-seleccionando con los fixes (sin renderizar PDF en el medio).
     const MAX_FIX = parseInt(process.env.MAX_FIX_ITERS || '1', 10);
-    for (let intento = 1; intento <= MAX_FIX && judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0; intento++) {
+    // CORTE TEMPRANO: 0 cards válidas -> no arrancamos la ronda de fix (gasto sobre reporte vacío).
+    if (_cuentaCompletas(data) === 0) {
+      console.warn(`[generar-reporte] SELECT entregó 0 cards válidas — salto la ronda de fix.`);
+    }
+    for (let intento = 1; intento <= MAX_FIX && _cuentaCompletas(data) > 0 && judgeResult.veredicto === 'RECHAZADO' && judgeResult.fixes.length > 0; intento++) {
       try {
         const fixedData = await seleccionarConRetry({ cliente, plan, pool, fixes: judgeResult.fixes, senales });
         if (_cuentaCompletas(fixedData) < _cuentaCompletas(data)) {
