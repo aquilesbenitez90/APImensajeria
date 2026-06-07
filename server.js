@@ -1286,18 +1286,39 @@ function _candBueno(c, titulos, excluir, industrias, esComp){
   return true;
 }
 
+// ¿Un candidato es VIABLE como card aunque NO sea cálido? = "decisor/rol-relevante on-vertical no-par",
+// SIN importar el grado (cálido O frío). Es _candBueno SIN la exigencia de calidez. El negocio prefiere mandar
+// 3 decisores on-vertical FRÍOS (3er grado, flag frio_campana_conexion) a no mandar PDF en nichos sin red cálida
+// (ej. nextdet = voladura minera MX). PISO INNEGOCIABLE: igual exige _rolRelevante (decisor/función del ICP) y
+// no-par; un IC/técnico suelto on-vertical (ej. "Quarry Operations Technician") NO es viable -> quema credibilidad.
+function _candViable(c, titulos, excluir, industrias, esComp){
+  if(!c) return false;
+  // (sin gate de calidez: 3er grado cuenta)
+  if(!_rolRelevante(c.head, titulos, industrias)) return false;
+  if(c.icSuelto) return false;                                   // IC suelto NUNCA es viable (quema)
+  if(typeof esComp === 'function' && (esComp(c.empresa) || esComp(c.name))) return false;  // PARES fuera
+  if(excluir && excluir.length && (_matchVerticalExcluir(c.empresa, excluir) || _matchVerticalExcluir(c.head, excluir))) return false;
+  return true;
+}
+
 // MULTI-PASADA ACUMULATIVA ADAPTATIVA: cada llamada al MCP devuelve un pool DISTINTO (LinkedIn no es
 // determinístico), así que correr el sourcing VARIAS veces y ACUMULAR (dedupe por id) cubre mucho más del
 // universo sin subir profilesLimit. PLAN NO se re-ejecuta (el ICP no cambia): solo se repiten las búsquedas
-// MCP. Tras cada pasada contamos los candidatos BUENOS (cálido + on-fit + on-vertical) del pool ACUMULADO;
-// si ya hay >= NUM_CUENTAS buenos, cortamos (cliente fácil = 1 sola pasada → no gasta de más). Si no, otra
-// pasada hasta SOURCE_MAX_PASSES. Es BARATO en tokens (solo MCP, cada llamada con su timeout); el costo es
-// latencia, aceptable. SELECT corre UNA sola vez DESPUÉS, sobre el pool acumulado (tokens planos).
+// MCP. CRITERIO DE ESCALADO (dos contadores sobre el pool ACUMULADO):
+//   - BUENOS  = _candBueno  = cálido + decisor/fit + on-vertical + no-par (lo "presentable" de primera).
+//   - VIABLES = _candViable = decisor/rol-relevante + on-vertical + no-par, SIN gate de calidez (cálido O frío).
+// Cortamos cuando hay >= NUM_CUENTAS VIABLES: así un cliente fácil (que ya tiene BUENOS cálidos) corta en pasada 1
+// igual (BUENOS ⊆ VIABLES), y un nicho flaco sin red cálida (nextdet) sigue muestreando pools DISTINTOS hasta
+// juntar NUM_CUENTAS decisores on-vertical aunque sean 3er grado (fríos), en vez de quedarse colgado esperando
+// cálidos que no existen y caerse por integridad. La PREFERENCIA cálido-primero NO cambia: el _nivel del ranking
+// final pone cálido+fit arriba; el frío solo rellena. PISO: VIABLES exige decisor on-vertical (nunca IC suelto).
+// Es BARATO en tokens (solo MCP, cada llamada con su timeout); el costo es latencia, aceptable. SELECT corre UNA
+// sola vez DESPUÉS, sobre el pool acumulado (tokens planos).
 // Conserva el retry anti-hipo del MCP: si una pasada sale 100% vacía, espera y reintenta esa pasada.
 async function sourceConRetry(plan, cliente){
   const reintentos   = parseInt(process.env.SOURCE_RETRY_ON_EMPTY || '1', 10);
   const delay        = parseInt(process.env.SOURCE_RETRY_DELAY_MS || '6000', 10);
-  const MAX_PASSES   = Math.max(1, parseInt(process.env.SOURCE_MAX_PASSES || '3', 10));
+  const MAX_PASSES   = Math.max(1, parseInt(process.env.SOURCE_MAX_PASSES || '5', 10));
   const titulos = (plan && plan._plan && Array.isArray(plan._plan.titulos_objetivo)) ? plan._plan.titulos_objetivo : [];
   const excluir = _verticalesExcluir(plan);
   // industrias (pista de vertical para _rolRelevante) y detector de PARES (competidor/proveedor) para el conteo
@@ -1334,9 +1355,13 @@ async function sourceConRetry(plan, cliente){
       res = await sourceCandidates(plan, cliente);
     }
     acumular(res);
-    const buenos = [...porId.values()].filter(c => _candBueno(c, titulos, excluir, industriasICP, esComp)).length;
-    console.log(`[SOURCE] pasada ${pass}/${MAX_PASSES}: pool acumulado ${porId.size} | BUENOS (cálido+decisor/fit+on-vertical+no-par) ${buenos}/${NUM_CUENTAS}.`);
-    if(buenos >= NUM_CUENTAS) break;        // adaptativo: cliente fácil corta acá, no gasta pasadas extra
+    const vals    = [...porId.values()];
+    const buenos  = vals.filter(c => _candBueno(c, titulos, excluir, industriasICP, esComp)).length;
+    const viables = vals.filter(c => _candViable(c, titulos, excluir, industriasICP, esComp)).length;
+    console.log(`[SOURCE] pasada ${pass}/${MAX_PASSES}: pool acumulado ${porId.size} | BUENOS (cálido+decisor/fit+on-vertical+no-par) ${buenos}/${NUM_CUENTAS} | VIABLES (decisor/fit+on-vertical+no-par, cálido O frío) ${viables}/${NUM_CUENTAS}.`);
+    // ESCALADO por VIABLES: cliente fácil corta en pasada 1 (sus BUENOS ya son VIABLES); nicho flaco sigue
+    // muestreando hasta juntar NUM_CUENTAS decisores on-vertical aunque sean fríos (mejor PDF con fríos que nada).
+    if(viables >= NUM_CUENTAS) break;
   }
 
   // RANKING FINAL del pool acumulado por niveles: cálido+fit primero; frío-buen-fit como relleno; frío-mal-fit
@@ -2338,6 +2363,6 @@ module.exports = {
   _norm, _empresaDeHeadline, _empKey, _slugCos, _degOrdinal, _headlineLimpio, _fechaHoy,
   _esICsuelto, _icpPideDecisores, _matchFuncion, _warmth, _geoAliasSet,
   _geoIncoherente, _paisesIncoherente, _calidezInsuficiente, _paisesDeTexto,
-  _rolRelevante, _verticalesExcluir, _matchVerticalExcluir, _candBueno,
+  _rolRelevante, _verticalesExcluir, _matchVerticalExcluir, _candBueno, _candViable,
   _cardsFitBueno, _resolverGateCalidez, sourceConRetry, runPlanConRetry
 };
