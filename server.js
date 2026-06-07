@@ -1417,7 +1417,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   • RECIENTE / EN ENTRADA (la fuente dice "se está expandiendo a", "está entrando en", "recién llegó a", "lanzó este año en") → escribilo como "expansión reciente a X" / "está entrando en X". No lo presentes con la misma solidez que un mercado consolidado.
   • SOLO PLAN (la fuente dice "planea", "quiere", "próximamente", "evalúa", sin operar todavía) → NO lo cuentes como país de operación, ni en el texto ni en el stat.
   REGLA DE ORO: no subas ni bajes el nivel respecto de lo que dice la fuente. Si DISTINTAS fuentes difieren en el nivel de un mismo país (ej. una dice "opera en" y otra "se está expandiendo a"), usá SIEMPRE el nivel MÁS BAJO/conservador (en ese caso, "expansión reciente"), nunca el más optimista. El stat de países (si lo ponés) cuenta los consolidados + los recientes reales (NO los aspiracionales), y el texto y el stat tienen que COINCIDIR: si decís que opera/se expande en 3 países, el stat dice 3, no 2. Si no estás seguro de un país, no lo cuentes en ningún lado, pero que texto y stat coincidan.
-  COHERENCIA NUMÉRICA DE PAÍSES (CRÍTICO, defecto recurrente): fijá UNA SOLA lista de países (los consolidados + recientes reales) y usá EXACTAMENTE esa misma lista, con los MISMOS nombres y la MISMA cantidad, en los TRES lugares: (1) el número del stat de países, (2) los países nombrados en h1_post, y (3) los países nombrados en el ICP "Geografía". REGLA INNEGOCIABLE: cada país que cuentes en el número del stat tiene que estar nombrado en h1_post Y en el ICP "Geografía"; y cada país que nombres en h1_post o en el ICP tiene que estar contado en el stat. PROHIBIDO contar un país en el número que no esté escrito en el texto, o nombrar en el texto uno que no esté en el cuenta (ej. contar 4 pero listar solo España, México y Guatemala sin Andorra es un BUG). CIERRE OBLIGATORIO: antes de cerrar el JSON, contá con el dedo los países que nombraste en el ICP "Geografía", verificá que sean los MISMOS que en h1_post, y que ese número sea EXACTAMENTE el del stat de países; si no coinciden, corregilo antes de devolver.
+  COHERENCIA NUMÉRICA DE PAÍSES (CRÍTICO, defecto recurrente): fijá UNA SOLA lista de países (los consolidados + recientes reales) y usá EXACTAMENTE esa misma lista, con los MISMOS nombres y la MISMA cantidad, en los CUATRO lugares: (1) el número del stat de países, (2) los países nombrados en h1_post, (3) los países nombrados en el ICP "Geografía", y (4) cualquier país que menciones en la PROSA del "lead". REGLA INNEGOCIABLE: cada país que cuentes en el número del stat tiene que estar nombrado en h1_post Y en el ICP "Geografía"; y cada país que nombres en h1_post, en el ICP o en el "lead" tiene que estar contado en el stat. PROHIBIDO contar un país en el número que no esté escrito en el texto, o nombrar en el texto uno que no esté en el cuenta (ej. contar 4 pero listar solo España, México y Guatemala sin Andorra es un BUG). EL LEAD NO PUEDE NOMBRAR UN PAÍS EXTRA (CRÍTICO, defecto recurrente que retiene reportes con cuentas buenas): si el cliente NO opera hoy en un país, ese país NO va en el "lead" aunque sea un mercado de expansión, una aspiración o una referencia de contexto. El "lead" solo puede nombrar países de la lista canónica (los mismos de h1_post y del ICP "Geografía"). Si querés hablar de crecimiento o de mercado sin un país de operación confirmado, hacelo en GENÉRICO (ej. "la región", "Latinoamérica") SIN nombrar un país que no esté en la lista. CIERRE OBLIGATORIO: antes de cerrar el JSON, contá con el dedo los países que nombraste en el ICP "Geografía", verificá que sean los MISMOS que en h1_post y que NINGÚN país del "lead" quede fuera de esa lista, y que ese número sea EXACTAMENTE el del stat de países; si no coinciden, corregilo antes de devolver.
 - INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar SOLO las VERTICALES de prioridad ALTA donde están los COMPRADORES del cliente (las MISMAS que marcás "Alta:" en "prioridades", ni una más). PROHIBIDO meter en "industrias" las verticales "Media:" ni ninguna secundaria/aspiracional: esas van EXCLUSIVAMENTE en "prioridades" como contexto, NUNCA en "industrias" porque "industrias" es el filtro de búsqueda y meter una Media diluye el pool con cuentas de menor fit. El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Banca", "Administración de propiedades"). NO pongas el rubro del propio cliente ni industrias genéricas. TAXONOMÍA (CRÍTICO para que el filtro NO se caiga): cada nombre de "industrias" tiene que ser una CATEGORÍA RECONOCIBLE de la taxonomía de industrias de LinkedIn/Sales Navigator (las que el sistema resuelve a un id de filtro), NO una etiqueta hiper-específica, de moda o inventada que no exista como industria. Una etiqueta que no resuelve deja la búsqueda SIN filtro de industria. Preferí siempre la categoría canónica más cercana al COMPRADOR: ej. usá "Ingeniería robótica" / "Robotic Engineering" o "Fabricación de maquinaria de automatización" en vez de "Robotics" a secas. Es válido (y recomendado ante la duda) poner el nombre en español Y/O su equivalente reconocible en inglés. EVITÁ verticales industriales/pesadas amplias (ej. "Construcción", "Manufactura", "Minería", "Cemento") salvo que sean LITERALMENTE el comprador: arrastran jefes de mantenimiento de planta que consumen el servicio puertas adentro pero NO son el canal de compra. Ante la duda, preferí las verticales donde el producto del cliente se compra o se revende.
 - TAMAÑO (para que salgan empresas ANCLA, no micro-empresas): "tamano_min" tiene que ser un número real de empleados que refleje el ICP. Si el ICP son empresas medianas y grandes / marcas ancla, poné un piso alto (ej: 200). Poné un piso bajo (20-50) SOLO si el ICP son genuinamente PyMEs/micro. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva.
 - COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas/PRODUCTOS que compiten DIRECTAMENTE con la solución que vende el cliente (otras herramientas/soluciones DEL MISMO TIPO), porque venden/fabrican LO MISMO que el cliente. REGLA MENTAL INNEGOCIABLE: un competidor es algo que tu comprador potencial podría comprar EN VEZ del producto del cliente; NO es el comprador potencial mismo. PROHIBIDO incluir la INDUSTRIA, la FUNCIÓN, el TIPO DE EMPRESA o la VERTICAL del COMPRADOR objetivo (eso son tus clientes, no tus rivales). Ejemplo concreto: si el cliente es un CRM que se VENDE a inmobiliarias, los competidores son OTROS CRM inmobiliarios (ej. Inmovilla, Wasi, Propify), NUNCA "inmobiliaria", "agencia inmobiliaria" ni "bienes raíces" (esos son los COMPRADORES). Buscalos con web_search e incluí TRES tipos: (i) competidores directos de tamaño similar; (ii) FABRICANTES o PROVEEDORES globales del mismo producto (ej. para detonadores/voladura: Enaex, Orica, Dyno Nobel, Sandvik; para staffing de tecnología: Toptal, Turing, Andela, TEKsystems); (iii) distribuidores o integradores que revenden ese producto. Son PARES o RIVALES, no clientes. El sistema EXCLUYE a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES del research. NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque descartaría compradores legítimos. Si no identificás competidores reales claros, MEJOR dejá la lista VACÍA que meter la vertical del comprador (que rompe el sourcing).
@@ -1875,6 +1875,64 @@ function _paisesIncoherente(data){
   return { ajustado:true, antes:declarado, despues:real, paises:[...nombrados] };
 }
 
+// --- ARREGLO DE PÁGINA 1 POR PAÍSES (en vez de rechazar) ----------------------
+// Caso recurrente (apodemia, Emi Labs): las cards son BUENAS y on-país, pero la prosa del `lead` (o el h1_post)
+// nombra un país que NO está en el set canónico del ICP "Geografía". Antes eso era {rechazar:true} y NO salía PDF.
+// DECISIÓN DE PRODUCTO (jefe): NO desperdiciar cards buenas. ARREGLAR la página 1 para que quede COHERENTE con el
+// ICP "Geografía" (reducir, NUNCA agregar países que el cliente no opera), y MANDAR. Hacemos un rewrite TARGETED y
+// barato (1 call corta a Claude, SIN web_search, SIN re-sourcing): le pasamos el `data` actual + la lista de países
+// PERMITIDOS y le pedimos reescribir SOLO `lead`, `h1_post` y el stat de países para que nombren EXACTAMENTE esos
+// países, sin tocar cards ni inventar nada. MUTA data in place (lead, h1_post, stat de países).
+// Devuelve { ok:bool, permitidos:[...], antes:{lead,h1_post} } o { ok:false, motivo } si no se pudo.
+async function _reescribirPaisesPagina1(data, plan){
+  if(!data) return { ok:false, motivo:'sin data' };
+  // Set CANÓNICO permitido = países nombrados en h1_post + ICP "Geografía" (lo mismo que usa _paisesIncoherente).
+  // Esa es la fuente de verdad de dónde opera el cliente; el lead se recorta a ESTO, nunca al revés.
+  const permitidos = new Set();
+  for(const p of _paisesDeTexto(data.h1_post)) permitidos.add(p);
+  const icpGeo = (data.icp||[]).find(o => o && /geograf/.test(_norm(o.title||o.titulo||'')));
+  if(icpGeo) for(const p of _paisesDeTexto(icpGeo.desc)) permitidos.add(p);
+  // Si por algún motivo no hay países canónicos, caemos al país del cliente declarado en el plan (geografia).
+  if(!permitidos.size){
+    const geoPlan = (plan && plan._plan && plan._plan.geografia) || '';
+    for(const p of _paisesDeTexto(geoPlan)) permitidos.add(p);
+  }
+  if(!permitidos.size) return { ok:false, motivo:'sin países canónicos para anclar el arreglo' };
+  const lista = [...permitidos].join(', ');
+  const antes = { lead: data.lead, h1_post: data.h1_post };
+  const sys = `Sos un editor de un reporte de mercado en ESPAÑOL NEUTRO latinoamericano (trato de "usted", SIN voseo, SIN modismos argentinos). Tu única tarea es hacer COHERENTE la geografía de la página 1: el texto NO puede nombrar ningún país fuera de la lista PERMITIDA. NUNCA agregues un país que no esté en la lista. NUNCA inventes métricas, años, certificaciones ni nombres de terceros. SIN guiones (— ni -) como conectores: usá comas, paréntesis o dos puntos. Devolvé SOLO un JSON {"lead":"...","h1_post":"...","stat_paises_num":"N"} y nada más.`;
+  const stat = Array.isArray(data.stats) ? data.stats.find(s => s && /\bpais(es)?\b/.test(_norm(s.label||''))) : null;
+  const statNumActual = stat ? String(stat.num||'') : '';
+  const user = `PAÍSES PERMITIDOS (los únicos que el texto puede nombrar, son donde el cliente HOY opera): ${lista}.\n\n` +
+    `Reescribí SOLO estos tres campos para que sean coherentes con esa lista, conservando el sentido, el tono y el largo (lead máx 2 oraciones):\n` +
+    `- "lead" actual: ${JSON.stringify(data.lead||'')}\n` +
+    `- "h1_post" actual: ${JSON.stringify(data.h1_post||'')}\n` +
+    (stat ? `- stat de países actual (num): ${JSON.stringify(statNumActual)}\n` : '') +
+    `\nREGLAS DURAS:\n` +
+    `1) Quitá del "lead" y del "h1_post" toda mención de países que NO estén en la lista permitida (ej. si menciona un país de expansión futura que no está permitido, eliminá esa mención y dejá la frase gramaticalmente correcta).\n` +
+    `2) NO agregues países nuevos. Si un país permitido ya estaba, podés mantenerlo.\n` +
+    `3) NO toques ningún otro dato. NO inventes nada.\n` +
+    `4) "stat_paises_num" = la cantidad EXACTA de países permitidos (${permitidos.size}). Si no había stat de países, igual devolvé "${permitidos.size}".\n` +
+    `Devolvé SOLO el JSON.`;
+  let parsed;
+  try{
+    const resp = await callClaude({ model:MODEL_GEN, system:sys, messages:[{ role:'user', content:user }], tools:[], maxTokens:1200, temperature:0 });
+    parsed = parseReporteJSON(_textoJSON(resp.content));
+  }catch(e){
+    return { ok:false, motivo:`rewrite falló (${e.message})` };
+  }
+  if(!parsed || typeof parsed !== 'object') return { ok:false, motivo:'rewrite sin JSON' };
+  // Aplicamos solo lo que vino y pasamos por _limpia (anti-guiones / anti-inventos), igual que el resto de prosa.
+  if(typeof parsed.lead === 'string' && parsed.lead.trim())     data.lead    = _limpia(parsed.lead);
+  if(typeof parsed.h1_post === 'string' && parsed.h1_post.trim()) data.h1_post = _limpia(parsed.h1_post);
+  if(stat){
+    const sufijo = String(stat.num||'').replace(/^\s*\d+/, '');
+    // Forzamos el num al canónico permitido (la IA solo redacta prosa; el conteo lo manda el código).
+    stat.num = `${permitidos.size}${sufijo}`;
+  }
+  return { ok:true, permitidos:[...permitidos], antes };
+}
+
 // --- GATE DE CALIDEZ (determinístico) -----------------------------------------
 // El caso que MÁS RÁPIDO quema credibilidad: un reporte donde TODAS las cards son 3er grado / fuera de red
 // (0 cálidas). Bloquea SOLO ese extremo. Configurable por env WARM_MIN (default 1; 0 = desactivado).
@@ -2032,9 +2090,23 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
         fixes: [`TAMAÑO INCOHERENTE: el ICP pide empresas de ${tamMal.tamMin}+ empleados pero hay cuentas MUY por debajo (menos del 25% del piso, prácticamente un individuo). ${tamMal.fuera.join(' ')} Reemplazá esas cuentas por empresas que cumplan el tamaño del ICP, o ajustá el título/ICP al tamaño real de las cuentas.`].concat(judgeResult.fixes||[]) };
     }
-    // PAÍSES: normaliza (conservador) el num del stat de países a la cantidad realmente nombrada. Solo rechaza
-    // si no se puede normalizar. Si ajustó, re-renderiza para que el PDF/HTML reflejen el número corregido.
-    const paisesMal = _paisesIncoherente(data);
+    // PAÍSES: normaliza (conservador) el num del stat de países a la cantidad realmente nombrada. Si el lead nombra
+    // un país FUERA del set canónico (ICP "Geografía" / h1_post), NO rechazamos: ARREGLAMOS la página 1 (rewrite
+    // targeted barato, sin web_search, sin re-sourcing) para que la prosa quede coherente con los países permitidos,
+    // y mandamos con las cards buenas. Solo rechazamos (fail-closed) si el arreglo no logra dejarla coherente.
+    let paisesMal = _paisesIncoherente(data);
+    let paisesReescrito = false;
+    if (paisesMal && paisesMal.rechazar && paisesMal.leadExtra && paisesMal.leadExtra.length) {
+      console.warn(`[PAISES] Lead nombra países fuera del ICP (${paisesMal.leadExtra.join(', ')}) → arreglo página 1 (sin re-sourcing, sin tocar cards).`);
+      const fix = await _reescribirPaisesPagina1(data, plan);
+      if (fix.ok) {
+        paisesReescrito = true;
+        console.warn(`[PAISES] Página 1 reescrita a países permitidos [${fix.permitidos.join(', ')}]. lead: ${JSON.stringify(fix.antes.lead)} → ${JSON.stringify(data.lead)}.`);
+        paisesMal = _paisesIncoherente(data); // re-validar tras el arreglo
+      } else {
+        console.warn(`[PAISES] Arreglo no aplicó (${fix.motivo}); se mantiene la incoherencia para rechazo fail-closed.`);
+      }
+    }
     if (paisesMal && paisesMal.ajustado) {
       console.warn(`[PAISES] Conteo incoherente normalizado: stat ${paisesMal.antes} → ${paisesMal.despues} (países nombrados: ${paisesMal.paises.join(', ')}).`);
       cleanHtml = limpiarHtml(renderReport(data));
@@ -2045,6 +2117,9 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
       console.warn(`[PAISES] No se pudo normalizar (stat=${paisesMal.declarado}, canónico=${paisesMal.real}${paisesMal.leadExtra&&paisesMal.leadExtra.length?`, lead-extra=${paisesMal.leadExtra.join('/')}`:''}) → RECHAZADO.`);
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
         fixes: [fixPaises].concat(judgeResult.fixes||[]) };
+    } else if (paisesReescrito) {
+      // Tras un arreglo exitoso de página 1 hay que re-renderizar para que el PDF refleje lead/h1_post/stat corregidos.
+      cleanHtml = limpiarHtml(renderReport(data));
     }
     // CALIDEZ (condicional al fit): un reporte 100% frío NO se retiene si el fit es bueno (se manda con flag
     // frio_campana_conexion para que IBT haga campaña de conexión). Solo retiene frío + mal fit. WARM_GATE_MODE.
@@ -2250,9 +2325,23 @@ app.post('/generar-reporte', async (req, res) => {
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
         fixes: [`TAMAÑO INCOHERENTE: el ICP pide empresas de ${tamMal.tamMin}+ empleados pero hay cuentas MUY por debajo (menos del 25% del piso, prácticamente un individuo). ${tamMal.fuera.join(' ')} Reemplazá esas cuentas por empresas que cumplan el tamaño del ICP, o ajustá el título/ICP al tamaño real de las cuentas.`].concat(judgeResult.fixes||[]) };
     }
-    // PAÍSES: normaliza (conservador) el num del stat de países a la cantidad realmente nombrada. Solo rechaza
-    // si no se puede normalizar. Si ajustó, re-renderiza para que el PDF/HTML reflejen el número corregido.
-    const paisesMal = _paisesIncoherente(data);
+    // PAÍSES: normaliza (conservador) el num del stat de países a la cantidad realmente nombrada. Si el lead nombra
+    // un país FUERA del set canónico (ICP "Geografía" / h1_post), NO rechazamos: ARREGLAMOS la página 1 (rewrite
+    // targeted barato, sin web_search, sin re-sourcing) para que la prosa quede coherente con los países permitidos,
+    // y mandamos con las cards buenas. Solo rechazamos (fail-closed) si el arreglo no logra dejarla coherente.
+    let paisesMal = _paisesIncoherente(data);
+    let paisesReescrito = false;
+    if (paisesMal && paisesMal.rechazar && paisesMal.leadExtra && paisesMal.leadExtra.length) {
+      console.warn(`[PAISES] Lead nombra países fuera del ICP (${paisesMal.leadExtra.join(', ')}) → arreglo página 1 (sin re-sourcing, sin tocar cards).`);
+      const fix = await _reescribirPaisesPagina1(data, plan);
+      if (fix.ok) {
+        paisesReescrito = true;
+        console.warn(`[PAISES] Página 1 reescrita a países permitidos [${fix.permitidos.join(', ')}]. lead: ${JSON.stringify(fix.antes.lead)} → ${JSON.stringify(data.lead)}.`);
+        paisesMal = _paisesIncoherente(data); // re-validar tras el arreglo
+      } else {
+        console.warn(`[PAISES] Arreglo no aplicó (${fix.motivo}); se mantiene la incoherencia para rechazo fail-closed.`);
+      }
+    }
     if (paisesMal && paisesMal.ajustado) {
       console.warn(`[PAISES] Conteo incoherente normalizado: stat ${paisesMal.antes} → ${paisesMal.despues} (países nombrados: ${paisesMal.paises.join(', ')}).`);
       cleanHtml = limpiarHtml(renderReport(data));
@@ -2263,6 +2352,9 @@ app.post('/generar-reporte', async (req, res) => {
       console.warn(`[PAISES] No se pudo normalizar (stat=${paisesMal.declarado}, canónico=${paisesMal.real}${paisesMal.leadExtra&&paisesMal.leadExtra.length?`, lead-extra=${paisesMal.leadExtra.join('/')}`:''}) → RECHAZADO.`);
       judgeResult = { veredicto:'RECHAZADO', score: Math.min(judgeResult.score, 4),
         fixes: [fixPaises].concat(judgeResult.fixes||[]) };
+    } else if (paisesReescrito) {
+      // Tras un arreglo exitoso de página 1 hay que re-renderizar para que el PDF refleje lead/h1_post/stat corregidos.
+      cleanHtml = limpiarHtml(renderReport(data));
     }
     // CALIDEZ (condicional al fit): un reporte 100% frío NO se retiene si el fit es bueno (se manda con flag
     // frio_campana_conexion para que IBT haga campaña de conexión). Solo retiene frío + mal fit. WARM_GATE_MODE.
@@ -2362,7 +2454,7 @@ module.exports = {
   parseReporteJSON, _rankFit, _rankSenioridad, _parseProfile, _sizeBoost,
   _norm, _empresaDeHeadline, _empKey, _slugCos, _degOrdinal, _headlineLimpio, _fechaHoy,
   _esICsuelto, _icpPideDecisores, _matchFuncion, _warmth, _geoAliasSet,
-  _geoIncoherente, _paisesIncoherente, _calidezInsuficiente, _paisesDeTexto,
+  _geoIncoherente, _paisesIncoherente, _reescribirPaisesPagina1, _calidezInsuficiente, _paisesDeTexto,
   _rolRelevante, _verticalesExcluir, _matchVerticalExcluir, _candBueno, _candViable,
   _cardsFitBueno, _resolverGateCalidez, sourceConRetry, runPlanConRetry
 };
