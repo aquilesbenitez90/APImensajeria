@@ -843,22 +843,19 @@ function _parsePeople(res){
   // esa cola viene el resto de campos del candidato (recentlyHired/recentPostsCount), en cualquier orden.
   const re = /id=([A-Za-z0-9_\-]+)\s+"([^"]+)"\s+(.*?)\s*\(DISTANCE_(\d|OUT_OF_NETWORK)[^,)]*(?:,\s*([^)]+))?\)(.*?)(?=\s+id=[A-Za-z0-9_\-]+\s+"|$)/gs;
   const out = [];
-  let vioSenal = false, hubo = false;
   for(const x of s.matchAll(re)){
-    hubo = true;
     const tail = x[6] || '';
     // recentlyHired / recently_hired -> booleano. Toleramos "true"/"false", 1/0, o la clave presente sin valor explícito.
+    // CONFIRMADO en producción (brandtrack): este campo per-persona NO viaja en el texto del /api/mcp, así que el
+    // parseo casi siempre da false. Lo dejamos TOLERANTE por si algún día el gateway lo serializa, pero SIN loguear
+    // por lote (era spam): el aviso resumido vive en sourceCandidates. La señal real viene de la Pasada D.
     const mHired = tail.match(/recently[_\s]?[Hh]ired"?\s*[:=]?\s*(true|false|1|0)?/i);
-    if(mHired) vioSenal = true;
     const recienAsumio = !!(mHired && /^(true|1)$/i.test(mHired[1]||''));
     // recentPostsCount / recentPosts -> número (puede venir null). Default 0.
     const mPosts = tail.match(/recent[_\s]?[Pp]osts(?:[_\s]?[Cc]ount)?"?\s*[:=]?\s*(\d+)/i);
     const posts = mPosts ? parseInt(mPosts[1],10) : 0;
     out.push({ id:x[1], name:x[2], head:(x[3]||'').trim(), dist: x[4]==='OUT_OF_NETWORK'?9:parseInt(x[4],10), loc:(x[5]||'').trim(), recienAsumio, posts });
   }
-  // Aviso ÚNICO por respuesta: si vinieron personas pero NINGUNA traía el campo de señal, el formato del
-  // gateway puede haber cambiado (o esta tool/category no lo expone). El sourcing sigue (default false/0).
-  if(hubo && !vioSenal) console.warn('[SIGNALS] recentlyHired no vino en la respuesta (parseo tolerante: recienAsumio=false, posts=0 para este lote).');
   return out;
 }
 function _parseProfile(res){
@@ -866,7 +863,22 @@ function _parseProfile(res){
   const hc=(s.match(/(\d[\d,]*)\s+employees/)||[])[1];
   let headRich=((s.match(/—\s*(.+?)\s*\(\s*(?:\?|\d)/)||[])[1]||'').trim();
   headRich=headRich.replace(/\s*@\s*\?\s*$/,'').trim();
-  return { headcount: hc?parseInt(hc.replace(/,/g,''),10):null, headRich };
+  // SEÑAL DE COMPRA sobre el FINALISTA (datos REALES del MCP, jamás inventados): get_contact_profile PODRÍA
+  // exponer en el texto una señal de recién-cambió-de-trabajo / antigüedad-en-el-rol. NO está confirmado que
+  // el endpoint /api/mcp la serialice (el gateway JSON sí, el texto puede que no). Por eso el parseo es
+  // TOLERANTE: si encontramos la señal, devolvemos recienAsumio=true sobre un candidato que YA pasó el embudo
+  // (buen fit); si no aparece, recienAsumio=null (desconocido, NO false: no pisamos una señal previa de la Pasada D).
+  // Toleramos varias formas: recentlyHired/recently_hired true|1, "started ... 2025/2026" reciente,
+  // "X month(s) in role/position", "menos de un año en el cargo", "changedJobs(Last90Days) true".
+  let recienAsumio = null;
+  if(/recently[_\s]?hired"?\s*[:=]?\s*(true|1)\b/i.test(s)) recienAsumio = true;
+  else if(/changed[_\s]?jobs(?:[_\s]?last90days)?"?\s*[:=]?\s*(true|1)\b/i.test(s)) recienAsumio = true;
+  else if(/\b(\d{1,2})\s*(?:months?|meses)\s+(?:in|en)\s+(?:role|position|el\s+(?:rol|cargo|puesto))/i.test(s)){
+    const m = s.match(/\b(\d{1,2})\s*(?:months?|meses)\s+(?:in|en)/i);
+    if(m && parseInt(m[1],10) <= 12) recienAsumio = true;     // hasta 12 meses en el rol = recién asumió
+  }
+  else if(/(?:menos de un a[nñ]o|less than a year)\s+(?:en|in)\s+(?:el\s+)?(?:rol|cargo|puesto|role|position)/i.test(s)) recienAsumio = true;
+  return { headcount: hc?parseInt(hc.replace(/,/g,''),10):null, headRich, recienAsumio };
 }
 // Parsea resultados de búsqueda de EMPRESAS: id=NUMERO "Nombre" Industria (NNN employees, ?)
 // Headcount puede venir como "442", "1,5 mil+", "10 mil+" (es-MX). Normaliza a entero.
@@ -911,7 +923,7 @@ function validarPlan(plan){
   return plan;
 }
 
-async function sourceCandidates(plan, cliente){
+async function sourceCandidates(plan, cliente, conSenal = true){
   validarPlan(plan);
   const icp = plan._plan;
   // GEO-COHERENCIA (determinística, defensa en profundidad): el sourcing confía en `geografia` (país PRINCIPAL).
@@ -1165,8 +1177,16 @@ async function sourceCandidates(plan, cliente){
   // asumieron el rol en los últimos 90 días. NO reemplaza nada: se MERGEA al pool para que esos candidatos
   // (recientes = ventana de compra abierta) COMPITAN en el ranking sin sesgarlo a puro recién-cambiado.
   // Una sola pasada (MCP es gratis; el costo es latencia): si trae con industria, no repetimos sin ella.
+  // LATENCIA (fix robotic-crew/300s Railway): la Pasada D corre 1 vez por cada llamada a sourceCandidates,
+  // y el multi-pass invoca esto hasta SOURCE_MAX_PASSES veces -> hasta 18 round-trips MCP extra SOLO por la
+  // señal. La señal es REALCE (sube en el ranking), no RECALL (no agrega cuentas nuevas que falten); no hace
+  // falta re-buscarla en las pasadas 2/3 de recall. Solo la corremos cuando conSenal=true (pasada 1).
   let recienCambio = [];
-  try{ recienCambio = await buscar(geoLocOrNull, true, true); }catch(e){ console.warn('[SIGNALS] pasada changedJobsLast90Days falló:', e.message); }
+  if(conSenal){
+    try{ recienCambio = await buscar(geoLocOrNull, true, true); }catch(e){ console.warn('[SIGNALS] pasada changedJobsLast90Days falló:', e.message); }
+  } else {
+    console.log('[SIGNALS] Pasada D (changedJobsLast90Days) SALTADA (pasada de recall; la señal es realce, no recall).');
+  }
   // BLINDAJE: los candidatos de esta pasada pasaron el filtro changedJobsLast90Days:true del Sales Navigator,
   // así que son recién-cambiados POR DEFINICIÓN. Forzamos recienAsumio=true en TODOS sin depender de que
   // _parsePeople haya logrado extraer recentlyHired del texto (no confirmado en el endpoint de texto del MCP).
@@ -1225,6 +1245,9 @@ async function sourceCandidates(plan, cliente){
         if(prof.headRich && prof.headRich.length>=3){
           c.head=prof.headRich; c.empresa=_empresaDeHeadline(prof.headRich) || c.empresa; c.fit=_rankFit(prof.headRich, titulos);
         }
+        // SEÑAL sobre el FINALISTA: si el perfil expone recién-cambió/antigüedad-corta, marcamos recienAsumio
+        // (OR: nunca pisamos una señal previa de la Pasada D con un null/desconocido del perfil).
+        if(prof.recienAsumio===true) c.recienAsumio = true;
       }catch{}
     }
     c.cerca = _esCerca(c.loc);
@@ -1270,6 +1293,7 @@ async function sourceCandidates(plan, cliente){
         if(prof.headRich && prof.headRich.length>=3){
           c.head=prof.headRich; c.empresa=_empresaDeHeadline(prof.headRich) || c.empresa; c.fit=_rankFit(prof.headRich, titulos);
         }
+        if(prof.recienAsumio===true) c.recienAsumio = true;   // SEÑAL sobre el finalista (OR, ver loop de arriba)
         // recomputar el score ahora que el tamaño se conoce (head puede haber cambiado al enriquecer -> reevaluar IC)
         c.icSuelto = pideDecisores && _esICsuelto(c.head);
         c.score = _scoreCand(c);
@@ -1307,6 +1331,53 @@ async function sourceCandidates(plan, cliente){
     c.score = _scoreCand(c);
   }
   final.sort((a,b)=> (b.cerca-a.cerca) || (b.score-a.score) || (b.ancla-a.ancla));
+
+  // ===== GARANTÍA DE AFLORAMIENTO DE LA SEÑAL (Opción A) ====================================
+  // Problema observado (brandtrack): el pool tenía 150 recién-cambiados, pero el embudo (pool → 18 → top 3)
+  // los filtraba ANTES de SELECT, así que la señal "por qué ahora" nunca aparecía en una card. El +8 del score
+  // no alcanza para levantar a un recién-cambiado por encima de 18 candidatos más fuertes.
+  // DECISIÓN DEL DUEÑO (Opción A): RESERVAR 1-2 slots del pool a la IA para recién-cambiados que IGUAL pasen el
+  // FIT (serían elegibles de todas formas), para que COMPITAN en SELECT. El fit MANDA: NO forzamos bajo-fit ni
+  // fríos solo por tener señal. Gate de elegibilidad = on-vertical/decisor real (_rolRelevante, el MISMO gate que
+  // armarReporte) + NO IC suelto + NO off-vertical + cálido (1er/2do grado, calidez = mejor predictor). Si ninguno
+  // pasa el gate, no se fuerza nada (queda como hoy). Si ya hay alguno en `final`, no duplicamos esfuerzo.
+  const RESERVA_SENAL = Math.max(0, parseInt(process.env.SOURCE_RESERVE_SIGNAL || '2', 10));
+  if(RESERVA_SENAL > 0){
+    const yaIds = new Set(final.map(c=>c.id));
+    const yaConSenalEnFinal = final.filter(c => c.recienAsumio && _rolRelevante(c.head, titulos, industriasICP)).length;
+    const cupo = RESERVA_SENAL - yaConSenalEnFinal;
+    if(cupo > 0){
+      const elegibles = out
+        .filter(c => c.recienAsumio
+          && !yaIds.has(c.id)
+          && (c.dist===1 || c.dist===2)                                   // cálido (la señal NO compra fríos)
+          && _rolRelevante(c.head, titulos, industriasICP)                // on-vertical / decisor real (mismo gate que armarReporte)
+          && !(pideDecisores && _esICsuelto(c.head))                      // no IC suelto cuando el ICP pide decisores
+          && !_offVert(c));                                               // no vertical adyacente a excluir
+      // garantizar score/icSuelto: los candidatos de `out` fuera del top K nunca se scorearon (undefined) → al
+      // entrar a `final` viajarían sin score y romperían el orden / la comparación de desplazamiento.
+      for(const c of elegibles){ c.icSuelto = pideDecisores && _esICsuelto(c.head); c.score = _scoreCand(c); }
+      elegibles.sort((a,b)=> ((b.score||0)-(a.score||0)) || (b.ancla-a.ancla) || (b.fit-a.fit));   // mejor fit/score primero
+      elegibles.length = Math.min(elegibles.length, cupo);
+      if(elegibles.length){
+        // Si `final` ya está lleno (N_IA), desplazamos a los PEORES del final que NO tengan señal ni sean ancla,
+        // para no inflar el pool ni sacar cuentas-ancla. Si hay lugar, simplemente sumamos.
+        for(const e of elegibles){
+          if(final.length < N_IA){ final.push(e); continue; }
+          // buscar la peor víctima desplazable (sin señal, sin ancla, score más bajo)
+          let peorIdx = -1, peorScore = Infinity;
+          for(let i=0;i<final.length;i++){
+            const f=final[i];
+            if(f.recienAsumio || f.ancla) continue;
+            if((f.score??0) < peorScore){ peorScore = f.score??0; peorIdx = i; }
+          }
+          if(peorIdx >= 0){ final[peorIdx] = e; } else { final.push(e); }   // si no hay desplazable, ampliamos por una vez
+        }
+        final.sort((a,b)=> (b.cerca-a.cerca) || (b.score-a.score) || (b.ancla-a.ancla));
+        console.log(`[SIGNALS] afloramiento: +${elegibles.length} recién-cambiado(s) ON-FIT reservado(s) al pool a la IA (${elegibles.map(c=>c.name).join(', ')}).`);
+      }
+    }
+  }
 
   // ROL: contar IC sueltos que llegan al pool de la IA (solo informativo; ya quedaron al fondo por el score).
   // Recalculamos sobre el head final de cada candidata (algunas no pasaron por enriquecimiento -> sin c.icSuelto).
@@ -1445,12 +1516,15 @@ async function sourceConRetry(plan, cliente){
   };
 
   for(let pass=1; pass<=MAX_PASSES; pass++){
-    let res = await sourceCandidates(plan, cliente);
+    // La Pasada D (señal de compra changedJobsLast90Days) solo corre en la pasada 1: es realce de ranking,
+    // no recall. En las pasadas 2/3 (recall) se salta para no triplicar los round-trips MCP (latencia/300s Railway).
+    const conSenal = pass === 1;
+    let res = await sourceCandidates(plan, cliente, conSenal);
     // anti-hipo: si ESTA pasada salió 100% vacía, esperá y reintentá (las mismas búsquedas andan segundos después).
     for(let i=0; i<reintentos && (!res || !res.pool || !res.pool.length); i++){
       console.warn(`[SOURCE] pasada ${pass}: pool vacío, reintento en ${delay}ms (posible hipo transitorio del MCP)...`);
       await new Promise(r => setTimeout(r, delay));
-      res = await sourceCandidates(plan, cliente);
+      res = await sourceCandidates(plan, cliente, conSenal);
     }
     acumular(res);
     const vals    = [...porId.values()];
@@ -1510,11 +1584,12 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - PLATAFORMA / INFRAESTRUCTURA / API (REGLA CRÍTICA, define industrias y comprador_ideal): si el cliente es una PLATAFORMA, INFRAESTRUCTURA o API que HABILITA una transacción de terceros (orquestación de pagos, logística, identidad/KYC, mensajería, antifraude), el comprador NO es otro proveedor del mismo servicio (par/competidor) sino la EMPRESA QUE USA ese servicio para su propio negocio. Ejemplo: un orquestador de pagos vende a quien COBRA online (ecommerce, marketplace, retailer, aerolínea, SaaS con suscripción), NO a otro PSP/procesador/pasarela. Preguntate SIEMPRE: ¿quién FIRMA EL CHEQUE para usar esto? Esa empresa es el comprador y define "industrias". En estos casos: (1) cargá las verticales del USUARIO del servicio en "industrias" (ej. para orquestador de pagos: Comercio al por menor, Comercio electrónico, Aerolíneas, Software, Marketplaces), NUNCA el rubro de la propia plataforma; (2) cargá los PROVEEDORES/PARES del MISMO servicio (ej. PSPs, procesadores, pasarelas) en "competidores" y/o "competidor_terminos" y/o "verticales_excluir", para que el sourcing los FILTRE y no se cuelen como cuentas.
 - COMPRADOR IDEAL (_plan.comprador_ideal, CRÍTICO para el fit de comprador): redactá en 1-2 oraciones QUÉ TIENE QUE SER CIERTO de una EMPRESA para que compre, revenda o aloje el producto del cliente, como un test de INCLUSIÓN y EXCLUSIÓN derivado del research que ya hiciste. REGLA MENTAL QUE GOBIERNA ESTO: la pregunta NO es "¿está en el rubro?" sino "¿quién FIRMA EL CHEQUE y PODRÍA adoptar esto de forma realista?". Compartir vertical NO basta: una empresa puede estar en el mismo rubro y aun así NO ser comprador. Describí el MODELO DE COMPRADOR (qué hace esa empresa con su negocio que la obliga a necesitar lo del cliente) y agregá ANTI-PATRONES explícitos de empresas que comparten vertical pero NO compran. Considerá SIEMPRE estos cuatro anti-patrones y nombrá los que apliquen al caso:
   (a) MARCA PROPIA / CASA DE MARCA que NO aloja ni revende terceros (tipo Inditex/Zara/marca DTC): si el cliente le vende A retailers MULTIMARCA o canales que CURAN marcas de terceros, esas marcas propias NO son comprador (no incorporan producto externo). Ej. joyería que se vende vía corners en multimarca: INCLUYE "grandes almacenes y multimarca que curan/alojan marcas de terceros"; EXCLUYE "marcas propias o casas DTC que solo venden lo suyo".
-  (b) GIGANTE FUERA DE RANGO REALISTA: un proveedor chico o startup NO le cierra una venta a un Fortune-50 en un ciclo normal. Si el cliente es chico/joven, INCLUYE el rango de tamaño donde la venta es realista (scaleups, medianas) y EXCLUYE "gigantes globales cuyo ciclo de compra es irreal para un proveedor de este tamaño".
+  (b) GIGANTE FUERA DE RANGO REALISTA: un proveedor chico o startup NO le cierra una venta a un Fortune-50 en un ciclo normal, Y una empresa varias veces más grande que el rango del ICP NO es comprador del producto SMB (resuelve esa necesidad puertas adentro con su propio equipo). Si el cliente es chico/joven O su producto es para PyMEs/SMB, INCLUYE el rango de tamaño donde la venta es realista (agencias/comercios chicos, scaleups, medianas) y EXCLUYE EXPLÍCITAMENTE "empresas varias veces más grandes que el rango realista, cuyo ciclo de compra es irreal o que no necesitan una herramienta SMB". Ej. para un CRM que se vende a agencias inmobiliarias chicas (5 a 100 personas): INCLUYE "agencias y corredurías inmobiliarias del rango"; EXCLUYE "desarrolladoras corporativas o cadenas de 300+ empleados que venden su propio inventario con fuerza de ventas dedicada y NO son comprador del producto SMB". Cuando el ICP es SMB, este anti-patrón (b) DEBE quedar redactado de forma explícita en el comprador_ideal.
   (c) CONTRATISTA / ASESOR / MICRO-EMPRESA cuando el ICP pide OPERADORES medianos-grandes: si el cliente le vende a operadores reales (ej. operaciones mineras medianas-grandes), EXCLUYE "micro-contratistas, asesores o consultoras que no operan a esa escala".
   (d) MISMO SUSTANTIVO, DISTINTO NEGOCIO: una palabra compartida NO es fit (flota de camiones ≠ flota de robots; perforación de agua/anclajes ≠ voladura minera; etc.). EXCLUYE el negocio adyacente que comparte la palabra pero no usa el producto del cliente.
   REGLA ANTI FALSO NEGATIVO (innegociable): si el research es pobre o dudás, redactá el comprador_ideal de forma INCLUSIVA (qué empresas SÍ compran) y agregá la EXCLUSIÓN SOLO cuando el research la respalde; nunca inventes una exclusión que deje fuera compradores legítimos. Es razonamiento de negocio aproximado, no una verdad dura: marcá el anti-patrón cuando es claramente el caso, no por sospecha. Español neutro, sin guiones.
 - TÍTULO (H1): el CLIENTE va PRIMERO y resaltado. h1_pre = "" (vacío); h1_company = nombre del cliente (lo resaltado, va primero); h1_post = "${N} clientes potenciales en [País o región]" (es un SUBTÍTULO que va DEBAJO del nombre; SIN "·" ni guion al principio). PROHIBIDO "para escalar".
+- TÍTULO == GEOGRAFÍA SOURCEADA (REGLA DURA, defecto grave que contradice el reporte): el/los país(es) que nombra "h1_post" tienen que ser EXACTAMENTE los de "geografias", con "geografia" (el principal, geografias[0]) SIEMPRE incluido y nombrado PRIMERO. El título refleja DÓNDE se va a buscar de verdad, y el sistema busca en el principal: si el título promete un país y el reporte entrega otro, el reporte se contradice a sí mismo (caso real: título "clientes potenciales en España" mientras toda la página 1 y el sourcing hablaban de Argentina = principal). PROHIBIDO que h1_post nombre un país que NO esté en "geografias". PROHIBIDO omitir el país principal de h1_post. PROHIBIDO nombrar en h1_post un país suelto distinto del principal. Si el cliente opera en varios, h1_post nombra ESE SET (los de "geografias", con el principal primero), no uno solo distinto del principal. Misma regla para cualquier país que nombres en "lead" o "proof": solo países de "geografias". CIERRE OBLIGATORIO: antes de devolver, verificá que el país (o set de países) de h1_post sea IGUAL a "geografias", con el principal (geografias[0]) incluido y primero; si no coincide, corregí h1_post (no la geografia) antes de cerrar.
 - IDIOMA: TODO en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.
 - SIN GUIONES (importante): NUNCA uses guiones largos (—) ni guiones (-) como conectores o para incisos, en NINGÚN texto (lead, proof, context, apertura, icp, prioridades). Reemplazalos por comas, paréntesis o dos puntos. Ej: en vez de "servicios técnicos —plomería, electricidad— con cobertura", escribí "servicios técnicos (plomería, electricidad) con cobertura". El texto tiene que sonar humano, no de IA.
 - GEOGRAFÍA (CRÍTICO): "geografia" = país del cliente (prioritario). "geografias" = país del cliente PRIMERO + SOLO los demás países donde el cliente HOY ya puede prestar el servicio de verdad (sus países de operación actuales). PROHIBIDO mercados de expansión futura o donde el cliente todavía NO opera. El sistema prioriza fuerte el país del cliente; los demás solo rellenan.
@@ -1528,7 +1603,10 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   REGLA DE ORO: no subas ni bajes el nivel respecto de lo que dice la fuente. Si DISTINTAS fuentes difieren en el nivel de un mismo país (ej. una dice "opera en" y otra "se está expandiendo a"), usá SIEMPRE el nivel MÁS BAJO/conservador (en ese caso, "expansión reciente"), nunca el más optimista. El stat de países (si lo ponés) cuenta los consolidados + los recientes reales (NO los aspiracionales), y el texto y el stat tienen que COINCIDIR: si decís que opera/se expande en 3 países, el stat dice 3, no 2. Si no estás seguro de un país, no lo cuentes en ningún lado, pero que texto y stat coincidan.
   COHERENCIA NUMÉRICA DE PAÍSES (CRÍTICO, defecto recurrente): fijá UNA SOLA lista de países (los consolidados + recientes reales) y usá EXACTAMENTE esa misma lista, con los MISMOS nombres y la MISMA cantidad, en los TRES lugares: (1) el número del stat de países, (2) los países nombrados en h1_post, y (3) cualquier país que menciones en la PROSA del "lead". REGLA INNEGOCIABLE: cada país que cuentes en el número del stat tiene que estar nombrado en h1_post; y cada país que nombres en h1_post o en el "lead" tiene que estar contado en el stat. PROHIBIDO contar un país en el número que no esté escrito en el texto, o nombrar en el texto uno que no esté en el cuenta (ej. contar 4 pero listar solo España, México y Guatemala sin Andorra es un BUG). EL LEAD NO PUEDE NOMBRAR UN PAÍS EXTRA (CRÍTICO, defecto recurrente que retiene reportes con cuentas buenas): si el cliente NO opera hoy en un país, ese país NO va en el "lead" aunque sea un mercado de expansión, una aspiración o una referencia de contexto. El "lead" solo puede nombrar países de la lista canónica (los mismos de h1_post). Si querés hablar de crecimiento o de mercado sin un país de operación confirmado, hacelo en GENÉRICO (ej. "la región", "Latinoamérica") SIN nombrar un país que no esté en la lista. CIERRE OBLIGATORIO: antes de cerrar el JSON, contá con el dedo los países que nombraste en h1_post, verificá que NINGÚN país del "lead" quede fuera de esa lista, y que ese número sea EXACTAMENTE el del stat de países; si no coinciden, corregilo antes de devolver.
 - INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar SOLO las VERTICALES de prioridad ALTA donde están los COMPRADORES del cliente (las MISMAS que marcás "Alta:" en "prioridades", ni una más). PROHIBIDO meter en "industrias" las verticales "Media:" ni ninguna secundaria/aspiracional: esas van EXCLUSIVAMENTE en "prioridades" como contexto, NUNCA en "industrias" porque "industrias" es el filtro de búsqueda y meter una Media diluye el pool con cuentas de menor fit. El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Banca", "Administración de propiedades"). NO pongas el rubro del propio cliente ni industrias genéricas. TAXONOMÍA (CRÍTICO para que el filtro NO se caiga): cada nombre de "industrias" tiene que ser una CATEGORÍA RECONOCIBLE de la taxonomía de industrias de LinkedIn/Sales Navigator (las que el sistema resuelve a un id de filtro), NO una etiqueta hiper-específica, de moda o inventada que no exista como industria. Una etiqueta que no resuelve deja la búsqueda SIN filtro de industria. Preferí siempre la categoría canónica más cercana al COMPRADOR: ej. usá "Ingeniería robótica" / "Robotic Engineering" o "Fabricación de maquinaria de automatización" en vez de "Robotics" a secas. Es válido (y recomendado ante la duda) poner el nombre en español Y/O su equivalente reconocible en inglés. EVITÁ verticales industriales/pesadas amplias (ej. "Construcción", "Manufactura", "Minería", "Cemento") salvo que sean LITERALMENTE el comprador: arrastran jefes de mantenimiento de planta que consumen el servicio puertas adentro pero NO son el canal de compra. Ante la duda, preferí las verticales donde el producto del cliente se compra o se revende.
-- TAMAÑO (para que salgan empresas ANCLA, no micro-empresas): "tamano_min" tiene que ser un número real de empleados que refleje el ICP. Si el ICP son empresas medianas y grandes / marcas ancla, poné un piso alto (ej: 200). Poné un piso bajo (20-50) SOLO si el ICP son genuinamente PyMEs/micro. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva.
+- TAMAÑO (el piso refleja el COMPRADOR REAL, ni subestimado ni sobreestimado): "tamano_min" tiene que ser un número real de empleados que refleje el PISO REAL del comprador del cliente. El gate de tamaño del sistema es SOLO un PISO (no hay techo): si ponés el piso demasiado alto, dejás entrar gigantes que NO compran (el piso no los frena, solo sube a los grandes); si lo ponés demasiado bajo o en 0, entra cualquiera. Reglá el piso por el tipo de comprador, en AMBAS direcciones:
+  • COMPRADOR PyME / SMB (producto SaaS o herramienta que se vende a agencias, comercios o estudios chicos): el piso tiene que ser BAJO y ACORDE al rango real, NO alto ni 0. Ej. un CRM para agencias inmobiliarias de 5 a 100 asesores → tamano_min ~5 a 10 (NUNCA 200): un piso de 200 deja colar desarrolladoras o cadenas de 300+ que no son comprador del producto SMB. El piso bajo es CORRECTO acá, no un error.
+  • COMPRADOR MEDIANO-GRANDE / MARCA ANCLA (plataforma o solución que se vende a cadenas, operadores grandes o marcas establecidas): el piso alto SIGUE siendo correcto (ej. 200 o más). NO conviertas todo en SMB: si el ICP legítimamente apunta a empresas grandes, un piso alto filtra micro-empresas que no son el comprador.
+  REGLA DE ORO: el piso es CHICO cuando el comprador es chico y GRANDE cuando el comprador es grande; deducilo del research del comprador real, no por defecto. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva. COHERENCIA: el piso tiene que ser consistente con la celda (4) "Tamaño de empresa" del ICP y con el comprador_ideal (si el comprador_ideal marca el anti-patrón "(b) gigante fuera de rango realista", el piso NO puede ser tan alto que ese mismo gigante igual entre).
 - COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas/PRODUCTOS que compiten DIRECTAMENTE con la solución que vende el cliente (otras herramientas/soluciones DEL MISMO TIPO), porque venden/fabrican LO MISMO que el cliente. REGLA MENTAL INNEGOCIABLE: un competidor es algo que tu comprador potencial podría comprar EN VEZ del producto del cliente; NO es el comprador potencial mismo. PROHIBIDO incluir la INDUSTRIA, la FUNCIÓN, el TIPO DE EMPRESA o la VERTICAL del COMPRADOR objetivo (eso son tus clientes, no tus rivales). Ejemplo concreto: si el cliente es un CRM que se VENDE a inmobiliarias, los competidores son OTROS CRM inmobiliarios (ej. Inmovilla, Wasi, Propify), NUNCA "inmobiliaria", "agencia inmobiliaria" ni "bienes raíces" (esos son los COMPRADORES). Buscalos con web_search e incluí TRES tipos: (i) competidores directos de tamaño similar; (ii) FABRICANTES o PROVEEDORES globales del mismo producto (ej. para detonadores/voladura: Enaex, Orica, Dyno Nobel, Sandvik; para staffing de tecnología: Toptal, Turing, Andela, TEKsystems); (iii) distribuidores o integradores que revenden ese producto. Son PARES o RIVALES, no clientes. El sistema EXCLUYE a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES del research. NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque descartaría compradores legítimos. Si no identificás competidores reales claros, MEJOR dejá la lista VACÍA que meter la vertical del comprador (que rompe el sourcing).
 - COMPETIDOR_TERMINOS (filtro de respaldo, usar con cuidado): listá 0-4 términos del PRODUCTO ESPECÍFICO que el cliente fabrica/vende y que, si aparecen en el NOMBRE de otra empresa, casi seguro la delatan como proveedor o competidor (ej. "explosivos", "detonadores", "voladura", "staffing", "proptech"). MISMA REGLA MENTAL que en "competidores": un término competidor describe algo que el comprador compraría EN VEZ del producto del cliente, NUNCA describe al comprador mismo. REGLA CRÍTICA Y DURA: PROHIBIDO poner la INDUSTRIA, la FUNCIÓN, el TIPO DE EMPRESA o el VERTICAL donde el cliente VENDE. Si vende software/CRM inmobiliario NO pongas "inmobiliaria" ni "agencia inmobiliaria" ni "bienes raíces"; si le vende a minería NO pongas "minería". Eso descartaría a tus propios COMPRADORES (es exactamente el bug que quemó el sourcing de NOCNOK). Solo el nombre del producto en sí. Ante la duda, MEJOR dejá la lista VACÍA que arriesgarte a meter la vertical del comprador.
 - VERTICALES_EXCLUIR (ruido adyacente del sourcing, NO inventes nada del cliente): listá 2-5 RUBROS ADYACENTES que comparten palabras o suenan parecido al ICP pero que NO son compradores del cliente, para que el sistema los descarte del pool. Son verticales del MERCADO (no del cliente): no estás afirmando nada nuevo sobre el cliente, solo marcando rubros-ruido a EXCLUIR. Ejemplos: para una empresa de voladura minera, excluí "geotecnia", "mecánica de suelos", "militar", "consultoría"; para una marca de joyería retail, excluí "hotelería", "educación". REGLA ANTI FALSO POSITIVO: NUNCA pongas acá el vertical legítimo del comprador (si el comprador está en "Seguros", JAMÁS pongas "seguros") ni un término tan corto/genérico que pueda colarse en nombres de tus compradores. Si no hay rubros adyacentes claros que confundan, dejá la lista VACÍA ([]).
@@ -1630,16 +1708,18 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 - PROHIBIDO INVENTARLE LOGROS/CASOS/MÉTRICAS AL CLIENTE (anti-invención, tan grave como inventar el cargo): el ángulo y el hook conectan el rol con lo que el cliente OFRECE (en presente, cualitativo), NUNCA con un resultado, caso de éxito, implementación, cifra o cliente del cliente que NO esté TEXTUAL en el contexto "Qué ofrece / proof" que te paso. PROHIBIDO escribir cosas tipo "[cliente] redujo X a cero", "implementaciones activas en [sector]", "ya trabaja con empresas como la suya", "logró +X% de", "tiene casos en [vertical]" si eso no figura LITERAL en el contexto. Si el contexto no trae un logro, NO lo inventes: describí qué OFRECE el cliente y cómo eso toca el rol de esa persona. Una métrica o caso inventado del cliente lo quema apenas el prospecto repregunta.
 - CADA uno DEBE tener angulo y hook NO vacíos.
 - El ÁNGULO: MÁXIMO 2 oraciones (≤ 320 caracteres), específico de ESA persona/empresa, usando su cargo/empresa/perfil REALES + lo que ofrece el cliente. Corto y al hueso, sin relleno. 100% único por persona.
+- ÁNGULO ANCLADO Y DISTINTO POR CARD (REGLA DURA, defecto auditado: los ángulos salían genéricos y calcados entre cards). Cada ángulo tiene que anclar un DATO o un PAIN ESPECÍFICO de ESA empresa/persona (algo que no aplicaría igual a otra card), no una frase intercambiable. Los ${pedir} ángulos del reporte NO pueden girar todos sobre el MISMO pain: cada card, un pain distinto y un ángulo distinto. PROHIBIDO el cierre TEMPLATE genérico repetido entre cards, tipo "exactamente el tipo de herramienta/solución que un [rol] necesita", "es justo lo que [empresa/rol] necesita" o "eso es exactamente lo que [cliente] resuelve": esa fórmula es relleno intercambiable y delata que no anclaste nada propio de esa cuenta (caso real: los 3 ángulos giraban sobre "gestión centralizada", y uno era puro template sin nada propio de la empresa). Si un ángulo te quedó así de genérico, reescribilo anclando algo concreto y único de ESA empresa/rol.
 - SEÑAL DE COMPRA, el "por qué ahora" REAL (úsala cuando la línea del candidato la trae, JAMÁS la inventes): la lista marca, al FINAL de la línea de cada candidato, señales reales del perfil (dato del MCP, no generado por nadie). Leelas y tejelas en la prosa del ángulo, NO como lista ni campo aparte: (a) Si la línea trae "SEÑAL: asumió el rol hace poco", el ángulo DEBE incorporar ese disparador temporal como el "por qué ahora" real, hilado natural ("asumió la dirección comercial hace poco, momento ideal para evaluar herramientas nuevas", "como llegó hace poco al rol, está definiendo stack y proveedores"). Es la señal MÁS valiosa para justificar el contacto AHORA: aprovechala siempre que esté. (b) Si la línea trae "activo en LinkedIn", podés mencionarlo de forma SECUNDARIA y blanda ("y viene activo/a en LinkedIn") solo si suma; es opcional, no lo fuerces. (c) ANTI-INVENCIÓN, INNEGOCIABLE: SOLO afirmá una señal si SU marcador está presente en ESA línea de candidato. PROHIBIDO escribir "asumió el rol hace poco", "recién llegó", "nuevo en el cargo" o equivalentes si la línea NO trae "SEÑAL: asumió el rol hace poco"; sin el marcador la señal NO existe y no se menciona. El dato es CUALITATIVO ("hace poco"/"recientemente"), NUNCA inventes una fecha ni cuánto hace ("hace 2 meses") salvo que figure literal. (d) Si la línea NO trae ninguna señal, escribí el ángulo como siempre (por qué encaja ese rol con lo que ofrece el cliente), SIN forzar un "por qué ahora" temporal inventado.
 - PROHIBIDO copiar/pegar o calcar la estructura de un ángulo a otro. Antes de cerrar, revisá que el nombre y la empresa de cada ángulo sean los de ESE id.
 - El HOOK: UNA sola oración entre comillas, lista para mandar, empezando por el PRIMER NOMBRE (ej: "Clara, ...").
+- HOOK COMPLETO Y CERRADO (REGLA DURA, defecto recurrente que se ve descuidado): cada hook tiene que ser una oración ENTERA y bien terminada, nunca cortada a mitad de frase ni sin puntuación final. Si es una PREGUNTA, abrí con "¿" y cerrá con "?" (signos apareados): prohibido un hook que arranca a preguntar y termina sin "?". Si es una afirmación, cerrá con punto. PROHIBIDO devolver hooks como "Flor, ...¿hoy lo gestionan de forma centralizada" (sin "?" ni cierre) o "Samanta, ...quién la gestiona en el día a día" (sin "?"): quedan colgados y queman la credibilidad. Antes de cerrar, releé cada hook entero y confirmá que la oración llega hasta el final y cierra con la puntuación correcta.
 - DIVERSIDAD ESTRUCTURAL OBLIGATORIA DE HOOKS (el defecto MÁS frecuente: las cards salen con el mismo esqueleto): los hooks tienen que usar ${pedir} ABERTURAS DISTINTAS de este MENÚ, una forma diferente por card. (1) OBSERVACIÓN concreta sobre su empresa o su cargo ("Clara, vi que en [empresa] el área de [X] viene creciendo..."); (2) PREGUNTA DIRECTA sobre una decisión propia de ESE rol ("Marcos, cómo están resolviendo hoy [decisión del rol] en [empresa]"); (3) AFIRMACIÓN que conecta lo que hace el cliente con lo que esa persona maneja, SIN pregunta ("Lucía, su rol en [empresa] toca de lleno [lo que ofrece el cliente]."). PROHIBIDO que DOS hooks compartan el mismo molde sintáctico: ni los ${pedir} terminando en "¿...?", ni los ${pedir} con la plantilla "[Nombre], en [empresa] el [X] es [adj]", ni los ${pedir} arrancando con la misma palabra después del nombre. Si al releerlos dos suenan calcados, reescribí uno con otra abertura del menú.
 - PROHIBIDO EL CONDICIONAL VACÍO (en ángulo Y hook): nada de "puede ser relevante si...", "podría necesitar...", "pueden requerir...", "puede ser útil...", "quizás le interese", "tal vez le sirva". Ese hedging suena a IA y no dice nada. Si NO tenés una señal concreta de esa persona, NO te la inventes (regla de anti-invención) PERO TAMPOCO hedgees: afirmá EN PRESENTE el punto de contacto REAL entre lo que hace ese rol y lo que el cliente OFRECE (ej. no "como Head of Ops quizás necesite cobertura técnica", sí "como Head of Ops usted gestiona la red de mantenimiento que [cliente] cubre"). Cualitativo, presente, sin "si/podría/quizás".
 - NUNCA menciones el grado de conexión (1er/2do/3er grado) ni inventes datos que no estén en lo que te paso.
 - IDIOMA: ángulo y hook en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos.
 - Texto plano: NADA de markdown (sin **negritas**, sin asteriscos). Solo el objeto JSON.
 - SIN GUIONES: NUNCA uses guiones largos (—) ni guiones (-) como conectores o incisos en el ángulo ni en el hook. Usá comas, paréntesis o dos puntos. El texto tiene que sonar a persona, no a IA. OJO con el guion PEGADO a una palabra con espacio de un solo lado (el patrón que más se escapa): "su rol -clave en operaciones" o "el área- de mantenimiento" también están PROHIBIDOS; reescribilos con coma o paréntesis ("su rol, clave en operaciones"). El guion SOLO es válido dentro de compuestos legítimos sin espacios (e-commerce, C-level, co-fundador, start-up).
-- ESTILO HUMANO (sutil): los hooks se mandan como si los escribiera una persona real, no una IA impecable. Está bien (y preferible) que ALGÚN hook corto no termine en punto, o que una pregunta casual vaya sin el signo de cierre "?", como cuando uno escribe rápido por chat. Que sea SUTIL y OCASIONAL: a lo sumo UN detalle así por hook, NUNCA en todos. PROHIBIDO errores de ortografía, palabras mal escritas o mayúsculas raras: lo único "relajado" permitido es esa puntuación final blanda. El mensaje tiene que verse profesional y creíble, solo que humano.
+- ESTILO HUMANO (sutil): los hooks se mandan como si los escribiera una persona real, no una IA impecable. Está bien (y preferible) que ALGÚN hook corto AFIRMATIVO no termine en punto, como cuando uno escribe rápido por chat. Que sea SUTIL y OCASIONAL: a lo sumo UN detalle así, y SOLO en una afirmación. OJO, ESTO NO ES UNA EXCEPCIÓN A "HOOK COMPLETO Y CERRADO": la oración SIEMPRE va entera (nunca cortada a mitad de frase) y una PREGUNTA SIEMPRE cierra con "?" (abre "¿" y cierra "?", apareados); el único relajo permitido es omitir el punto final de una afirmación corta, jamás dejar una frase trunca ni una pregunta sin "?". PROHIBIDO errores de ortografía, palabras mal escritas o mayúsculas raras. El mensaje tiene que verse profesional y creíble, solo que humano.
 - COMPETIDORES: NO elijas personas de empresas que sean COMPETIDORAS directas del cliente (que vendan/ofrezcan lo mismo). Preferí empresas que serían CLIENTES del cliente, no rivales.
 
 ## Output — SOLO JSON (sin texto alrededor)
@@ -1649,7 +1729,7 @@ Los campos "nombre" y "empresa" son OBLIGATORIOS y van copiados TEXTUAL del cand
 
 ## VERIFICACIÓN FINAL (OBLIGATORIA — antes de devolver el JSON)
 VERIFICÁ, elemento por elemento, que el "nombre" y la "empresa" sean los del id elegido (copiados de la lista, no de otro renglón), que el HOOK EMPIECE con el PRIMER NOMBRE de ESE id, y que el ÁNGULO NOMBRE la EMPRESA de ESE id. Si alguno no cumple, REESCRIBILO antes de cerrar: una card con el hook o el ángulo de OTRA persona/empresa (MEZCLA) quema todo el reporte.
-VERIFICÁ ADEMÁS: (a) que las ${pedir} aberturas de los hooks sean ESTRUCTURALMENTE DISTINTAS (no dos con el mismo molde ni todas terminando en "?"); (b) que ningún ángulo/hook use CONDICIONAL VACÍO ("puede/podría/quizás/si necesita"); (c) que NO le atribuyas a la persona una responsabilidad de compra/decisión/liderazgo que su cargo real NO implica (re-encuadre prohibido); (d) que NO le atribuyas al CLIENTE ningún logro, caso, métrica o implementación que no esté TEXTUAL en el contexto "Qué ofrece / proof"; (e) que NINGÚN ángulo/hook AFIRME que la empresa de la card COMPRA/ALOJA/REVENDE/INTEGRA lo del cliente sin evidencia (fit de negocio inexistente), ni que hayas elegido una empresa que es claramente NO comprador (marca propia que no aloja terceros, gigante irreal para el tamaño del cliente, contratista/micro cuando el ICP pide operadores, o mismo sustantivo distinto negocio) habiendo en el pool una alternativa comprable mejor; (f) que NINGÚN ángulo afirme una SEÑAL DE COMPRA ("asumió el rol hace poco", "recién llegó", "nuevo en el cargo", "viene activo en LinkedIn") cuyo marcador NO esté en ESA línea de candidato, ni invente una fecha/antigüedad exacta. Si algo de esto falla, REESCRIBILO o RE-ELEGÍ antes de cerrar.
+VERIFICÁ ADEMÁS: (a) que las ${pedir} aberturas de los hooks sean ESTRUCTURALMENTE DISTINTAS (no dos con el mismo molde ni todas terminando en "?"); (b) que ningún ángulo/hook use CONDICIONAL VACÍO ("puede/podría/quizás/si necesita"); (c) que NO le atribuyas a la persona una responsabilidad de compra/decisión/liderazgo que su cargo real NO implica (re-encuadre prohibido); (d) que NO le atribuyas al CLIENTE ningún logro, caso, métrica o implementación que no esté TEXTUAL en el contexto "Qué ofrece / proof"; (e) que NINGÚN ángulo/hook AFIRME que la empresa de la card COMPRA/ALOJA/REVENDE/INTEGRA lo del cliente sin evidencia (fit de negocio inexistente), ni que hayas elegido una empresa que es claramente NO comprador (marca propia que no aloja terceros, gigante irreal para el tamaño del cliente, contratista/micro cuando el ICP pide operadores, o mismo sustantivo distinto negocio) habiendo en el pool una alternativa comprable mejor; (f) que NINGÚN ángulo afirme una SEÑAL DE COMPRA ("asumió el rol hace poco", "recién llegó", "nuevo en el cargo", "viene activo en LinkedIn") cuyo marcador NO esté en ESA línea de candidato, ni invente una fecha/antigüedad exacta; (g) que CADA hook esté COMPLETO y CERRADO: la oración llega hasta el final (ninguno cortado a mitad de frase), las preguntas abren "¿" y cierran "?" (signos apareados) y ninguna queda sin "?"; (h) que cada ÁNGULO ancle un dato o pain ESPECÍFICO de ESA empresa/persona y que los ${pedir} ángulos NO compartan el mismo pain ni una frase intercambiable entre cards (sin cierres template tipo "exactamente el tipo de herramienta/solución que [rol] necesita"). Si algo de esto falla, REESCRIBILO o RE-ELEGÍ antes de cerrar.
 
 ## JSON VÁLIDO (CRÍTICO — si el JSON no parsea, se pierde todo el trabajo)
 - Dentro de "angulo" y "hook" NO uses comillas dobles (") sin escapar. Si necesitás encomillar una palabra o frase dentro del texto, usá comillas simples ('algo') o ninguna. Las ÚNICAS comillas dobles del hook son las dos que lo envuelven (\\"...\\").
@@ -1721,6 +1801,42 @@ function _sinInventos(s){
 const _limpia = s => _sinInventos(_sinGuiones(s));
 // Acorta un headline de LinkedIn relleno de keywords al segmento más relevante
 // (el que menciona la función objetivo), sin inventar nada.
+// Saneo del CARGO de la card (datos REALES del MCP, solo se LIMPIA lo que vino, NO se inventa nada):
+//   (a) caracteres no imprimibles / símbolos rotos de headlines de LinkedIn (emojis, glyphs "▯", zero-width)
+//       — conserva tildes, ñ y puntuación normal;
+//   (b) sufijo redundante " en <empresa>" / " at <empresa>" / " para <empresa>" cuando la empresa de la card
+//       (que ya va aparte en otra columna) quedó pegada al cargo (caso "Jefa de marketing en Sportline.");
+//   (c) puntuación/espacios sobrantes al final.
+function _saneaCargo(cargo, empresa){
+  let t = String(cargo || '');
+  // (a) Quitar emojis, símbolos sueltos y caracteres de control / formato (zero-width, replacement char).
+  // Conservamos letras (incl. acentuadas/ñ), números, espacios y la puntuación común de un cargo.
+  t = t.replace(/[ --​-‏‪-‮⁠﻿�]/g, ' ');
+  t = t.replace(/[\u{1F000}-\u{1FAFF}\u{1F300}-\u{1F9FF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{25A0}-\u{25FF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}]/gu, ' ');
+  t = t.replace(/\s{2,}/g, ' ').trim();
+  // (b) Sufijo " en/at/para <empresa>" redundante (la empresa ya va en su propia columna).
+  const emp = String(empresa || '').trim();
+  if(emp.length >= 2){
+    const empEsc = emp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    t = t.replace(new RegExp(`\\s+(?:en|at|para)\\s+${empEsc}\\b\\.?\\s*$`, 'i'), '');
+  }
+  // (c) Puntuación/espacios finales sobrantes (punto, coma, separadores colgando).
+  t = t.replace(/[\s.,;:·•|/\-]+$/u, '').trim();
+  return t;
+}
+// Colapsa tokens repetidos CONSECUTIVOS en una ubicación: "X, México, México" -> "X, México",
+// "México, México, México" -> "México". Genérico (cualquier token, no solo país), case-insensitive,
+// conserva el primer token tal como vino (con sus tildes/mayúsculas). NO reordena ni inventa nada.
+function _dedupUbicacion(loc){
+  const partes = String(loc || '').split(',').map(s => s.trim()).filter(Boolean);
+  const out = [];
+  for(const p of partes){
+    const prev = out.length ? out[out.length - 1] : null;
+    if(prev && _norm(prev) === _norm(p)) continue;   // token repetido consecutivo -> se omite
+    out.push(p);
+  }
+  return out.join(', ');
+}
 function _cargoCorto(head, kws){
   let raw = String(head||'').split('@')[0].replace(/\s{2,}/g,' ').trim();
   raw = raw.replace(/\bc-\s+level\b/gi,'C-level'); // "C- level" -> "C-level"
@@ -1845,9 +1961,9 @@ function armarReporte(plan, seleccion, pool, senales){
     if(empKey && usadasEmp.has(empKey)){ if(commit) console.warn(`[SELECT] empresa DUPLICADA, ignorada: ${p.name} @ ${empresa}`); return null; }
     if(commit){ usados.add(s.id); if(empKey) usadasEmp.add(empKey); }
     return {
-      empresa, nombre: p.name, cargo: _cargoCorto(p.head, titulos),
+      empresa, nombre: p.name, cargo: _saneaCargo(_cargoCorto(p.head, titulos), empresa),
       urn: p.id, slug: _slugCos(p.name),
-      ubicacion: p.loc || ((plan._plan && plan._plan.geografia) || ''),
+      ubicacion: _dedupUbicacion(p.loc || ((plan._plan && plan._plan.geografia) || '')),
       grado: _degOrdinal(p.dist===9?3:p.dist, '2do') + ' grado',
       headcount: (p.headcount ?? null),
       angulo: _limpia(angulo), hook: _limpia(hook)
@@ -1923,25 +2039,48 @@ function _paisesDeTexto(txt){
   // "espanol/a" NO debe contar como "espana": exigimos límite de palabra al final.
   return _PAISES.filter(p => new RegExp(`\\b${_esc(p)}\\b`).test(t));
 }
-// Compara el país de cada card contra el país objetivo del reporte (título h1_post + prosa del lead).
-// La grilla ICP ya NO tiene celda "Geografía" (ahora es Decisor/Señal/Pain/Tamaño): el set canónico de
-// países se arma con h1_post (fuente principal) + lead (los países que el cliente HOY opera, nombrados en prosa).
-// Devuelve null si todo coherente; o { objetivo:[...], fuera:[...] } si alguna card está en otro país.
+// Compara el país de cada card contra el país objetivo del reporte. Hay DOS niveles de objetivo:
+//   - TÍTULO (h1_post): es lo que el reporte AFIRMA ser ("3 clientes potenciales en España"). Es la promesa
+//     que el prospecto lee primero; las cards TIENEN que poder leerse como cumpliéndola.
+//   - DECLARADO (h1_post + lead): set ampliado con los países que el cliente HOY opera, nombrados en la prosa
+//     del lead. Sirve para el caso multi-país legítimo (cards repartidas entre varios países que el cliente opera).
+// La grilla ICP ya NO tiene celda "Geografía", por eso el set se arma de los textos visibles de la página 1.
+//
+// BUG QUE ESTO ARREGLA (brandtrack real): el título decía "España" y las 3 cards eran de Argentina, pero el
+// lead nombraba [Argentina, México, Chile, España] (multi-país en prosa). El objetivo viejo (h1_post+lead unidos)
+// incluía "argentina" → las cards de Argentina pasaban y el reporte salía APROBADO con un título mentiroso.
+// CRITERIO SANO: además del chequeo por-card contra el set DECLARADO (multi-país tolerado), exigimos que el
+// TÍTULO no sea huérfano: si h1_post nombra países y NINGUNA card cae en ALGÚN país del título (todas están en
+// otro lado), es defecto aunque caigan dentro del set ampliado del lead.
+// Devuelve null si todo coherente; o { objetivo:[...], fuera:[...] } si hay incoherencia.
 function _geoIncoherente(data){
   if(!data) return null;
-  const objetivo = new Set();
-  for(const p of _paisesDeTexto(data.h1_post)) objetivo.add(p);
-  for(const p of _paisesDeTexto(data.lead)) objetivo.add(p);
-  if(!objetivo.size) return null; // sin país objetivo reconocible no podemos juzgar → no bloquear
+  const titulo    = new Set(_paisesDeTexto(data.h1_post));          // países que el TÍTULO afirma
+  const declarado = new Set([...titulo, ..._paisesDeTexto(data.lead)]); // set ampliado (multi-país legítimo)
+  if(!declarado.size) return null; // sin país objetivo reconocible no podemos juzgar → no bloquear
   const fuera = [];
+  // 1) Chequeo por-card contra el set DECLARADO (tolera el multi-país: una card por país operado está OK).
   for(const c of (data.cards||[])){
     const paisesCard = _paisesDeTexto(c.ubicacion);
     if(!paisesCard.length) continue; // ubicación sin país reconocible → no bloquear por esta card
-    if(!paisesCard.some(p => objetivo.has(p))){
-      fuera.push(`${c.nombre||'?'} (${c.empresa||'?'}) figura en "${c.ubicacion}", fuera del/los país(es) objetivo del reporte (${[...objetivo].join(', ')}).`);
+    if(!paisesCard.some(p => declarado.has(p))){
+      fuera.push(`${c.nombre||'?'} (${c.empresa||'?'}) figura en "${c.ubicacion}", fuera del/los país(es) declarado(s) del reporte (${[...declarado].join(', ')}).`);
     }
   }
-  return fuera.length ? { objetivo:[...objetivo], fuera } : null;
+  // 2) TÍTULO HUÉRFANO: si el título nombra país(es) pero NINGUNA card (con país reconocible) cae en ALGÚN país
+  //    del título, el título promete un mercado donde no hay ni una sola card → incoherente. No dispara si las
+  //    cards no tienen país reconocible (no podemos afirmar nada) ni si al menos una card está en un país del título.
+  if(titulo.size){
+    const cardsConPais = (data.cards||[]).map(c=>({c, paises:_paisesDeTexto(c.ubicacion)})).filter(x=>x.paises.length);
+    const algunaEnTitulo = cardsConPais.some(x => x.paises.some(p => titulo.has(p)));
+    if(cardsConPais.length && !algunaEnTitulo){
+      const detalle = cardsConPais.map(x=>`${x.c.nombre||'?'} (${x.c.empresa||'?'}) en "${x.c.ubicacion}"`).join('; ');
+      fuera.push(`El título nombra ${[...titulo].join(', ')} pero NINGUNA card está ahí: ${detalle}.`);
+    }
+  }
+  if(!fuera.length) return null;
+  // objetivo reportado = el set declarado (lo que se usa en los mensajes de fix).
+  return { objetivo:[...declarado], titulo:[...titulo], fuera };
 }
 
 // --- COHERENCIA DEL CONTEO DE PAÍSES (determinística) -------------------------
@@ -2659,5 +2798,6 @@ module.exports = {
   _esICsuelto, _icpPideDecisores, _matchFuncion, _warmth, _geoAliasSet,
   _geoIncoherente, _paisesIncoherente, _reescribirPaisesPagina1, _calidezInsuficiente, _paisesDeTexto,
   _rolRelevante, _verticalesExcluir, _matchVerticalExcluir, _candBueno, _candViable,
-  _cardsFitBueno, _resolverGateCalidez, sourceConRetry, runPlanConRetry
+  _cardsFitBueno, _resolverGateCalidez, sourceConRetry, runPlanConRetry,
+  _saneaCargo, _dedupUbicacion
 };
