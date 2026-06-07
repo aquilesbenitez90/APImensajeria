@@ -1,0 +1,16 @@
+# Carpeta de PDFs de prueba / análisis generados (no es código)
+cosas/
+
+# Dependencias
+node_modules/
+
+# PDFs sueltos en la raíz (reportes de prueba)
+*.pdf
+
+# Artefactos descartables
+preview-*.pdf
+smoke.js
+
+# Logs y temporales
+*.log
+.DS_Store
