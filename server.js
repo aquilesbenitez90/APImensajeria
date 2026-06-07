@@ -2142,10 +2142,12 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
       ? `[INTEGRIDAD] OK: ${cardsValidas} cards completas + juez APROBADO.${frioCampanaConexion?' (frío, campaña de conexión)':''}`
       : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} completas, juez ${judgeResult.veredicto}.`);
 
-    // El PDF se renderiza una sola vez y SOLO si el reporte quedó apto. Si está rechazado
-    // no se genera y el job no expone pdf_base64, así n8n no tiene nada que mandar.
+    // ALWAYS_SEND (default true, decisión del negocio): se genera el PDF SIEMPRE, apto o no,
+    // así n8n siempre tiene qué mandar. El veredicto/motivo se sigue logueando (visibilidad),
+    // pero ya no se retiene. Poné ALWAYS_SEND=false para volver al fail-closed (solo apto).
+    const _alwaysSend = String(process.env.ALWAYS_SEND ?? 'true').toLowerCase() !== 'false';
     let pdfBuffer = null, pageCount = null;
-    if (aptoEnvio) {
+    if (aptoEnvio || _alwaysSend) {
       pdfBuffer = await renderizarPdf(cleanHtml);
       pageCount = await contarPaginas(pdfBuffer);
     }
@@ -2377,9 +2379,10 @@ app.post('/generar-reporte', async (req, res) => {
       ? `[INTEGRIDAD] OK: ${cardsValidas} cards completas + juez APROBADO.${frioCampanaConexion?' (frío, campaña de conexión)':''}`
       : `[INTEGRIDAD] ⚠️ NO apto: ${cardsValidas}/${MIN_CARDS_OK} completas, juez ${judgeResult.veredicto}.`);
 
-    // PDF solo si quedó apto; si está rechazado se devuelve pdf_base64 null.
+    // ALWAYS_SEND (default true): genera el PDF siempre (apto o no), así n8n siempre manda.
+    const _alwaysSend = String(process.env.ALWAYS_SEND ?? 'true').toLowerCase() !== 'false';
     let pdfBuffer = null, pageCount = null;
-    if (aptoEnvio) {
+    if (aptoEnvio || _alwaysSend) {
       pdfBuffer = await renderizarPdf(cleanHtml);
       pageCount = await contarPaginas(pdfBuffer);
     }
