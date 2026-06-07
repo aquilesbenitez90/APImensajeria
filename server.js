@@ -831,9 +831,35 @@ async function _mapLimit(items, limit, fn){
 }
 
 // FIX: limpia el sufijo "@ ?" del headline enriquecido (empresa sin resolver en DB).
+// SEÑALES DE COMPRA (datos REALES del MCP, jamás inventados): además de id/name/head/dist/loc,
+// extraemos por persona `recienAsumio` (de recentlyHired = cambió de trabajo/asumió el rol hace poco,
+// LA señal más fuerte) y `posts` (de recentPostsCount = actividad reciente en LinkedIn). El parseo es
+// TOLERANTE: capturamos la "cola" de cada persona (hasta el próximo id= o el fin) y buscamos ahí los
+// campos; si el gateway no los trae en esta respuesta, default false/0 y avisamos UNA vez con [SIGNALS].
 function _parsePeople(res){
-  return [...String(res||'').matchAll(/id=([A-Za-z0-9_\-]+)\s+"([^"]+)"\s+(.*?)\s*\(DISTANCE_(\d|OUT_OF_NETWORK)[^,)]*(?:,\s*([^)]+))?\)/g)]
-    .map(x=>({ id:x[1], name:x[2], head:(x[3]||'').trim(), dist: x[4]==='OUT_OF_NETWORK'?9:parseInt(x[4],10), loc:(x[5]||'').trim() }));
+  const s = String(res||'');
+  // El regex base no cambia (id, name, head, DISTANCE, loc); sumamos un grupo "tail" no-codicioso que
+  // arranca tras el ')' del bloque DISTANCE y se corta antes del próximo `id=` (o el fin del texto). En
+  // esa cola viene el resto de campos del candidato (recentlyHired/recentPostsCount), en cualquier orden.
+  const re = /id=([A-Za-z0-9_\-]+)\s+"([^"]+)"\s+(.*?)\s*\(DISTANCE_(\d|OUT_OF_NETWORK)[^,)]*(?:,\s*([^)]+))?\)(.*?)(?=\s+id=[A-Za-z0-9_\-]+\s+"|$)/gs;
+  const out = [];
+  let vioSenal = false, hubo = false;
+  for(const x of s.matchAll(re)){
+    hubo = true;
+    const tail = x[6] || '';
+    // recentlyHired / recently_hired -> booleano. Toleramos "true"/"false", 1/0, o la clave presente sin valor explícito.
+    const mHired = tail.match(/recently[_\s]?[Hh]ired"?\s*[:=]?\s*(true|false|1|0)?/i);
+    if(mHired) vioSenal = true;
+    const recienAsumio = !!(mHired && /^(true|1)$/i.test(mHired[1]||''));
+    // recentPostsCount / recentPosts -> número (puede venir null). Default 0.
+    const mPosts = tail.match(/recent[_\s]?[Pp]osts(?:[_\s]?[Cc]ount)?"?\s*[:=]?\s*(\d+)/i);
+    const posts = mPosts ? parseInt(mPosts[1],10) : 0;
+    out.push({ id:x[1], name:x[2], head:(x[3]||'').trim(), dist: x[4]==='OUT_OF_NETWORK'?9:parseInt(x[4],10), loc:(x[5]||'').trim(), recienAsumio, posts });
+  }
+  // Aviso ÚNICO por respuesta: si vinieron personas pero NINGUNA traía el campo de señal, el formato del
+  // gateway puede haber cambiado (o esta tool/category no lo expone). El sourcing sigue (default false/0).
+  if(hubo && !vioSenal) console.warn('[SIGNALS] recentlyHired no vino en la respuesta (parseo tolerante: recienAsumio=false, posts=0 para este lote).');
+  return out;
 }
 function _parseProfile(res){
   const s=String(res||'');
@@ -973,19 +999,23 @@ async function sourceCandidates(plan, cliente){
   // y leemos el grado real (DISTANCE) de cada perfil; el grado se prioriza en el RANKING, no en el filtro.
   // SEÑALES: guardamos el último texto crudo de una búsqueda de people (para leer un total si lo trae el MCP).
   let txtPeopleSenal = '';
-  async function buscarUno(locIds, conIndustria, kwUnico){
+  async function buscarUno(locIds, conIndustria, kwUnico, soloRecienCambio){
     const f={ category:'people', profilesLimit:50 };
     if(kwUnico) f.keywords = kwUnico;                       // UNA sola palabra/término (multi-palabra da 0)
     if(locIds && locIds.length) f.location={ include: locIds };
     if(fnId) f.function={ include:[fnId] };
     if(conIndustria && indIds.length) f.industry={ include: indIds };
+    // SEÑAL DE COMPRA: pasada ADITIVA opcional que filtra a los que cambiaron de trabajo en los últimos 90
+    // días (decisor nuevo = ventana de compra). NO reemplaza la búsqueda normal: alimenta el pool para que
+    // los recién-cambiados COMPITAN en el ranking (filtrar solo por esto sesgaría a puro recién-cambiado).
+    if(soloRecienCambio) f.changedJobsLast90Days = true;
     try{ const txt = String(await callMCP('search_sales_navigator_filtered', f)); if(!txtPeopleSenal) txtPeopleSenal = txt; return _parsePeople(txt); }catch{ return []; }
   }
   // Une los resultados de buscar cada término de rol por separado (dedupe por id), en PARALELO con tope CONC.
   const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '4', 10);
-  async function buscar(locIds, conIndustria){
-    if(!terminos.length) return await buscarUno(locIds, conIndustria, null);
-    const listas = await _mapLimit(terminos, CONC, t => buscarUno(locIds, conIndustria, t));
+  async function buscar(locIds, conIndustria, soloRecienCambio){
+    if(!terminos.length) return await buscarUno(locIds, conIndustria, null, soloRecienCambio);
+    const listas = await _mapLimit(terminos, CONC, t => buscarUno(locIds, conIndustria, t, soloRecienCambio));
     const acc=[]; const vis=new Set();
     for(const lista of listas){ for(const p of (lista||[])){ if(p.id && !vis.has(p.id)){ vis.add(p.id); acc.push(p); } } }
     return acc;
@@ -1034,6 +1064,9 @@ async function sourceCandidates(plan, cliente){
   //   ancla(+30) = la empresa salió como comprador objetivo del cliente (fit-de-negocio fuerte)
   //   funcion(+25) = el cargo es del rol buscado | seniority*6 = PREMIA al decisor (no solo castiga al IC)
   //   tamaño*2 = saturado en el piso | calidez*4 | país*3 | IC suelto −60 = castigo que sí domina
+  //   SEÑAL DE COMPRA (datos reales del MCP): recienAsumio +8 (decisor nuevo = ventana de compra abierta;
+  //     pesa como tiebreak fuerte SIN superar al fit-de-función, que sigue mandando vía funcion+25/seniority/−rolOk),
+  //     posts>0 +2 (activo en LinkedIn = más contactable). NO inventado: vienen de recentlyHired/recentPostsCount.
   //
   // REGLA DE ARMADO POR NIVELES (decisión del cliente): se aplica DENTRO del score para que el orden que
   // ve la IA respete la prioridad EXACTA, en vez de hacerlo solo post-hoc en armarReporte:
@@ -1054,6 +1087,8 @@ async function sourceCandidates(plan, cliente){
       + _sizeBoost(c.headcount, tamMin)*2
       + _warmth(c.dist)*4
       + (c.cerca?3:0)
+      + (c.recienAsumio?8:0)                                   // señal de compra: asumió el rol hace poco
+      + (c.posts>0?2:0)                                        // señal de actividad: activo en LinkedIn
       - (c.icSuelto?60:0)
       // N3/N4: la FUNCIÓN equivocada (off-vertical o sin fit real) se hunde ANTES de cortar los 18 a la IA,
       // para que no llegue. Más fuerte si encima es frío (N4 nunca; N3 frío-buen-fit conserva fit y no se penaliza).
@@ -1125,14 +1160,34 @@ async function sourceCandidates(plan, cliente){
   let barrido = await buscar(geoLocOrNull, true);
   if(_validosHome(barrido) < HOME_MIN) barrido = barrido.concat(await buscar(geoLocOrNull, false));
 
-  // Unimos: cuentas-ancla primero (fit), después el barrido (warm disperso). Dedupe en el loop por id.
-  const pool = [...enCuentas, ...barrido];
-  console.log(`[SOURCE] pool bruto: ${enCuentas.length} en cuentas-ancla + ${barrido.length} barrido = ${pool.length}.`);
+  // ===== PASADA D — SEÑAL DE COMPRA (ADITIVA): recién-cambiaron de trabajo (changedJobsLast90Days) =====
+  // Misma búsqueda people que el barrido (mismos keywords/location/industria) pero filtrada a los que
+  // asumieron el rol en los últimos 90 días. NO reemplaza nada: se MERGEA al pool para que esos candidatos
+  // (recientes = ventana de compra abierta) COMPITAN en el ranking sin sesgarlo a puro recién-cambiado.
+  // Una sola pasada (MCP es gratis; el costo es latencia): si trae con industria, no repetimos sin ella.
+  let recienCambio = [];
+  try{ recienCambio = await buscar(geoLocOrNull, true, true); }catch(e){ console.warn('[SIGNALS] pasada changedJobsLast90Days falló:', e.message); }
+  // BLINDAJE: los candidatos de esta pasada pasaron el filtro changedJobsLast90Days:true del Sales Navigator,
+  // así que son recién-cambiados POR DEFINICIÓN. Forzamos recienAsumio=true en TODOS sin depender de que
+  // _parsePeople haya logrado extraer recentlyHired del texto (no confirmado en el endpoint de texto del MCP).
+  // El parseo per-persona queda como BONUS aditivo para marcar también a los recién-cambiados de A/B/C.
+  for(const p of recienCambio) p.recienAsumio = true;
+  console.log(`[SIGNALS] changedJobsLast90Days: ${recienCambio.length} candidatos con señal (recienAsumio=true forzado por la pasada) sumados al pool.`);
+
+  // Unimos: cuentas-ancla primero (fit), después el barrido (warm disperso), después los recién-cambiados
+  // (señal). Dedupe en el loop por id; la señal se MERGEA (OR) para no perderla si el id ya venía sin ella.
+  const pool = [...enCuentas, ...barrido, ...recienCambio];
+  console.log(`[SOURCE] pool bruto: ${enCuentas.length} en cuentas-ancla + ${barrido.length} barrido + ${recienCambio.length} señal = ${pool.length}.`);
 
   // dedupe + descartes (decisor real, no la propia empresa del cliente, no competidores) + marca ancla
-  const vistos=new Set(); const out=[]; const empCliente=_norm((cliente&&cliente.empresa)||'');
+  const vistos=new Map(); const out=[]; const empCliente=_norm((cliente&&cliente.empresa)||'');
   for(const p of pool){
-    if(!p.id || vistos.has(p.id)) continue; vistos.add(p.id);
+    if(!p.id) continue;
+    // DEDUPE con MERGE de señal: si el id ya entró (por otra pasada), no lo duplicamos pero SÍ adoptamos su
+    // señal de compra (recienAsumio por OR, posts por máximo). Así un perfil que vino sin señal en el barrido
+    // y CON señal en la pasada changedJobsLast90Days no pierde el dato.
+    const ya = vistos.get(p.id);
+    if(ya){ ya.recienAsumio = ya.recienAsumio || !!p.recienAsumio; ya.posts = Math.max(ya.posts||0, Number(p.posts)||0); continue; }
     if(_rankSenioridad(p.head) < 1) continue;                 // descarta asistente/analista/becario/junior
     const emp=_empresaDeHeadline(p.head)||'';
     if(empCliente && emp && _mismaEmpresa(empCliente, emp)) continue;
@@ -1147,8 +1202,13 @@ async function sourceCandidates(plan, cliente){
     const cerca = _esCerca(p.loc);
     const ancla = (emp && anclaNombres.has(_empKey(emp))) ? 1 : 0;
     const hcPre = ancla ? (anclaHC.get(_empKey(emp)) ?? null) : null;   // headcount ya conocido de la cuenta-ancla
-    out.push({ id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, ancla, headcount:hcPre, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos) });
+    // SEÑALES DE COMPRA (datos reales del MCP): se propagan tal cual al pool y llegan a SELECT.
+    const cand = { id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, ancla, headcount:hcPre, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos), recienAsumio:!!p.recienAsumio, posts:Number(p.posts)||0 };
+    out.push(cand); vistos.set(p.id, cand);   // el Map apunta al objeto pusheado → el merge de señal lo muta in situ
   }
+  // log de cobertura de la señal: cuántos candidatos del pool deduplicado quedaron con recienAsumio:true
+  // (Pasada D forzada + parseo de recentlyHired en A/B/C, mergeados por OR). Si esto es >0 la señal llega.
+  console.log(`[SIGNALS] recienAsumio:true en ${out.filter(c=>c.recienAsumio).length}/${out.length} candidatos del pool (Pasada D + parseo).`);
   // orden inicial: país y cuenta-ancla mandan; después fit; el grado ya cuenta (warmth) antes que la seniority
   out.sort((a,b)=> (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.rank-a.rank));
 
@@ -1570,6 +1630,7 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 - PROHIBIDO INVENTARLE LOGROS/CASOS/MÉTRICAS AL CLIENTE (anti-invención, tan grave como inventar el cargo): el ángulo y el hook conectan el rol con lo que el cliente OFRECE (en presente, cualitativo), NUNCA con un resultado, caso de éxito, implementación, cifra o cliente del cliente que NO esté TEXTUAL en el contexto "Qué ofrece / proof" que te paso. PROHIBIDO escribir cosas tipo "[cliente] redujo X a cero", "implementaciones activas en [sector]", "ya trabaja con empresas como la suya", "logró +X% de", "tiene casos en [vertical]" si eso no figura LITERAL en el contexto. Si el contexto no trae un logro, NO lo inventes: describí qué OFRECE el cliente y cómo eso toca el rol de esa persona. Una métrica o caso inventado del cliente lo quema apenas el prospecto repregunta.
 - CADA uno DEBE tener angulo y hook NO vacíos.
 - El ÁNGULO: MÁXIMO 2 oraciones (≤ 320 caracteres), específico de ESA persona/empresa, usando su cargo/empresa/perfil REALES + lo que ofrece el cliente. Corto y al hueso, sin relleno. 100% único por persona.
+- SEÑAL DE COMPRA, el "por qué ahora" REAL (úsala cuando la línea del candidato la trae, JAMÁS la inventes): la lista marca, al FINAL de la línea de cada candidato, señales reales del perfil (dato del MCP, no generado por nadie). Leelas y tejelas en la prosa del ángulo, NO como lista ni campo aparte: (a) Si la línea trae "SEÑAL: asumió el rol hace poco", el ángulo DEBE incorporar ese disparador temporal como el "por qué ahora" real, hilado natural ("asumió la dirección comercial hace poco, momento ideal para evaluar herramientas nuevas", "como llegó hace poco al rol, está definiendo stack y proveedores"). Es la señal MÁS valiosa para justificar el contacto AHORA: aprovechala siempre que esté. (b) Si la línea trae "activo en LinkedIn", podés mencionarlo de forma SECUNDARIA y blanda ("y viene activo/a en LinkedIn") solo si suma; es opcional, no lo fuerces. (c) ANTI-INVENCIÓN, INNEGOCIABLE: SOLO afirmá una señal si SU marcador está presente en ESA línea de candidato. PROHIBIDO escribir "asumió el rol hace poco", "recién llegó", "nuevo en el cargo" o equivalentes si la línea NO trae "SEÑAL: asumió el rol hace poco"; sin el marcador la señal NO existe y no se menciona. El dato es CUALITATIVO ("hace poco"/"recientemente"), NUNCA inventes una fecha ni cuánto hace ("hace 2 meses") salvo que figure literal. (d) Si la línea NO trae ninguna señal, escribí el ángulo como siempre (por qué encaja ese rol con lo que ofrece el cliente), SIN forzar un "por qué ahora" temporal inventado.
 - PROHIBIDO copiar/pegar o calcar la estructura de un ángulo a otro. Antes de cerrar, revisá que el nombre y la empresa de cada ángulo sean los de ESE id.
 - El HOOK: UNA sola oración entre comillas, lista para mandar, empezando por el PRIMER NOMBRE (ej: "Clara, ...").
 - DIVERSIDAD ESTRUCTURAL OBLIGATORIA DE HOOKS (el defecto MÁS frecuente: las cards salen con el mismo esqueleto): los hooks tienen que usar ${pedir} ABERTURAS DISTINTAS de este MENÚ, una forma diferente por card. (1) OBSERVACIÓN concreta sobre su empresa o su cargo ("Clara, vi que en [empresa] el área de [X] viene creciendo..."); (2) PREGUNTA DIRECTA sobre una decisión propia de ESE rol ("Marcos, cómo están resolviendo hoy [decisión del rol] en [empresa]"); (3) AFIRMACIÓN que conecta lo que hace el cliente con lo que esa persona maneja, SIN pregunta ("Lucía, su rol en [empresa] toca de lleno [lo que ofrece el cliente]."). PROHIBIDO que DOS hooks compartan el mismo molde sintáctico: ni los ${pedir} terminando en "¿...?", ni los ${pedir} con la plantilla "[Nombre], en [empresa] el [X] es [adj]", ni los ${pedir} arrancando con la misma palabra después del nombre. Si al releerlos dos suenan calcados, reescribí uno con otra abertura del menú.
@@ -1588,7 +1649,7 @@ Los campos "nombre" y "empresa" son OBLIGATORIOS y van copiados TEXTUAL del cand
 
 ## VERIFICACIÓN FINAL (OBLIGATORIA — antes de devolver el JSON)
 VERIFICÁ, elemento por elemento, que el "nombre" y la "empresa" sean los del id elegido (copiados de la lista, no de otro renglón), que el HOOK EMPIECE con el PRIMER NOMBRE de ESE id, y que el ÁNGULO NOMBRE la EMPRESA de ESE id. Si alguno no cumple, REESCRIBILO antes de cerrar: una card con el hook o el ángulo de OTRA persona/empresa (MEZCLA) quema todo el reporte.
-VERIFICÁ ADEMÁS: (a) que las ${pedir} aberturas de los hooks sean ESTRUCTURALMENTE DISTINTAS (no dos con el mismo molde ni todas terminando en "?"); (b) que ningún ángulo/hook use CONDICIONAL VACÍO ("puede/podría/quizás/si necesita"); (c) que NO le atribuyas a la persona una responsabilidad de compra/decisión/liderazgo que su cargo real NO implica (re-encuadre prohibido); (d) que NO le atribuyas al CLIENTE ningún logro, caso, métrica o implementación que no esté TEXTUAL en el contexto "Qué ofrece / proof"; (e) que NINGÚN ángulo/hook AFIRME que la empresa de la card COMPRA/ALOJA/REVENDE/INTEGRA lo del cliente sin evidencia (fit de negocio inexistente), ni que hayas elegido una empresa que es claramente NO comprador (marca propia que no aloja terceros, gigante irreal para el tamaño del cliente, contratista/micro cuando el ICP pide operadores, o mismo sustantivo distinto negocio) habiendo en el pool una alternativa comprable mejor. Si algo de esto falla, REESCRIBILO o RE-ELEGÍ antes de cerrar.
+VERIFICÁ ADEMÁS: (a) que las ${pedir} aberturas de los hooks sean ESTRUCTURALMENTE DISTINTAS (no dos con el mismo molde ni todas terminando en "?"); (b) que ningún ángulo/hook use CONDICIONAL VACÍO ("puede/podría/quizás/si necesita"); (c) que NO le atribuyas a la persona una responsabilidad de compra/decisión/liderazgo que su cargo real NO implica (re-encuadre prohibido); (d) que NO le atribuyas al CLIENTE ningún logro, caso, métrica o implementación que no esté TEXTUAL en el contexto "Qué ofrece / proof"; (e) que NINGÚN ángulo/hook AFIRME que la empresa de la card COMPRA/ALOJA/REVENDE/INTEGRA lo del cliente sin evidencia (fit de negocio inexistente), ni que hayas elegido una empresa que es claramente NO comprador (marca propia que no aloja terceros, gigante irreal para el tamaño del cliente, contratista/micro cuando el ICP pide operadores, o mismo sustantivo distinto negocio) habiendo en el pool una alternativa comprable mejor; (f) que NINGÚN ángulo afirme una SEÑAL DE COMPRA ("asumió el rol hace poco", "recién llegó", "nuevo en el cargo", "viene activo en LinkedIn") cuyo marcador NO esté en ESA línea de candidato, ni invente una fecha/antigüedad exacta. Si algo de esto falla, REESCRIBILO o RE-ELEGÍ antes de cerrar.
 
 ## JSON VÁLIDO (CRÍTICO — si el JSON no parsea, se pierde todo el trabajo)
 - Dentro de "angulo" y "hook" NO uses comillas dobles (") sin escapar. Si necesitás encomillar una palabra o frase dentro del texto, usá comillas simples ('algo') o ninguna. Las ÚNICAS comillas dobles del hook son las dos que lo envuelven (\\"...\\").
@@ -1603,7 +1664,10 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
     const ctx = (p.headRich && p.headRich!==p.head) ? ` | perfil: ${p.headRich}` : '';
     const loc = p.loc ? ` | ${p.loc}` : '';
     const home = p.cerca ? ' ★(país del cliente)' : '';
-    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}`;
+    // SEÑAL DE COMPRA (dato real del MCP, NO inventado): marcador para que SELECT pueda tejerlo en el ángulo.
+    // Formato literal: " · SEÑAL: asumió el rol hace poco" (recienAsumio) y " · activo en LinkedIn" (posts>0).
+    const senal = `${p.recienAsumio?' · SEÑAL: asumió el rol hace poco':''}${p.posts>0?' · activo en LinkedIn':''}`;
+    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}${senal}`;
   }).join('\n');
   const _pisoTam = (plan._plan && parseInt(plan._plan.tamano_min||0,10)) || 0;
   const vertAlta = (plan._plan && Array.isArray(plan._plan.industrias) ? plan._plan.industrias.filter(Boolean) : []);
@@ -2568,7 +2632,7 @@ app.get('/health', (req, res) => {
   // jobs_activos = jobs corriendo AHORA (termómetro de zombies); jobs_en_cache = total en el Map
   // (incluye terminados ok/error hasta el barrido de 1h). jobs.size mezclaba ambos y confundía.
   let activos = 0; for (const j of jobs.values()) if (j.status === 'processing') activos++;
-  res.json({ ok: true, jobs_activos: activos, jobs_en_cache: jobs.size, cuentas: NUM_CUENTAS });
+  res.json({ ok: true, jobs_activos: activos, jobs_en_cache: jobs.size, cuentas: NUM_CUENTAS, signals_mode: SIGNALS_MODE });
 });
 
 // Descarga del log de resultados (JSONL). ?tail=N devuelve solo las últimas N líneas.
