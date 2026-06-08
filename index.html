@@ -119,18 +119,33 @@ const MSGS = [
 ];
 let t0, timer, msgTimer, msgIdx = 0;
 
+// Persistencia: guardamos el jobId en el navegador para sobrevivir cierres/refrescos de pestaña.
+// El server limpia el job a 1h; damos un margen y reintentamos retomar al reabrir.
+const LS_KEY = 'ibt_job';
+const TTL = 55*60*1000;
+function saveJob(jobId, dominio){ try{ localStorage.setItem(LS_KEY, JSON.stringify({jobId, dominio, ts:Date.now()})); }catch(e){} }
+function loadJob(){ try{ const j = JSON.parse(localStorage.getItem(LS_KEY)||'null'); if(j && j.jobId && (Date.now()-j.ts) < TTL) return j; }catch(e){} return null; }
+function clearJob(){ try{ localStorage.removeItem(LS_KEY); }catch(e){} }
+
 function show(stage){
   ['stageForm','stageProg','stageOk','stageErr'].forEach(s => $(s).classList.toggle('on', s===stage));
 }
 function fmt(s){ const m=Math.floor(s/60); const r=s%60; return m+':'+String(r).padStart(2,'0'); }
 function normDom(v){ return v.trim().replace(/^https?:\/\//i,'').replace(/^www\./i,'').replace(/\/.*$/,'').trim(); }
 
-function startProgress(){
-  t0 = Date.now(); msgIdx = 0; $('pmsg').textContent = MSGS[0]; $('ptime').textContent='0:00';
+function startProgress(startTs){
+  t0 = startTs || Date.now(); msgIdx = 0; $('pmsg').textContent = MSGS[0];
+  $('ptime').textContent = fmt(Math.floor((Date.now()-t0)/1000));
   timer = setInterval(()=>{ $('ptime').textContent = fmt(Math.floor((Date.now()-t0)/1000)); }, 1000);
   msgTimer = setInterval(()=>{ msgIdx = Math.min(msgIdx+1, MSGS.length-1); $('pmsg').textContent = MSGS[msgIdx]; }, 9000);
 }
 function stopProgress(){ clearInterval(timer); clearInterval(msgTimer); }
+
+function mostrarOk(jobId, empresa){
+  $('okEmp').textContent = empresa || '';
+  $('dlLink').setAttribute('href', '/pdf/'+jobId);
+  show('stageOk');
+}
 
 async function generar(){
   const dominio = normDom($('dominio').value);
@@ -152,41 +167,61 @@ async function generar(){
     jobId = j.jobId;
   }catch(e){ $('err').textContent = 'Error de conexión. Reintentá.'; return; }
 
+  saveJob(jobId, dominio);
   show('stageProg'); startProgress();
-  poll(jobId, clave);
+  poll(jobId);
 }
 
-async function poll(jobId, clave){
+async function poll(jobId){
   const DEADLINE = Date.now() + 9*60*1000; // 9 min
   while(Date.now() < DEADLINE){
     await new Promise(r=>setTimeout(r, 5000));
     let job;
     try{
       const r = await fetch('/resultado/'+jobId);
+      if(r.status === 404){ clearJob(); stopProgress(); $('errMsg').textContent='El reporte expiró o el servicio se reinició. Generá uno nuevo.'; show('stageErr'); return; }
       if(!r.ok) continue;
       job = await r.json();
     }catch(e){ continue; }
     if(!job || job.status === 'processing') continue;
     stopProgress();
     if(job.status === 'ok' && job.paginas){
-      $('okEmp').textContent = job.empresa || '';
-      $('dlLink').setAttribute('href', '/pdf/'+jobId);
-      show('stageOk');
+      mostrarOk(jobId, job.empresa);   // dejamos el job guardado: si reabrís dentro de la hora, podés volver a descargar
     } else {
+      clearJob();
       $('errMsg').textContent = job.error || 'El análisis no pudo armar un reporte para esta empresa. Probá con otra.';
       show('stageErr');
     }
     return;
   }
+  // Timeout del front: el job puede seguir vivo en el server; NO borramos, al reabrir se retoma.
   stopProgress();
-  $('errMsg').textContent = 'El análisis tardó demasiado. Probá de nuevo en un rato.';
+  $('errMsg').textContent = 'Está tardando más de lo normal. Volvé a entrar en unos minutos y el reporte va a estar listo para descargar.';
   show('stageErr');
+}
+
+// Al cargar: si quedó un job guardado (no expirado), lo retomamos sin pedir la clave de nuevo.
+async function init(){
+  const saved = loadJob();
+  if(!saved){ show('stageForm'); return; }
+  try{
+    const r = await fetch('/resultado/'+saved.jobId);
+    if(r.status === 404){ clearJob(); show('stageForm'); return; }
+    const job = await r.json();
+    if(job.status === 'processing'){
+      if(saved.dominio) $('dominio').value = saved.dominio;
+      show('stageProg'); startProgress(saved.ts); poll(saved.jobId); return;
+    }
+    if(job.status === 'ok' && job.paginas){ mostrarOk(saved.jobId, job.empresa); return; }
+    clearJob(); show('stageForm');
+  }catch(e){ show('stageForm'); }
 }
 
 $('go').addEventListener('click', generar);
 $('clave').addEventListener('keydown', e=>{ if(e.key==='Enter') generar(); });
-$('again').addEventListener('click', ()=>{ $('dominio').value=''; $('err').textContent=''; show('stageForm'); });
-$('retry').addEventListener('click', ()=>{ show('stageForm'); });
+$('again').addEventListener('click', ()=>{ clearJob(); $('dominio').value=''; $('err').textContent=''; show('stageForm'); });
+$('retry').addEventListener('click', ()=>{ clearJob(); show('stageForm'); });
+init();
 </script>
 </body>
 </html>
