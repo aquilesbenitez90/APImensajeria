@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IBT · Análisis GTM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0A0C14; --ink-2:#3A3F4A; --ink-3:#6B717B; --bg:#0A0C14; --panel:#fff;
+    --accent:#2B4BFF; --accent-soft:rgba(43,75,255,.10); --line:rgba(10,12,20,.10);
+    --font:'Geist','Inter',sans-serif; --mono:'Geist Mono','JetBrains Mono',monospace;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  body{font-family:var(--font); background:var(--bg); color:var(--ink); min-height:100vh; display:flex; flex-direction:column}
+  .hero{background:var(--bg); color:#fff; padding:28px 24px 0; text-align:center}
+  .hero img{height:30px; opacity:.95}
+  .tag{font-family:var(--mono); font-size:10px; letter-spacing:.18em; text-transform:uppercase; color:var(--accent); margin-top:18px}
+  h1{font-size:34px; font-weight:700; letter-spacing:-.03em; margin-top:10px; line-height:1.1}
+  h1 span{color:var(--accent)}
+  .sub{color:#A0A5AE; font-size:15px; margin-top:12px; max-width:480px; margin-left:auto; margin-right:auto; line-height:1.5}
+  .wrap{flex:1; display:flex; align-items:center; justify-content:center; padding:40px 20px}
+  .card{background:var(--panel); border-radius:16px; box-shadow:0 30px 80px -40px rgba(0,0,0,.5); width:100%; max-width:460px; padding:34px}
+  label{font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); display:block; margin-bottom:7px}
+  input{width:100%; font-family:var(--font); font-size:15px; padding:13px 15px; border:1px solid var(--line); border-radius:10px; outline:none; transition:border .15s}
+  input:focus{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
+  .field{margin-bottom:18px}
+  button{width:100%; font-family:var(--font); font-size:15px; font-weight:600; color:#fff; background:var(--ink); border:none; border-radius:10px; padding:14px; cursor:pointer; transition:opacity .15s}
+  button:hover{opacity:.88}
+  button:disabled{opacity:.5; cursor:not-allowed}
+  .err{color:#D02B2B; font-size:13px; margin-top:14px; text-align:center; min-height:18px}
+  .hint{color:var(--ink-3); font-size:12px; margin-top:16px; text-align:center; line-height:1.5}
+  /* estados */
+  .stage{display:none}
+  .stage.on{display:block}
+  .prog{text-align:center; padding:14px 0}
+  .spinner{width:46px; height:46px; border:3px solid var(--accent-soft); border-top-color:var(--accent); border-radius:50%; margin:0 auto 22px; animation:spin .9s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .pmsg{font-size:16px; font-weight:500; color:var(--ink); min-height:24px}
+  .ptime{font-family:var(--mono); font-size:12px; color:var(--ink-3); margin-top:8px}
+  .pbar{height:4px; background:var(--accent-soft); border-radius:99px; margin-top:22px; overflow:hidden}
+  .pbar i{display:block; height:100%; width:30%; background:var(--accent); border-radius:99px; animation:slide 2.2s ease-in-out infinite}
+  @keyframes slide{0%{margin-left:-30%}100%{margin-left:100%}}
+  .ok-ico{width:52px; height:52px; border-radius:50%; background:var(--accent-soft); color:var(--accent); display:flex; align-items:center; justify-content:center; font-size:26px; margin:0 auto 18px}
+  .ok-title{font-size:20px; font-weight:700; text-align:center}
+  .ok-emp{font-family:var(--mono); font-size:12px; color:var(--ink-3); text-align:center; margin-top:6px; text-transform:uppercase; letter-spacing:.08em}
+  .dl{display:block; text-align:center; text-decoration:none; margin-top:22px}
+  .linkbtn{background:none; color:var(--accent); font-weight:500; font-size:13px; margin-top:14px}
+  .foot{text-align:center; font-family:var(--mono); font-size:10px; letter-spacing:.1em; color:#3A3F4A; padding:18px; text-transform:uppercase}
+</style>
+</head>
+<body>
+  <header class="hero">
+    <img src="/logo-white.png" alt="Inbound Tools">
+    <div class="tag">GTM Intelligence</div>
+    <h1>Analizá <span>cualquier empresa</span><br>en minutos</h1>
+    <p class="sub">Pegá el sitio de la empresa y generamos un análisis de mercado con clientes potenciales reales, listo para descargar.</p>
+  </header>
+
+  <div class="wrap">
+    <div class="card">
+      <!-- FORM -->
+      <div id="stageForm" class="stage on">
+        <div class="field">
+          <label>Sitio o dominio de la empresa</label>
+          <input id="dominio" type="text" placeholder="ej: brandtrack.fm" autocomplete="off">
+        </div>
+        <div class="field">
+          <label>Clave de acceso</label>
+          <input id="clave" type="password" placeholder="••••••••" autocomplete="off">
+        </div>
+        <button id="go">Generar análisis</button>
+        <div id="err" class="err"></div>
+        <p class="hint">El análisis tarda unos minutos: investigamos la empresa, buscamos decisores en LinkedIn y armamos el reporte.</p>
+      </div>
+
+      <!-- PROGRESO -->
+      <div id="stageProg" class="stage">
+        <div class="prog">
+          <div class="spinner"></div>
+          <div id="pmsg" class="pmsg">Iniciando análisis...</div>
+          <div id="ptime" class="ptime">0:00</div>
+          <div class="pbar"><i></i></div>
+        </div>
+      </div>
+
+      <!-- LISTO -->
+      <div id="stageOk" class="stage">
+        <div class="ok-ico">↓</div>
+        <div class="ok-title">Tu análisis está listo</div>
+        <div id="okEmp" class="ok-emp"></div>
+        <a id="dlLink" class="dl" href="#"><button>Descargar PDF</button></a>
+        <button id="again" class="linkbtn">Analizar otra empresa</button>
+      </div>
+
+      <!-- ERROR FINAL -->
+      <div id="stageErr" class="stage">
+        <div class="ok-ico" style="background:rgba(208,43,43,.1);color:#D02B2B">!</div>
+        <div class="ok-title">No se pudo generar</div>
+        <div id="errMsg" class="ok-emp" style="text-transform:none;letter-spacing:0;font-size:13px"></div>
+        <button id="retry" style="margin-top:22px">Volver a intentar</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">Inbound Tools · inbound-tools.com</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const MSGS = [
+  "Investigando la empresa...",
+  "Definiendo el cliente ideal...",
+  "Buscando decisores en LinkedIn...",
+  "Detectando señales de compra...",
+  "Armando el reporte...",
+  "Validando la calidad...",
+  "Casi listo..."
+];
+let t0, timer, msgTimer, msgIdx = 0;
+
+function show(stage){
+  ['stageForm','stageProg','stageOk','stageErr'].forEach(s => $(s).classList.toggle('on', s===stage));
+}
+function fmt(s){ const m=Math.floor(s/60); const r=s%60; return m+':'+String(r).padStart(2,'0'); }
+function normDom(v){ return v.trim().replace(/^https?:\/\//i,'').replace(/^www\./i,'').replace(/\/.*$/,'').trim(); }
+
+function startProgress(){
+  t0 = Date.now(); msgIdx = 0; $('pmsg').textContent = MSGS[0]; $('ptime').textContent='0:00';
+  timer = setInterval(()=>{ $('ptime').textContent = fmt(Math.floor((Date.now()-t0)/1000)); }, 1000);
+  msgTimer = setInterval(()=>{ msgIdx = Math.min(msgIdx+1, MSGS.length-1); $('pmsg').textContent = MSGS[msgIdx]; }, 9000);
+}
+function stopProgress(){ clearInterval(timer); clearInterval(msgTimer); }
+
+async function generar(){
+  const dominio = normDom($('dominio').value);
+  const clave = $('clave').value.trim();
+  $('err').textContent = '';
+  if(!dominio){ $('err').textContent = 'Ingresá el dominio de la empresa.'; return; }
+  if(!clave){ $('err').textContent = 'Ingresá la clave de acceso.'; return; }
+
+  let jobId;
+  try{
+    const r = await fetch('/generar', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'x-landing-key': clave },
+      body: JSON.stringify({ dominio })
+    });
+    const j = await r.json().catch(()=>({}));
+    if(r.status === 401){ $('err').textContent = 'Clave incorrecta.'; return; }
+    if(!j.jobId){ $('err').textContent = j.error || 'No se pudo iniciar el análisis.'; return; }
+    jobId = j.jobId;
+  }catch(e){ $('err').textContent = 'Error de conexión. Reintentá.'; return; }
+
+  show('stageProg'); startProgress();
+  poll(jobId, clave);
+}
+
+async function poll(jobId, clave){
+  const DEADLINE = Date.now() + 9*60*1000; // 9 min
+  while(Date.now() < DEADLINE){
+    await new Promise(r=>setTimeout(r, 5000));
+    let job;
+    try{
+      const r = await fetch('/resultado/'+jobId);
+      if(!r.ok) continue;
+      job = await r.json();
+    }catch(e){ continue; }
+    if(!job || job.status === 'processing') continue;
+    stopProgress();
+    if(job.status === 'ok' && job.paginas){
+      $('okEmp').textContent = job.empresa || '';
+      $('dlLink').setAttribute('href', '/pdf/'+jobId);
+      show('stageOk');
+    } else {
+      $('errMsg').textContent = job.error || 'El análisis no pudo armar un reporte para esta empresa. Probá con otra.';
+      show('stageErr');
+    }
+    return;
+  }
+  stopProgress();
+  $('errMsg').textContent = 'El análisis tardó demasiado. Probá de nuevo en un rato.';
+  show('stageErr');
+}
+
+$('go').addEventListener('click', generar);
+$('clave').addEventListener('keydown', e=>{ if(e.key==='Enter') generar(); });
+$('again').addEventListener('click', ()=>{ $('dominio').value=''; $('err').textContent=''; show('stageForm'); });
+$('retry').addEventListener('click', ()=>{ show('stageForm'); });
+</script>
+</body>
+</html>

@@ -2534,6 +2534,12 @@ setInterval(() => {
 }, 30 * 60 * 1000);
 
 app.post('/generar', (req, res) => {
+  // GATE DE LA LANDING (uso privado): si LANDING_KEY está seteada (solo en el servicio de la landing,
+  // NO en el de producción que usa n8n), exigimos la clave en el header. Si no está seteada, no gatea
+  // (producción/n8n sigue igual). Así la misma /generar sirve para n8n (sin gate) y para la landing (con gate).
+  if (process.env.LANDING_KEY && req.header('x-landing-key') !== process.env.LANDING_KEY) {
+    return res.status(401).json({ error: 'Clave invalida' });
+  }
   const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug } = req.body || {};
   if (!empresa && !dominio && !profileId) {
     return res.status(400).json({ error: 'Falta empresa, dominio o profileId' });
@@ -2595,6 +2601,20 @@ app.get('/resultado/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'jobId no encontrado o expirado' });
   res.json(job);
+});
+
+// Descarga del PDF por jobId (para la landing). Sin gate: el jobId es un UUID no adivinable y expira a 1h.
+// Sirve el pdf_base64 que ya guardó el job como un PDF nativo descargable (Content-Disposition).
+app.get('/pdf/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'jobId no encontrado o expirado' });
+  if (job.status === 'processing') return res.status(409).json({ error: 'el reporte todavia se esta generando' });
+  if (!job.pdf_base64) return res.status(422).json({ error: 'el reporte no generó PDF (no apto o sin cuentas)' });
+  const buf = Buffer.from(job.pdf_base64, 'base64');
+  const nombre = String(job.pdf_filename || 'Analisis de Mercado.pdf').replace(/[\\/:*?"<>|]/g, '');
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${nombre}"`);
+  res.send(buf);
 });
 
 app.post('/generar-reporte', async (req, res) => {
