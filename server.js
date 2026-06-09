@@ -273,7 +273,23 @@ async function callMCP(toolName, args) {
   }
   const parsed = JSON.parse(match[1]);
   const result = parsed?.result?.content?.[0]?.text || JSON.stringify(parsed?.result);
+  // structuredContent: si el MCP lo expone, lo adjuntamos SIN romper el contrato (los callers que
+  // esperan el texto lo siguen recibiendo: devolvemos un String, con el structured como propiedad
+  // NO enumerable para no contaminar JSON.stringify ni los regex de los parsers). Log UNA vez por job.
+  const structured = parsed?.result?.structuredContent ?? null;
+  const st = _statsALS.getStore();
+  if (st && !st.mcpStructuredLogged) {
+    st.mcpStructuredLogged = true;
+    console.log(`[MCP] structuredContent: ${structured ? 'presente' : 'ausente'}`);
+  }
   console.log(`[MCP] ${toolName} OK (${result.length} chars)`);
+  // El primitivo string no acepta props; lo envolvemos en String() (objeto) y le colgamos el structured.
+  // `String(x)` en cualquier caller lo re-coacciona al primitivo, así que NO cambia comportamiento.
+  if (structured != null) {
+    const wrapped = new String(result);
+    Object.defineProperty(wrapped, 'structuredContent', { value: structured, enumerable: false });
+    return wrapped;
+  }
   return result;
 }
 
@@ -1101,6 +1117,9 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       + (c.cerca?3:0)
       + (c.recienAsumio?8:0)                                   // señal de compra: asumió el rol hace poco
       + (c.posts>0?2:0)                                        // señal de actividad: activo en LinkedIn
+      // SEÑALES DE EMPRESA (reales del MCP): realce ADITIVO modesto, NO filtro. Funding/leadership son los
+      // disparadores de compra más fuertes (+3 c/u); hiring/growth son contexto de actividad (+2 c/u). Capeado.
+      + (c.senales ? Math.min(7, (c.senales.funding?3:0)+(c.senales.leadership?3:0)+(c.senales.hiring?2:0)+(c.senales.growth?2:0)) : 0)
       - (c.icSuelto?60:0)
       // N3/N4: la FUNCIÓN equivocada (off-vertical o sin fit real) se hunde ANTES de cortar los 18 a la IA,
       // para que no llegue. Más fuerte si encima es frío (N4 nunca; N3 frío-buen-fit conserva fit y no se penaliza).
@@ -1117,13 +1136,43 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // SEÑALES (datos reales del MCP, NUNCA inventados): nos guardamos crudos/conteos para armarlas abajo.
   let txtCoSenal = '', txtCoBase = '';   // texto crudo de la búsqueda de empresas (para leer un total si lo trae)
   let nConSenal = 0;                      // cuántas empresas-ancla con crecimiento de headcount (señal de actividad)
+  // SEÑALES DE COMPRA POR EMPRESA (id-cross): cada filtro del MCP que devuelve la empresa la "marca".
+  // Las claves son flags REALES del filtro (NO inventamos monto ni fecha). Mapa id -> {funding,hiring,leadership,growth}.
+  const coSenales = new Map();   // companyId(string) -> {funding,hiring,leadership,growth}
+  const _marcarCo = (lista, flag) => { for(const c of (lista||[])){ if(!c.id) continue; const s = coSenales.get(c.id) || {}; s[flag] = true; coSenales.set(c.id, s); } };
   if(indIds.length && geoLocOrNull){
     const baseCo = { category:'companies', profilesLimit:25, location:{include:geoLocOrNull}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
-    try{ txtCoSenal = String(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); cuentas = _parseCompanies(txtCoSenal); nConSenal = cuentas.length; }
+    try{ txtCoSenal = String(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); cuentas = _parseCompanies(txtCoSenal); nConSenal = cuentas.length; _marcarCo(cuentas, 'growth'); }
     catch(e){ console.warn('[SOURCE] companies (con señal) falló:', e.message); }
     if(cuentas.length < NUM_CUENTAS*2){   // la señal recortó demasiado para este vertical: recall sin señal
       try{ txtCoBase = String(await callMCP('search_sales_navigator_filtered', baseCo)); const more=_parseCompanies(txtCoBase); for(const c of more) if(!cuentas.some(x=>x.id===c.id)) cuentas.push(c); }
       catch(e){ console.warn('[SOURCE] companies (sin señal) falló:', e.message); }
+    }
+    // SEÑALES ADICIONALES POR EMPRESA (financiamiento / contratación / cambio de liderazgo). Gateadas a la
+    // pasada 1 (conSenal): son REALCE de ranking + marca, NO recall, así que no se re-buscan en multi-pass
+    // (mismo criterio que la Pasada D / changedJobsLast90Days; evita chocar el muro de 300s de Railway).
+    // 3 llamadas MCP de companies EXTRA, en PARALELO (tope CONC) para no sumar latencia secuencial.
+    if(conSenal){
+      const filtros = [
+        ['funding',    { fundingEvents: true }],
+        ['hiring',     { hasJobOffers: true }],
+        ['leadership', { seniorLeadershipChanges: true }]
+      ];
+      await _mapLimit(filtros, CONC, async ([flag, extra]) => {
+        try{
+          const lista = _parseCompanies(await callMCP('search_sales_navigator_filtered', { ...baseCo, ...extra }));
+          _marcarCo(lista, flag);
+          // las empresas que SOLO aparecen por estas señales (no estaban en la búsqueda base) también son
+          // cuentas-ancla válidas: las sumamos al pool de cuentas (dedupe por id).
+          for(const c of lista) if(c.id && !cuentas.some(x=>x.id===c.id)) cuentas.push(c);
+        }catch(e){ console.warn(`[SIGNALS] companies (${flag}) falló:`, e.message); }
+      });
+      const conFunding = [...coSenales.values()].filter(s=>s.funding).length;
+      const conHiring  = [...coSenales.values()].filter(s=>s.hiring).length;
+      const conLead    = [...coSenales.values()].filter(s=>s.leadership).length;
+      console.log(`[SIGNALS] señales por empresa (pasada 1): funding=${conFunding}, hiring=${conHiring}, leadership=${conLead}, growth=${nConSenal} sobre ${coSenales.size} empresas marcadas.`);
+    } else {
+      console.log('[SIGNALS] señales por empresa (funding/hiring/leadership) SALTADAS (pasada de recall; son realce, no recall).');
     }
   } else if(geoLocOrNull){
     // PASADA A' — FALLBACK por KEYWORD: ninguna industria del ICP resolvió a un id de Sales Navigator
@@ -1157,6 +1206,9 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const anclaIds     = cuentas.map(c=>c.id).filter(Boolean).slice(0, 20);
   const anclaNombres = new Set(cuentas.map(c=>_empKey(c.name)).filter(Boolean));
   const anclaHC      = new Map(cuentas.map(c=>[_empKey(c.name), c.headcount]));
+  // Señales de empresa indexadas por NOMBRE normalizado (las cards conocen la empresa por headline, no por id):
+  // así propagamos {funding,hiring,leadership,growth} desde la cuenta-ancla a cada decisor de esa empresa.
+  const anclaSenales = new Map(cuentas.map(c=>[_empKey(c.name), coSenales.get(c.id) || null]).filter(([,s])=>s));
   console.log(`[SOURCE] cuentas-ancla: ${cuentas.length}${cuentas.length?` (${cuentas.slice(0,8).map(c=>c.name).join(', ')}${cuentas.length>8?'…':''})`:''}.`);
 
   // ===== PASADA B — DECISORES dentro de las cuentas-ancla (fit alto, empresa controlada) =====
@@ -1222,8 +1274,11 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     const cerca = _esCerca(p.loc);
     const ancla = (emp && anclaNombres.has(_empKey(emp))) ? 1 : 0;
     const hcPre = ancla ? (anclaHC.get(_empKey(emp)) ?? null) : null;   // headcount ya conocido de la cuenta-ancla
+    // SEÑALES DE EMPRESA (datos reales del MCP): si la empresa del candidato es una cuenta-ancla marcada,
+    // la card hereda {funding,hiring,leadership,growth}. Es ADITIVO (realce + marca), nunca filtro.
+    const senalesCo = (emp && anclaSenales.get(_empKey(emp))) || null;
     // SEÑALES DE COMPRA (datos reales del MCP): se propagan tal cual al pool y llegan a SELECT.
-    const cand = { id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, ancla, headcount:hcPre, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos), recienAsumio:!!p.recienAsumio, posts:Number(p.posts)||0 };
+    const cand = { id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, ancla, headcount:hcPre, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos), recienAsumio:!!p.recienAsumio, posts:Number(p.posts)||0, senales:senalesCo };
     out.push(cand); vistos.set(p.id, cand);   // el Map apunta al objeto pusheado → el merge de señal lo muta in situ
   }
   // log de cobertura de la señal: cuántos candidatos del pool deduplicado quedaron con recienAsumio:true
@@ -1709,9 +1764,17 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 - CADA uno DEBE tener angulo y hook NO vacíos.
 - El ÁNGULO: MÁXIMO 2 oraciones (≤ 320 caracteres), específico de ESA persona/empresa, usando su cargo/empresa/perfil REALES + lo que ofrece el cliente. Corto y al hueso, sin relleno. 100% único por persona.
 - ÁNGULO ANCLADO Y DISTINTO POR CARD (REGLA DURA, defecto auditado: los ángulos salían genéricos y calcados entre cards). Cada ángulo tiene que anclar un DATO o un PAIN ESPECÍFICO de ESA empresa/persona (algo que no aplicaría igual a otra card), no una frase intercambiable. Los ${pedir} ángulos del reporte NO pueden girar todos sobre el MISMO pain: cada card, un pain distinto y un ángulo distinto. PROHIBIDO el cierre TEMPLATE genérico repetido entre cards, tipo "exactamente el tipo de herramienta/solución que un [rol] necesita", "es justo lo que [empresa/rol] necesita" o "eso es exactamente lo que [cliente] resuelve": esa fórmula es relleno intercambiable y delata que no anclaste nada propio de esa cuenta (caso real: los 3 ángulos giraban sobre "gestión centralizada", y uno era puro template sin nada propio de la empresa). Si un ángulo te quedó así de genérico, reescribilo anclando algo concreto y único de ESA empresa/rol.
-- SEÑAL DE COMPRA, el "por qué ahora" REAL (úsala cuando la línea del candidato la trae, JAMÁS la inventes): la lista marca, al FINAL de la línea de cada candidato, señales reales del perfil (dato del MCP, no generado por nadie). Leelas y tejelas en la prosa del ángulo, NO como lista ni campo aparte: (a) Si la línea trae "SEÑAL: asumió el rol hace poco", el ángulo DEBE incorporar ese disparador temporal como el "por qué ahora" real, hilado natural ("asumió la dirección comercial hace poco, momento ideal para evaluar herramientas nuevas", "como llegó hace poco al rol, está definiendo stack y proveedores"). Es la señal MÁS valiosa para justificar el contacto AHORA: aprovechala siempre que esté. (b) Si la línea trae "activo en LinkedIn", podés mencionarlo de forma SECUNDARIA y blanda ("y viene activo/a en LinkedIn") solo si suma; es opcional, no lo fuerces. (c) ANTI-INVENCIÓN, INNEGOCIABLE: SOLO afirmá una señal si SU marcador está presente en ESA línea de candidato. PROHIBIDO escribir "asumió el rol hace poco", "recién llegó", "nuevo en el cargo" o equivalentes si la línea NO trae "SEÑAL: asumió el rol hace poco"; sin el marcador la señal NO existe y no se menciona. El dato es CUALITATIVO ("hace poco"/"recientemente"), NUNCA inventes una fecha ni cuánto hace ("hace 2 meses") salvo que figure literal. (d) Si la línea NO trae ninguna señal, escribí el ángulo como siempre (por qué encaja ese rol con lo que ofrece el cliente), SIN forzar un "por qué ahora" temporal inventado.
+- SEÑAL DE COMPRA, el "por qué ahora" REAL (úsala cuando la línea del candidato la trae, JAMÁS la inventes): la lista marca, al FINAL de la línea de cada candidato, señales reales del perfil/empresa (dato del MCP, no generado por nadie). Un candidato puede traer VARIOS marcadores. REGLA DURA DE UNA SOLA SEÑAL POR CARD: tejé en el ángulo SOLO LA SEÑAL MÁS FUERTE disponible, NUNCA dos o más. Apilar señales se siente expediente/humo y BAJA la confianza del prospecto. ORDEN DE FUERZA (elegí la primera que aparezca en la línea): (1) "SEÑAL: asumió el rol hace poco" > (2) "SEÑAL: la empresa levantó financiamiento" > (3) "SEÑAL: cambio de liderazgo en la empresa" > (4) "SEÑAL: la empresa está contratando" > (5) "SEÑAL: la empresa está creciendo en plantilla". Tejé esa única señal en la prosa del ángulo como el "por qué ahora", NO como lista ni campo aparte, hilado natural:
+  (a) "SEÑAL: asumió el rol hace poco" → disparador temporal de la PERSONA ("asumió la dirección comercial hace poco, momento ideal para evaluar herramientas nuevas", "como llegó hace poco al rol, está definiendo stack y proveedores").
+  (b) "SEÑAL: la empresa levantó financiamiento" → ("[empresa] levantó financiamiento recientemente y suele ser cuando se evalúan nuevas herramientas"). Cualitativo: PROHIBIDO inventar monto, ronda o fecha (no los tenemos).
+  (c) "SEÑAL: cambio de liderazgo en la empresa" → ("[empresa] cambió su liderazgo hace poco, etapa donde se revisan proveedores y prioridades"). Sin nombres ni fechas inventadas.
+  (d) "SEÑAL: la empresa está contratando" → ("[empresa] viene sumando equipo, señal de que la operación se está escalando"). Cualitativo, sin números.
+  (e) "SEÑAL: la empresa está creciendo en plantilla" → ("[empresa] está creciendo y eso suele tensionar [lo que toca el rol]"). Cualitativo.
+  (f) ANTI-CREEPY, REGLA DURA: el marcador "activo en LinkedIn" es SOLO para priorización interna. NUNCA lo verbalices en ángulo ni hook (decir "vi que posteás"/"viene activo en LinkedIn" espanta al prospecto, se siente vigilado). Ignoralo al escribir. Las señales de la PERSONA ("asumió el rol") y de la EMPRESA (financiamiento, liderazgo, contratando, creciendo) SÍ se verbalizan: son públicas y no invasivas.
+  (g) ANTI-INVENCIÓN, INNEGOCIABLE: SOLO afirmá una señal si SU marcador EXACTO está presente en ESA línea de candidato. PROHIBIDO escribir "asumió el rol hace poco", "recién llegó", "levantó financiamiento", "cambió su liderazgo", "está contratando", "está creciendo" o equivalentes si la línea NO trae el marcador correspondiente; sin marcador la señal NO existe y no se menciona. Todo CUALITATIVO ("hace poco"/"recientemente"/"viene sumando"), NUNCA inventes fecha, monto, ronda ni cuánto hace ("hace 2 meses", "USD 5M") salvo que figure literal (no figura).
+  (h) Si la línea NO trae ninguna señal verbalizable, escribí el ángulo como siempre (por qué encaja ese rol con lo que ofrece el cliente), SIN forzar un "por qué ahora" temporal inventado.
 - PROHIBIDO copiar/pegar o calcar la estructura de un ángulo a otro. Antes de cerrar, revisá que el nombre y la empresa de cada ángulo sean los de ESE id.
-- El HOOK: UNA sola oración entre comillas, lista para mandar, empezando por el PRIMER NOMBRE (ej: "Clara, ...").
+- El HOOK = PRIMERA LÍNEA LISTA PARA COPIAR Y ENVIAR HOY (no un resumen): UNA sola oración entre comillas, empezando por el PRIMER NOMBRE (ej: "Clara, ...") y bien cerrada. Tiene que sonar a un mensaje que se manda tal cual. Cuando la card trae señal verbalizable, FUNDÍ esa señal (el timing, el "por qué ahora") con el contexto de la persona/empresa en ese mismo mensaje (ej: "Felicitaciones por asumir como [cargo]: con [empresa] en plena expansión de equipo, me gustaría comentarle cómo..."). UNA sola señal por hook, la misma que usaste en el ángulo, jamás apilada.
 - HOOK COMPLETO Y CERRADO (REGLA DURA, defecto recurrente que se ve descuidado): cada hook tiene que ser una oración ENTERA y bien terminada, nunca cortada a mitad de frase ni sin puntuación final. Si es una PREGUNTA, abrí con "¿" y cerrá con "?" (signos apareados): prohibido un hook que arranca a preguntar y termina sin "?". Si es una afirmación, cerrá con punto. PROHIBIDO devolver hooks como "Flor, ...¿hoy lo gestionan de forma centralizada" (sin "?" ni cierre) o "Samanta, ...quién la gestiona en el día a día" (sin "?"): quedan colgados y queman la credibilidad. Antes de cerrar, releé cada hook entero y confirmá que la oración llega hasta el final y cierra con la puntuación correcta.
 - DIVERSIDAD ESTRUCTURAL OBLIGATORIA DE HOOKS (el defecto MÁS frecuente: las cards salen con el mismo esqueleto): los hooks tienen que usar ${pedir} ABERTURAS DISTINTAS de este MENÚ, una forma diferente por card. (1) OBSERVACIÓN concreta sobre su empresa o su cargo ("Clara, vi que en [empresa] el área de [X] viene creciendo..."); (2) PREGUNTA DIRECTA sobre una decisión propia de ESE rol ("Marcos, cómo están resolviendo hoy [decisión del rol] en [empresa]"); (3) AFIRMACIÓN que conecta lo que hace el cliente con lo que esa persona maneja, SIN pregunta ("Lucía, su rol en [empresa] toca de lleno [lo que ofrece el cliente]."). PROHIBIDO que DOS hooks compartan el mismo molde sintáctico: ni los ${pedir} terminando en "¿...?", ni los ${pedir} con la plantilla "[Nombre], en [empresa] el [X] es [adj]", ni los ${pedir} arrancando con la misma palabra después del nombre. Si al releerlos dos suenan calcados, reescribí uno con otra abertura del menú.
 - PROHIBIDO EL CONDICIONAL VACÍO (en ángulo Y hook): nada de "puede ser relevante si...", "podría necesitar...", "pueden requerir...", "puede ser útil...", "quizás le interese", "tal vez le sirva". Ese hedging suena a IA y no dice nada. Si NO tenés una señal concreta de esa persona, NO te la inventes (regla de anti-invención) PERO TAMPOCO hedgees: afirmá EN PRESENTE el punto de contacto REAL entre lo que hace ese rol y lo que el cliente OFRECE (ej. no "como Head of Ops quizás necesite cobertura técnica", sí "como Head of Ops usted gestiona la red de mantenimiento que [cliente] cubre"). Cualitativo, presente, sin "si/podría/quizás".
@@ -1729,7 +1792,7 @@ Los campos "nombre" y "empresa" son OBLIGATORIOS y van copiados TEXTUAL del cand
 
 ## VERIFICACIÓN FINAL (OBLIGATORIA — antes de devolver el JSON)
 VERIFICÁ, elemento por elemento, que el "nombre" y la "empresa" sean los del id elegido (copiados de la lista, no de otro renglón), que el HOOK EMPIECE con el PRIMER NOMBRE de ESE id, y que el ÁNGULO NOMBRE la EMPRESA de ESE id. Si alguno no cumple, REESCRIBILO antes de cerrar: una card con el hook o el ángulo de OTRA persona/empresa (MEZCLA) quema todo el reporte.
-VERIFICÁ ADEMÁS: (a) que las ${pedir} aberturas de los hooks sean ESTRUCTURALMENTE DISTINTAS (no dos con el mismo molde ni todas terminando en "?"); (b) que ningún ángulo/hook use CONDICIONAL VACÍO ("puede/podría/quizás/si necesita"); (c) que NO le atribuyas a la persona una responsabilidad de compra/decisión/liderazgo que su cargo real NO implica (re-encuadre prohibido); (d) que NO le atribuyas al CLIENTE ningún logro, caso, métrica o implementación que no esté TEXTUAL en el contexto "Qué ofrece / proof"; (e) que NINGÚN ángulo/hook AFIRME que la empresa de la card COMPRA/ALOJA/REVENDE/INTEGRA lo del cliente sin evidencia (fit de negocio inexistente), ni que hayas elegido una empresa que es claramente NO comprador (marca propia que no aloja terceros, gigante irreal para el tamaño del cliente, contratista/micro cuando el ICP pide operadores, o mismo sustantivo distinto negocio) habiendo en el pool una alternativa comprable mejor; (f) que NINGÚN ángulo afirme una SEÑAL DE COMPRA ("asumió el rol hace poco", "recién llegó", "nuevo en el cargo", "viene activo en LinkedIn") cuyo marcador NO esté en ESA línea de candidato, ni invente una fecha/antigüedad exacta; (g) que CADA hook esté COMPLETO y CERRADO: la oración llega hasta el final (ninguno cortado a mitad de frase), las preguntas abren "¿" y cierran "?" (signos apareados) y ninguna queda sin "?"; (h) que cada ÁNGULO ancle un dato o pain ESPECÍFICO de ESA empresa/persona y que los ${pedir} ángulos NO compartan el mismo pain ni una frase intercambiable entre cards (sin cierres template tipo "exactamente el tipo de herramienta/solución que [rol] necesita"). Si algo de esto falla, REESCRIBILO o RE-ELEGÍ antes de cerrar.
+VERIFICÁ ADEMÁS: (a) que las ${pedir} aberturas de los hooks sean ESTRUCTURALMENTE DISTINTAS (no dos con el mismo molde ni todas terminando en "?"); (b) que ningún ángulo/hook use CONDICIONAL VACÍO ("puede/podría/quizás/si necesita"); (c) que NO le atribuyas a la persona una responsabilidad de compra/decisión/liderazgo que su cargo real NO implica (re-encuadre prohibido); (d) que NO le atribuyas al CLIENTE ningún logro, caso, métrica o implementación que no esté TEXTUAL en el contexto "Qué ofrece / proof"; (e) que NINGÚN ángulo/hook AFIRME que la empresa de la card COMPRA/ALOJA/REVENDE/INTEGRA lo del cliente sin evidencia (fit de negocio inexistente), ni que hayas elegido una empresa que es claramente NO comprador (marca propia que no aloja terceros, gigante irreal para el tamaño del cliente, contratista/micro cuando el ICP pide operadores, o mismo sustantivo distinto negocio) habiendo en el pool una alternativa comprable mejor; (f) SEÑALES DE COMPRA: que NINGÚN ángulo/hook afirme una señal ("asumió el rol hace poco", "recién llegó", "levantó financiamiento", "cambió su liderazgo", "está contratando", "está creciendo") cuyo marcador EXACTO NO esté en ESA línea de candidato; que NO inventes fecha, monto, ronda ni antigüedad exacta; que cada card use UNA SOLA señal (la más fuerte), NUNCA dos o más apiladas; y que NUNCA verbalices "activo en LinkedIn" (es interno, decirlo espanta al prospecto); (g) que CADA hook esté COMPLETO y CERRADO: la oración llega hasta el final (ninguno cortado a mitad de frase), las preguntas abren "¿" y cierran "?" (signos apareados) y ninguna queda sin "?"; (h) que cada ÁNGULO ancle un dato o pain ESPECÍFICO de ESA empresa/persona y que los ${pedir} ángulos NO compartan el mismo pain ni una frase intercambiable entre cards (sin cierres template tipo "exactamente el tipo de herramienta/solución que [rol] necesita"). Si algo de esto falla, REESCRIBILO o RE-ELEGÍ antes de cerrar.
 
 ## JSON VÁLIDO (CRÍTICO — si el JSON no parsea, se pierde todo el trabajo)
 - Dentro de "angulo" y "hook" NO uses comillas dobles (") sin escapar. Si necesitás encomillar una palabra o frase dentro del texto, usá comillas simples ('algo') o ninguna. Las ÚNICAS comillas dobles del hook son las dos que lo envuelven (\\"...\\").
@@ -1745,8 +1808,20 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
     const loc = p.loc ? ` | ${p.loc}` : '';
     const home = p.cerca ? ' ★(país del cliente)' : '';
     // SEÑAL DE COMPRA (dato real del MCP, NO inventado): marcador para que SELECT pueda tejerlo en el ángulo.
-    // Formato literal: " · SEÑAL: asumió el rol hace poco" (recienAsumio) y " · activo en LinkedIn" (posts>0).
-    const senal = `${p.recienAsumio?' · SEÑAL: asumió el rol hace poco':''}${p.posts>0?' · activo en LinkedIn':''}`;
+    // Marcadores LITERALES (sin monto/fecha: el detalle datado llega en otra fase con web_search):
+    //   " · SEÑAL: asumió el rol hace poco"            (recienAsumio, por persona)
+    //   " · SEÑAL: la empresa levantó financiamiento"  (senales.funding)
+    //   " · SEÑAL: la empresa está contratando"        (senales.hiring)
+    //   " · SEÑAL: cambio de liderazgo en la empresa"  (senales.leadership)
+    //   " · SEÑAL: la empresa está creciendo en plantilla" (senales.growth)
+    //   " · activo en LinkedIn"                         (posts>0)
+    const s = p.senales || {};
+    const senal = `${p.recienAsumio?' · SEÑAL: asumió el rol hace poco':''}`
+      + `${s.funding?' · SEÑAL: la empresa levantó financiamiento':''}`
+      + `${s.hiring?' · SEÑAL: la empresa está contratando':''}`
+      + `${s.leadership?' · SEÑAL: cambio de liderazgo en la empresa':''}`
+      + `${s.growth?' · SEÑAL: la empresa está creciendo en plantilla':''}`
+      + `${p.posts>0?' · activo en LinkedIn':''}`;
     return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}${senal}`;
   }).join('\n');
   const _pisoTam = (plan._plan && parseInt(plan._plan.tamano_min||0,10)) || 0;
