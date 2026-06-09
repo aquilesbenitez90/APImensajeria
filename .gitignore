@@ -14,3 +14,6 @@ smoke.js
 # Logs y temporales
 *.log
 .DS_Store
+
+# Secretos (NUNCA commitear)
+.env
