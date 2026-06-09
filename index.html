@@ -131,7 +131,12 @@ function show(stage){
   ['stageForm','stageProg','stageOk','stageErr'].forEach(s => $(s).classList.toggle('on', s===stage));
 }
 function fmt(s){ const m=Math.floor(s/60); const r=s%60; return m+':'+String(r).padStart(2,'0'); }
-function normDom(v){ return v.trim().replace(/^https?:\/\//i,'').replace(/^www\./i,'').replace(/\/.*$/,'').trim(); }
+function normDom(v){
+  let s = v.trim().replace(/^https?:\/\//i,'').replace(/^www\./i,'');
+  // Si es un link de LinkedIn de empresa, lo dejamos ENTERO (el server resuelve el dominio real). Si no, queda el dominio.
+  if(/linkedin\.com\/(company|school|showcase)\//i.test(s)) return s.replace(/\/+$/,'').trim();
+  return s.replace(/\/.*$/,'').trim();
+}
 
 function startProgress(startTs){
   t0 = startTs || Date.now(); msgIdx = 0; $('pmsg').textContent = MSGS[0];

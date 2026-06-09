@@ -70,6 +70,16 @@ function _senalesCard(senales) {
   return '\n    <div class="angle-label">Señales</div>\n    <ul class="acct-sigs">\n' + items + '\n    </ul>';
 }
 
+// Señales de compra DURAS (flags reales del MCP) como badges visibles en la cuadrilla de cada lead.
+// c.senalesVisibles = array de etiquetas (ej. "Recién asumió el rol", "Levantó financiamiento").
+// Si no hay, devuelve '' y la card queda igual. NO incluye "activo en LinkedIn" (regla anti-creepy, se excluye en server).
+function _senalesBadges(senalesVisibles) {
+  const arr = Array.isArray(senalesVisibles) ? senalesVisibles.filter(s => String(s || '').trim()) : [];
+  if (!arr.length) return '';
+  const pills = arr.map(s => '<span class="sig-badge">' + _esc(s) + '</span>').join(' ');
+  return '\n    <div class="sig-badges">' + pills + '</div>';
+}
+
 // Genera el <article> de UNA card. Las cards se renderizan por código (NO por la IA) desde
 // data.cards, así el reporte se adapta a 1, 2 o 3 cuentas sin recuadros vacíos. La estructura
 // HTML es idéntica a la que tenía el template fijo, para no cambiar el diseño de un reporte de 3.
@@ -91,7 +101,7 @@ function _cardArticle(c, i) {
         <div class="nm">${_esc(c.nombre)} <span class="role">· ${_esc(c.cargo)}</span></div>
         <div class="meta">${meta}${meta ? ' · ' : ''}<a class="lk" href="https://www.linkedin.com/in/${_esc(href)}">${_esc(linktext)}</a></div>
       </div>
-    </div>
+    </div>${_senalesBadges(c.senalesVisibles)}
     <div class="angle-label">Por qué ahora</div>
     <p class="angle">${_esc(c.angulo)}</p>${_senalesCard(c.senales)}
     <p class="acct-hook">→ ${_esc(c.hook)}</p>

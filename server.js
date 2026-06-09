@@ -675,6 +675,33 @@ async function contarPaginas(pdfBuffer) {
 function _empresaDeHeadline(txt){let m=(txt||'').match(/@\s*([^·•|(\n]+)/);if(!m)m=(txt||'').match(/\bat\s+([^·•|(\n]+)/i);const e=m?m[1].trim():'';return e==='?'?'':e;}
 function _empresaDeLookup(txt){const m=(txt||'').match(/Company:\s*(.+?)\s*(?:\[|—|\u2014|,|$)/i);return m?m[1].trim():'';}
 function _headcountDe(txt){const m=(txt||'').match(/([\d][\d.,]*)\s*employees/i);return m?(parseInt(m[1].replace(/[.,]/g,''),10)||null):null;}
+// ¿El input es un link/slug de EMPRESA de LinkedIn (no un dominio real)? Cubre /company/ y /school/
+// (también showcase). Devuelve el slug si lo es, o '' si no. Un dominio común tipo "robotic-crew.com"
+// NO matchea (no contiene linkedin.com/company|school|showcase) → camino normal intacto.
+function _slugLinkedInCompany(input){
+  const s = String(input||'').trim();
+  if(!s) return '';
+  const m = s.match(/linkedin\.com\/(?:company|school|showcase)\/([^/?#\s]+)/i);
+  return m ? decodeURIComponent(m[1]).trim() : '';
+}
+// Dominio/website REAL de la empresa desde el texto crudo de lookup_company. BEST-EFFORT: el endpoint
+// /api/mcp devuelve TEXTO (no JSON), así que cubrimos formatos plausibles ("Website: X", "Domain: X",
+// "URL: X") y, como último recurso, el primer dominio suelto que NO sea linkedin. NUNCA fabrica: devuelve
+// '' si no encuentra nada confiable. Limpia esquema/www/path para quedarnos con el host (ej. "robotic-crew.com").
+function _dominioDeLookup(txt){
+  const s = String(txt||'');
+  let m = s.match(/\b(?:website|web site|web|domain|dominio|url|site)\s*[:=]\s*(\S+)/i);
+  let raw = m ? m[1] : '';
+  if(!raw){
+    // Fallback: primer dominio suelto en el texto que no sea de linkedin.
+    const cand = [...s.matchAll(/\bhttps?:\/\/[^\s)"']+|\b[a-z0-9][a-z0-9.-]*\.[a-z]{2,}\b/gi)]
+      .map(x=>x[0]).find(d => !/linkedin\.com/i.test(d));
+    raw = cand || '';
+  }
+  const host = String(raw).replace(/^https?:\/\//i,'').replace(/^www\./i,'').split(/[/?#]/)[0].trim().toLowerCase();
+  if(!host || !host.includes('.') || /linkedin\.com/i.test(host)) return '';
+  return host;
+}
 // SEÑALES: intenta leer un TOTAL agregado del texto crudo de search_sales_navigator_filtered.
 // El gateway de claude.ai expone paging.total_count en JSON, pero el endpoint /api/mcp del server
 // devuelve TEXTO (otra serialización). NO está garantizado que el texto traiga el total; por eso esto
@@ -731,6 +758,28 @@ function _matchVerticalExcluir(txt, excluir){
 }
 
 async function resolverCliente({ profileId, dominio, empresa }) {
+  // LINK DE LINKEDIN DE EMPRESA: si en `dominio` (o `empresa`) llega un link/slug de company/school de
+  // LinkedIn, NO es un dominio usable (quedaría "linkedin.com"). Lo resolvemos vía lookup_company para
+  // obtener el NOMBRE real (siempre) y el dominio/website real (si el MCP lo expone). Con eso seguimos
+  // el flujo normal: dominio real -> camino de dominio; sin dominio -> al menos nombre real para PLAN/sourcing.
+  const slugLI = _slugLinkedInCompany(dominio) || _slugLinkedInCompany(empresa);
+  if(slugLI){
+    try{
+      const txt = await callMCP('lookup_company', { companyUrlOrName: slugLI });
+      const empLI = _empresaDeLookup(txt) || empresa || slugLI;
+      const domLI = _dominioDeLookup(txt);
+      console.log(`[CLIENTE] link LinkedIn "${slugLI}" -> empresa "${empLI}" (dominio ${domLI || 'no disponible'})`);
+      empresa = empLI;
+      // Si lookup trae dominio real, úsalo (activa el camino de dominio + corroboración). Si no, limpiamos
+      // el `dominio` LinkedIn para que NO contamine downstream como "linkedin.com" (anclamos por nombre).
+      dominio = domLI || '';
+    }catch(e){
+      console.warn(`[CLIENTE] lookup_company para link LinkedIn "${slugLI}" falló:`, e.message);
+      // Aun fallando: el slug es mejor cliente que "linkedin.com". Lo usamos como nombre y limpiamos dominio.
+      if(!empresa) empresa = slugLI;
+      dominio = '';
+    }
+  }
   const dominioReal = !!(dominio && !_esEmailGratuito(dominio));
 
   async function corroborar(base) {
@@ -1966,6 +2015,21 @@ function _rolRelevante(cargo, titulos, industrias){
   return pistas.some(k=>c.includes(k));
 }
 
+// Etiquetas legibles de las señales REALES que un candidato del pool ya trae. Mapea los flags
+// (`recienAsumio` por persona, `senales:{funding,leadership,hiring,growth}` por empresa-ancla) a texto
+// mostrable. Orden por FUERZA de señal de compra. EXCLUYE deliberadamente "activo en LinkedIn"/posts
+// (regla anti-creepy: solo ranking interno). Devuelve [] si no hay ninguna (no rompe el render).
+function _senalesVisibles(p){
+  const out = [];
+  if(!p) return out;
+  const s = p.senales || {};
+  if(p.recienAsumio) out.push('Recién asumió el rol');
+  if(s.funding)      out.push('Levantó financiamiento');
+  if(s.leadership)   out.push('Cambio de liderazgo');
+  if(s.hiring)       out.push('Está contratando');
+  if(s.growth)       out.push('Creciendo en plantilla');
+  return out;
+}
 function armarReporte(plan, seleccion, pool, senales){
   const titulos = (plan._plan && plan._plan.titulos_objetivo) || [];
   const industrias = (plan._plan && plan._plan.industrias) || [];
@@ -2041,6 +2105,13 @@ function armarReporte(plan, seleccion, pool, senales){
       ubicacion: _dedupUbicacion(p.loc || ((plan._plan && plan._plan.geografia) || '')),
       grado: _degOrdinal(p.dist===9?3:p.dist, '2do') + ' grado',
       headcount: (p.headcount ?? null),
+      // SEÑALES VISIBLES: etiquetas legibles SOLO de flags REALES que esta card/empresa ya tiene
+      // (de _parsePeople/_parseProfile para `recienAsumio` y de la cuenta-ancla para `senales`).
+      // NO inventa nada. EXCLUYE "activo en LinkedIn" (posts): esa señal es solo ranking interno
+      // (regla anti-creepy), NUNCA se muestra. Orden por fuerza: recién asumió, financiamiento,
+      // liderazgo, contratando, creciendo. Si no hay señales, queda []. OJO: distinto de `card.senales`,
+      // que `enriquecerSenales` PISA con [{tipo,texto,fuente,fecha}] generado por la IA.
+      senalesVisibles: _senalesVisibles(p),
       angulo: _limpia(angulo), hook: _limpia(hook)
     };
   }

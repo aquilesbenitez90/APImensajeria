@@ -103,6 +103,9 @@ h1.ac{color:var(--accent)}
 .acct-sigs .sig::before{content:"▸"; position:absolute; left:0; top:1px; color:var(--accent); font-size:8px}
 .acct-sigs .sig-tag{font-family:var(--mono); font-size:7px; font-weight:600; letter-spacing:.07em; text-transform:uppercase; color:var(--accent); margin-right:5px}
 .acct-sigs .sig-src{font-family:var(--mono); font-size:8px; color:var(--ink-3)}
+/* Señales de compra (flags reales) como badges visibles en cada lead */
+.sig-badges{display:flex; flex-wrap:wrap; gap:5px; margin:7px 0 11px}
+.sig-badge{font-family:var(--mono); font-size:8px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--accent); background:var(--accent-soft); border:1px solid var(--accent-edge); border-radius:5px; padding:3px 7px; white-space:nowrap}
 
 @page{size:A4; margin:0}
 @media print{
