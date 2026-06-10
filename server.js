@@ -2771,7 +2771,15 @@ async function enriquecerSenales(data, cliente){
   _setStage('signals');   // sus tokens + web_searches se atribuyen a la etapa "signals" (no a "gen")
   const prodCtx = String((data && (data.proof || data.lead)) || (cliente && cliente.empresa) || '').slice(0,400);
   console.log(`[SIGNALS] buscando señales de compra para ${pend.length} cuenta(s) con ${MODEL_SIGNALS}...`);
-  await Promise.all(pend.map(async c => { c.senales = await _senalesDeCuenta(c, prodCtx); }));
+  // DEADLINE DE FASE (best-effort): con el MCP/web_search lento, las 3 búsquedas no pueden comerse el cinturón.
+  // Default [] para las pendientes: si el deadline corta, esas cards quedan SIN señales (limpio), el job sigue.
+  for(const c of pend) c.senales = [];
+  const CAP = parseInt(process.env.SIGNALS_DEADLINE_MS || '120000', 10);
+  let _sigT;
+  const trabajo = Promise.all(pend.map(async c => { c.senales = await _senalesDeCuenta(c, prodCtx); }));
+  const cap = new Promise(r => { _sigT = setTimeout(() => { console.warn(`[SIGNALS] deadline de fase (${CAP}ms) alcanzado; sigo best-effort con las señales que haya.`); r(); }, CAP); });
+  await Promise.race([trabajo, cap]);
+  clearTimeout(_sigT);
 }
 
 // SEÑALES DE EMPRESA EN LAS CARDS FINALES (id-cross, datos REALES del MCP — NUNCA inventados).
@@ -3081,10 +3089,13 @@ app.post('/generar', (req, res) => {
 
   // CINTURÓN GLOBAL: cualquier await sin timeout (presente o futuro) podía dejar el job en "processing"
   // para siempre; el TTL del Map limpia el registro a 1h pero NO mata el promise de fondo, e infla
-  // jobs_activos. Promise.race contra JOB_TIMEOUT_MS (default 8 min) garantiza que el job SIEMPRE cierra.
+  // jobs_activos. Promise.race contra JOB_TIMEOUT_MS garantiza que el job SIEMPRE cierra.
   // No rompe el flujo normal: los jobs que terminan antes resuelven primero y este timeout queda inerte.
   // procesar() maneja sus propios errores internamente (status:'error'); este race solo cubre el cuelgue total.
-  const JOB_TIMEOUT_MS = parseInt(process.env.JOB_TIMEOUT_MS || '480000', 10);
+  // 12 min (no 8): con la fase de señales web (~1-2 min) + MCP lento, el job legítimamente tarda más y el
+  // belt lo marcaba error ANTES de terminar (el PDF salía en background pero la landing ya mostraba timeout).
+  // El async NO está atado a los 300s de Railway (eso es para requests sync), así que 12 min es seguro.
+  const JOB_TIMEOUT_MS = parseInt(process.env.JOB_TIMEOUT_MS || '720000', 10);
   let jobTimer;
   const timeoutGlobal = new Promise((resolve) => {
     jobTimer = setTimeout(() => {
