@@ -237,14 +237,56 @@ function contarYLoguearWebSearch(data, stage) {
 // MCP IBT con logs
 // ---------------------------------------------------------------------------
 // TIMEOUT por llamada MCP: una llamada patológica (vimos get_contact_profile tardando 250s) colgaba el
-// job ENTERO porque fetch no aborta solo. Cada llamada se corta con AbortController. get_contact_profile
-// corre muchos en paralelo durante el enriquecimiento y fue el que se disparó → timeout más corto.
+// job ENTERO porque fetch no aborta solo. Cada llamada se corta con AbortController. El timeout cubre
+// fetch + lectura del body (ver callMCP): el MCP responde SSE con UN solo evento `data: {...}\n\n` al
+// final (no streamea chunks útiles; nuestro parser consume el body entero y matchea un único evento), así
+// que un idle-timeout no aplica: para un perfil lento-pero-progresando no llega ningún byte hasta el final
+// igual que en un cuelgue real, y no podríamos distinguirlos. Por eso usamos un TOPE TOTAL generoso.
+// get_contact_profile hace un fetch VIVO de LinkedIn que LEGÍTIMAMENTE tarda 40-90s; un tope de 30s lo
+// abortaba en pleno enriquecimiento. Subido a 90s: tolera el perfil lento real y sigue cortando el cuelgue
+// infinito (los 250s patológicos) muy por debajo del cinturón global de 8 min. Tuneable por env.
 const MCP_TIMEOUT_MS         = parseInt(process.env.MCP_TIMEOUT_MS || '45000', 10);
-const MCP_PROFILE_TIMEOUT_MS = parseInt(process.env.MCP_PROFILE_TIMEOUT_MS || '30000', 10);
+const MCP_PROFILE_TIMEOUT_MS = parseInt(process.env.MCP_PROFILE_TIMEOUT_MS || '90000', 10);
 const _mcpTimeoutDe = (toolName) => toolName === 'get_contact_profile' ? MCP_PROFILE_TIMEOUT_MS : MCP_TIMEOUT_MS;
+
+// CACHE POR JOB de get_contact_profile (positivo Y negativo), aislado con AsyncLocalStorage (NUNCA global
+// mutable). El multi-pass (sourceConRetry/SOURCE_MAX_PASSES) re-llama get_contact_profile sobre los MISMOS
+// URNs en cada pasada; sin cache, un perfil que ya resolvió se vuelve a pedir y uno que ya falló por timeout
+// se REINTENTA y quema otra vez el presupuesto de los 90s. Cacheamos por identidad del perfil dentro del job:
+//   - HIT positivo  -> devolvemos el resultado (re-envolviendo structuredContent para no romper el contrato).
+//   - HIT negativo  -> re-lanzamos un AbortError sin tocar la red (el caller ya lo trata como vacío).
+// Honra noCache:true del caller (bypass total). Solo aplica a get_contact_profile; las demás tools intactas.
+function _profileCacheKey(args) {
+  if (!args) return null;
+  const k = args.publicIdOrUrl ?? args.urn ?? (args.profileId != null ? `pid:${args.profileId}` : null);
+  return k != null ? String(k) : null;
+}
 
 async function callMCP(toolName, args) {
   console.log(`[MCP] Llamando ${toolName} con args:`, JSON.stringify(args).substring(0, 200));
+  // --- cache por job (solo get_contact_profile) ---
+  const _cacheable = toolName === 'get_contact_profile' && !(args && args.noCache === true);
+  const _ckey = _cacheable ? _profileCacheKey(args) : null;
+  if (_ckey != null) {
+    const st0 = _statsALS.getStore();
+    const cache = st0 && (st0.profileCache || (st0.profileCache = new Map()));
+    if (cache && cache.has(_ckey)) {
+      const hit = cache.get(_ckey);
+      if (hit.ok) {
+        console.log(`[MCP] ${toolName} CACHE HIT (positivo) para ${_ckey.substring(0, 40)}.`);
+        if (hit.structured != null) {
+          const wrapped = new String(hit.value);
+          Object.defineProperty(wrapped, 'structuredContent', { value: hit.structured, enumerable: false });
+          return wrapped;
+        }
+        return hit.value;
+      }
+      console.log(`[MCP] ${toolName} CACHE HIT (negativo: ya abortó por timeout en este job) para ${_ckey.substring(0, 40)} -> sin reintento.`);
+      const err = new Error(`get_contact_profile cacheado como fallido (timeout previo en este job)`);
+      err.name = 'AbortError';
+      throw err;
+    }
+  }
   const ms = _mcpTimeoutDe(toolName);
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), ms);
@@ -269,7 +311,15 @@ async function callMCP(toolName, args) {
     // AbortError = se cortó por timeout (en el fetch o en la lectura del stream). Lo logueamos (los
     // catch de los callers son silenciosos) y re-lanzamos: el caller envuelto en try/catch devuelve
     // vacío y el pool sigue.
-    if (e && e.name === 'AbortError') console.error(`[MCP] ${toolName} ABORTADA por timeout (${ms}ms).`);
+    if (e && e.name === 'AbortError') {
+      console.error(`[MCP] ${toolName} ABORTADA por timeout (${ms}ms).`);
+      // cache NEGATIVO por job: no reintentar este URN en pasadas siguientes (ya quemó su presupuesto).
+      if (_ckey != null) {
+        const st = _statsALS.getStore();
+        const cache = st && (st.profileCache || (st.profileCache = new Map()));
+        if (cache) cache.set(_ckey, { ok: false });
+      }
+    }
     throw e;
   } finally {
     clearTimeout(timer);
@@ -291,6 +341,12 @@ async function callMCP(toolName, args) {
     console.log(`[MCP] structuredContent: ${structured ? 'presente' : 'ausente'}`);
   }
   console.log(`[MCP] ${toolName} OK (${result.length} chars)`);
+  // cache POSITIVO por job: guardamos el texto + structured crudos para re-envolver en HITs siguientes.
+  if (_ckey != null) {
+    const st = _statsALS.getStore();
+    const cache = st && (st.profileCache || (st.profileCache = new Map()));
+    if (cache) cache.set(_ckey, { ok: true, value: result, structured });
+  }
   // El primitivo string no acepta props; lo envolvemos en String() (objeto) y le colgamos el structured.
   // `String(x)` en cualquier caller lo re-coacciona al primitivo, así que NO cambia comportamiento.
   if (structured != null) {
