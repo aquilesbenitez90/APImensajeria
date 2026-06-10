@@ -55,11 +55,12 @@ process.on('unhandledRejection', (e) => {
 // ---------------------------------------------------------------------------
 const MODEL_GEN = 'claude-sonnet-4-6';
 const MODEL_JUDGE = 'claude-sonnet-4-6';
-// SEÑALES DE COMPRA por cuenta (opcional, reversible). SIGNALS_MODE=on las activa; la EXTRACCIÓN usa un
-// modelo BARATO (Haiku) porque es leer y extraer, no juzgar. Off por default: cero costo/latencia/riesgo.
+// SEÑALES DE COMPRA por cuenta (opcional, reversible). SIGNALS_MODE=on las activa (env en el copy de Railway).
+// La EXTRACCIÓN usa Sonnet (mejor grounding/instrucción que Haiku para no inventar fecha/fuente/URL). Off por
+// default: cero costo/latencia/riesgo hasta que se prenda. Máx 2 señales por card (super resumidas, con link).
 const SIGNALS_MODE = (process.env.SIGNALS_MODE || 'off').toLowerCase();
-const MODEL_SIGNALS = process.env.MODEL_SIGNALS || 'claude-haiku-4-5-20251001';
-const SIGNALS_PER_CARD = parseInt(process.env.SIGNALS_PER_CARD || '3', 10);
+const MODEL_SIGNALS = process.env.MODEL_SIGNALS || 'claude-sonnet-4-6';
+const SIGNALS_PER_CARD = parseInt(process.env.SIGNALS_PER_CARD || '2', 10);
 // Tamaño de cada búsqueda en Sales Navigator (filas por llamada). Más grande = pool más grande para el
 // fallback de piso, mismas llamadas (una por término de rol). Tuneable por env. People 100, companies 50.
 const SOURCE_PROFILES_LIMIT = parseInt(process.env.SOURCE_PROFILES_LIMIT || '100', 10);
@@ -2697,28 +2698,58 @@ function _promptSignals(){ return `# IBT GTM — Señales de compra (extracción
 Te paso UNA empresa y el producto que un proveedor le quiere vender. Buscá en web 2 o 3 SEÑALES DE COMPRA recientes, públicas y VERIFICABLES de esa empresa: hechos que muestren que está en movimiento y podría comprar ahora (rondas de inversión, expansión o nuevas sucursales/países, cambios de ejecutivos relevantes, lanzamientos de producto, alianzas, resultados o hitos).
 
 ## Reglas (anti-invención, INNEGOCIABLE)
-- Cada señal TIENE que salir de una fuente real que encontraste con web_search. Devolvé el nombre de la fuente (medio o sitio) y la fecha (Mes Año).
-- PROHIBIDO inventar cifras, fechas, fuentes o hechos. Si no encontrás una señal con respaldo, devolvé MENOS señales o ninguna. Una señal real vale más que tres inventadas.
+- Cada señal TIENE que salir de una fuente real que encontraste con web_search. Devolvé el nombre de la fuente (medio o sitio), la fecha (Mes Año) y la URL EXACTA del resultado de web_search de donde la sacaste: copiala TAL CUAL del resultado, NO la inventes, NO la armes de memoria, NO adivines el dominio. Si no tenés la URL exacta del resultado, dejá "url" vacío.
+- PROHIBIDO inventar cifras, fechas, fuentes, URLs o hechos. Si no encontrás una señal con respaldo, devolvé MENOS señales o ninguna. Una señal real vale más que tres inventadas.
+- Preferí señales RECIENTES (últimos ~12 meses) y con fecha. Una señal vieja sin recencia NO sirve como "por qué ahora".
 - La señal tiene que ser RELEVANTE para por qué esa empresa compraría el producto del proveedor, no un dato al azar.
-- "texto": 1 oración corta y concreta (máx 140 caracteres), español neutro, trato de usted, SIN guiones (— ni -).
+- "texto": 1 oración corta y concreta (máx 130 caracteres), español neutro, trato de usted, SIN guiones (— ni -).
 - "tipo": una palabra entre inversion, expansion, ejecutivo, producto, alianza, hito.
 - No repitas la misma señal redactada distinto.
 
 ## Salida — SOLO JSON (sin texto ni markdown alrededor)
-{ "senales": [ {"tipo":"...","texto":"...","fuente":"...","fecha":"Mes Año"} ] }
-Máximo 3 señales. Si no hay ninguna verificable, devolvé { "senales": [] }.`; }
+{ "senales": [ {"tipo":"...","texto":"...","fuente":"...","fecha":"Mes Año","url":"https://..."} ] }
+Máximo 2 señales. Si no hay ninguna verificable, devolvé { "senales": [] }.`; }
+
+// Normaliza una URL para comparar (saca esquema/www/slash final, minúsculas) — para validar el link contra
+// las URLs REALES que devolvió web_search (anti-invención del link).
+function _urlKey(u){ return String(u||'').trim().replace(/^https?:\/\//i,'').replace(/^www\./i,'').replace(/[#?].*$/,'').replace(/\/+$/,'').toLowerCase(); }
 
 async function _senalesDeCuenta(card, prodCtx){
   const empresa = String(card.empresa||'').trim();
   if(!empresa) return [];
   const user = `Empresa target: ${empresa}\nUbicación: ${card.ubicacion||'-'}\nProducto del proveedor que le quiere vender: ${prodCtx || '(general)'}\n\nBuscá señales de compra recientes de "${empresa}" y devolvé el JSON.`;
   try {
-    const data = await callClaude({ model: MODEL_SIGNALS, system: _promptSignals(), messages:[{ role:'user', content:user }], tools:[WEB_SEARCH_TOOL], maxTokens:1500, temperature:0 });
-    const arr = (data && Array.isArray(data.senales)) ? data.senales : [];
-    // GUARDA DURA anti-invención: solo señales con fuente real y texto; sin fuente -> se tira (no se muestra).
+    // LOOP agentic de web_search (igual que PLAN): el search es server-side y devuelve pause_turn hasta que
+    // termina; recolectamos las URLs REALES de los bloques de resultado para validar el link después.
+    const messages = [{ role:'user', content: user }];
+    const urlsReales = new Set();
+    const MAX = parseInt(process.env.SIGNALS_MAX_ITERS || '6', 10);
+    let it = 0, jsonText = '';
+    while(true){
+      const data = await callClaude({ model: MODEL_SIGNALS, system: _promptSignals(), messages, tools:[WEB_SEARCH_TOOL], maxTokens:1500, temperature:0 });
+      contarYLoguearWebSearch(data, 'SIGNALS');
+      for(const b of (data.content||[])){
+        if(b.type==='web_search_tool_result' && Array.isArray(b.content)){
+          for(const r of b.content){ if(r && r.url) urlsReales.add(_urlKey(r.url)); }
+        }
+      }
+      messages.push({ role:'assistant', content: data.content });
+      if(data.stop_reason==='pause_turn'){ if(++it >= MAX){ jsonText = _textoJSON(data.content); break; } continue; }
+      jsonText = _textoJSON(data.content);   // end_turn / stop_sequence / cierre
+      break;
+    }
+    let parsed = null; try { parsed = JSON.parse(_extraerJSON(jsonText) || jsonText); } catch {}
+    const arr = (parsed && Array.isArray(parsed.senales)) ? parsed.senales : [];
+    // GUARDA DURA anti-invención: solo señales con fuente real y texto. El url se conserva SOLO si es una URL
+    // REAL que web_search devolvió en ESTA búsqueda (si el modelo la inventó o no matchea, va sin link — NUNCA
+    // una URL fabricada). El link es un extra; la señal con fuente+fecha vale aunque no haya link válido.
     return arr.filter(s => s && String(s.texto||'').trim() && String(s.fuente||'').trim())
               .slice(0, SIGNALS_PER_CARD)
-              .map(s => ({ tipo:String(s.tipo||'').trim(), texto:String(s.texto||'').trim(), fuente:String(s.fuente||'').trim(), fecha:String(s.fecha||'').trim() }));
+              .map(s => {
+                const u = String(s.url||'').trim();
+                const urlOk = /^https?:\/\//i.test(u) && urlsReales.has(_urlKey(u));
+                return { tipo:String(s.tipo||'').trim(), texto:String(s.texto||'').trim(), fuente:String(s.fuente||'').trim(), fecha:String(s.fecha||'').trim(), url: urlOk ? u : '' };
+              });
   } catch(e){
     console.warn(`[SIGNALS] "${empresa}" falló: ${e.message}`);
     return [];
@@ -3304,5 +3335,5 @@ module.exports = {
   _geoIncoherente, _paisesIncoherente, _reescribirPaisesPagina1, _calidezInsuficiente, _paisesDeTexto,
   _rolRelevante, _rolRelevanteLaxo, _verticalesExcluir, _matchVerticalExcluir, _candBueno, _candViable,
   _cardsFitBueno, _resolverGateCalidez, sourceConRetry, runPlanConRetry,
-  _saneaCargo, _dedupUbicacion
+  _saneaCargo, _dedupUbicacion, enriquecerSenales, _senalesDeCuenta
 };

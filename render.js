@@ -33,7 +33,8 @@ function _logoDataUri() {
  *   apertura:[string]           x3,
  *   prioridades:[string]        x4,
  *   cards:   [{ empresa, nombre, cargo, slug, urn, ubicacion, grado, angulo, hook, senales? }] x3
- *     senales (opcional, fase SIGNALS): [{ tipo, texto, fuente, fecha }] — señales de compra CON fuente.
+ *     senales (opcional, fase SIGNALS): [{ tipo, texto, fuente, fecha, url? }] — señales de compra CON fuente.
+ *       url (opcional): link a la fuente, YA validado server-side contra los resultados reales de web_search.
  * }
  * Nota: `urn` es el member URN real (ACwAA...). El href usa urn; el texto visible usa slug.
  * Si urn viene vacío, cae al slug (compatibilidad).
@@ -61,11 +62,20 @@ function _isOpaque(s) {
 function _senalesCard(senales) {
   const arr = Array.isArray(senales) ? senales.filter(s => s && String(s.texto || '').trim()) : [];
   if (!arr.length) return '';
-  const items = arr.slice(0, 3).map(s => {
+  const items = arr.slice(0, 2).map(s => {
     const tag = String(s.tipo || '').trim();
-    const src = [String(s.fuente || '').trim(), String(s.fecha || '').trim()].filter(Boolean).join(', ');
+    const partes = [String(s.fuente || '').trim(), String(s.fecha || '').trim()].filter(Boolean).join(', ');
+    // url: solo se linkea si vino validada del server (URL real de web_search). Saneo invisibles + exijo http(s).
+    const url = String(s.url || '').replace(/[​-‍﻿­\s]/g, '');
+    const urlOk = /^https?:\/\//i.test(url);
+    let src = '';
+    if (partes) {
+      src = urlOk
+        ? ' <span class="sig-src">(<a class="sig-link" href="' + _esc(url) + '">' + _esc(partes) + ' ↗</a>)</span>'
+        : ' <span class="sig-src">(' + _esc(partes) + ')</span>';
+    }
     return '      <li class="sig">' + (tag ? '<span class="sig-tag">' + _esc(tag) + '</span>' : '') +
-      _esc(s.texto) + (src ? ' <span class="sig-src">(' + _esc(src) + ')</span>' : '') + '</li>';
+      _esc(s.texto) + src + '</li>';
   }).join('\n');
   return '\n    <div class="angle-label">Señales</div>\n    <ul class="acct-sigs">\n' + items + '\n    </ul>';
 }
