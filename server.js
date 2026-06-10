@@ -108,13 +108,16 @@ const { AsyncLocalStorage } = require('async_hooks');
 const _statsALS = new AsyncLocalStorage();
 
 function _nuevoStats() {
+  // web_searches: requests del server-tool web_search (PLAN + SIGNALS). Cuesta $10/1000 = $0.01 c/u y ANTES
+  // NO se contaba (solo tokens) -> el costo reportado subestimaba. Ahora se acumula y entra en costoDe.
   return {
     currentStage: 'gen',
-    total:  { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    total:  { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
     stages: {
-      gen:   { input: 0, output: 0, cache_write: 0, cache_read: 0 },
-      judge: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
-      fix:   { input: 0, output: 0, cache_write: 0, cache_read: 0 }
+      gen:     { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
+      signals: { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
+      judge:   { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
+      fix:     { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 }
     }
   };
 }
@@ -123,8 +126,9 @@ function _nuevoStats() {
 function _stats()     { return _statsALS.getStore() || _nuevoStats(); }
 function _setStage(s) { const st = _statsALS.getStore(); if (st) st.currentStage = s; }
 
-function costoDe({ input, output, cache_write, cache_read }) {
-  return (input * 3 + output * 15 + cache_write * 3.75 + cache_read * 0.30) / 1e6;
+// Costo Anthropic: tokens (tarifa Sonnet) + fee de web_search ($10/1000 req = 10000/1e6 c/u).
+function costoDe({ input, output, cache_write, cache_read, web_searches }) {
+  return (input * 3 + output * 15 + cache_write * 3.75 + cache_read * 0.30 + (web_searches || 0) * 10000) / 1e6;
 }
 
 // ---------------------------------------------------------------------------
@@ -199,12 +203,13 @@ function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnv
 function logTokenCost(label) {
   const st = _stats();
   const total = costoDe(st.total);
-  console.log(`[TOKENS] ${label} | in:${st.total.input} out:${st.total.output} cache_w:${st.total.cache_write} cache_r:${st.total.cache_read} | ~$${total.toFixed(4)} (Sonnet)`);
-  for (const etapa of ['gen', 'judge', 'fix']) {
+  const wsT = st.total.web_searches || 0;
+  console.log(`[TOKENS] ${label} | in:${st.total.input} out:${st.total.output} cache_w:${st.total.cache_write} cache_r:${st.total.cache_read} | web_search:${wsT} (~$${(wsT*0.01).toFixed(2)}) | ~$${total.toFixed(4)} (Sonnet) [solo Anthropic; MCP/Lusha aparte]`);
+  for (const etapa of ['gen', 'signals', 'judge', 'fix']) {
     const s = st.stages[etapa];
     const c = costoDe(s);
-    if (s.input || s.output || s.cache_read || s.cache_write) {
-      console.log(`[TOKENS]   └─ ${etapa.padEnd(5)} | in:${s.input} out:${s.output} cache_w:${s.cache_write} cache_r:${s.cache_read} | ~$${c.toFixed(4)}`);
+    if (s.input || s.output || s.cache_read || s.cache_write || s.web_searches) {
+      console.log(`[TOKENS]   └─ ${etapa.padEnd(7)} | in:${s.input} out:${s.output} cache_w:${s.cache_write} cache_r:${s.cache_read} | web_search:${s.web_searches||0} | ~$${c.toFixed(4)}`);
     }
   }
 }
@@ -528,10 +533,11 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
     const o = data.usage.output_tokens || 0;
     const cw = data.usage.cache_creation_input_tokens || 0;
     const cr = data.usage.cache_read_input_tokens || 0;
+    const ws = data.usage.server_tool_use?.web_search_requests || 0;   // fee de web_search ($0.01 c/u)
     const _s = _stats();
-    _s.total.input += i; _s.total.output += o; _s.total.cache_write += cw; _s.total.cache_read += cr;
+    _s.total.input += i; _s.total.output += o; _s.total.cache_write += cw; _s.total.cache_read += cr; _s.total.web_searches += ws;
     const st = _s.stages[_s.currentStage];
-    if (st) { st.input += i; st.output += o; st.cache_write += cw; st.cache_read += cr; }
+    if (st) { st.input += i; st.output += o; st.cache_write += cw; st.cache_read += cr; st.web_searches += ws; }
   }
   return data;
 }
@@ -2762,6 +2768,7 @@ async function enriquecerSenales(data, cliente){
   const cards = (data && Array.isArray(data.cards)) ? data.cards : [];
   const pend = cards.filter(c => c && !Array.isArray(c.senales));
   if(!pend.length) return;
+  _setStage('signals');   // sus tokens + web_searches se atribuyen a la etapa "signals" (no a "gen")
   const prodCtx = String((data && (data.proof || data.lead)) || (cliente && cliente.empresa) || '').slice(0,400);
   console.log(`[SIGNALS] buscando señales de compra para ${pend.length} cuenta(s) con ${MODEL_SIGNALS}...`);
   await Promise.all(pend.map(async c => { c.senales = await _senalesDeCuenta(c, prodCtx); }));

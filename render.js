@@ -186,15 +186,39 @@ function renderReport(data, templatePath) {
   for (const k of Object.keys(flat)) {
     html = html.split('{{' + k + '}}').join(_esc(flat[k]));
   }
-  // Cards por código (NO por la IA): se generan desde data.cards, así el reporte se adapta a 1, 2 o 3
-  // cuentas sin dejar recuadros vacíos. cards_html va CRUDO (es HTML, no se escapa).
+  // Cards por código (NO por la IA), CON PAGINACIÓN: con señales web las cards son altas y NO entran 3 en
+  // una hoja (297mm) -> 2 por página; sin señales entran todas en una sola. Cada página es una <section
+  // class="page"> propia con header/footer y número correcto (auto-calculado), así una card nunca se parte
+  // ni se desborda a una página fantasma con el pie mal numerado.
   const cards = Array.isArray(data.cards) ? data.cards : [];
-  const cardsHtml = cards.map(_cardArticle).join('\n');
   const cardsHead = cards.length > 1
     ? ('Clientes potenciales · 01 — ' + String(cards.length).padStart(2, '0'))
     : 'Cliente potencial · 01';
-  html = html.split('{{cards_html}}').join(cardsHtml);
-  html = html.split('{{cards_head}}').join(_esc(cardsHead));
+  const conSenales = cards.some(c => Array.isArray(c.senales) && c.senales.length);
+  const perPage = conSenales ? 2 : (cards.length || 1);
+  const chunks = [];
+  for (let i = 0; i < cards.length; i += perPage) chunks.push(cards.slice(i, i + perPage));
+  const totalPages = 1 + (chunks.length || 1);   // página 1 (overview) + páginas de cards
+  const fecha = _esc(data.fecha || '');
+  const empresaEsc = _esc(data.empresa || '');
+  const LOGO = '<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" alt="IBT">';
+  const cardsPages = chunks.map((chunk, ci) => {
+    const start = ci * perPage;
+    const cardsHtml = chunk.map((c, j) => _cardArticle(c, start + j)).join('\n');
+    const head = ci === 0 ? ('\n  <div class="cards-head">' + _esc(cardsHead) + '</div>') : '';
+    return `<section class="page">
+  <header class="page-header">
+    <div class="logo-pill">${LOGO}</div>
+    <span class="doc-date">${fecha}</span>
+  </header>${head}
+  <div class="cards-wrap">
+${cardsHtml}
+  </div>
+  <footer class="page-footer"><span>Inbound-Tools.com ● Análisis de Mercado · ${empresaEsc}</span><span>Página ${2 + ci} / ${totalPages}</span></footer>
+</section>`;
+  }).join('\n');
+  html = html.split('{{cards_pages}}').join(cardsPages);
+  html = html.split('{{total_pages}}').join(String(totalPages));
   // Señales de mercado reales (inyección CRUDA, es HTML). Vacío si no hay señales.
   html = html.split('{{senales_html}}').join(_senalesHtml(data.senales));
 

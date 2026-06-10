@@ -84,7 +84,7 @@ h1.ac{color:var(--accent)}
 /* ---------- ACCOUNT CARDS (señal protagonista · sin recuadros) ---------- */
 .cards-head{font-family:var(--mono); font-size:8.5px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-3); margin-bottom:14px}
 .cards-wrap{flex:1; display:flex; flex-direction:column; justify-content:flex-start; gap:22px}
-.acct{padding-top:22px; border-top:1px solid var(--line)}
+.acct{padding-top:22px; border-top:1px solid var(--line); break-inside:avoid; page-break-inside:avoid}
 .acct:first-of-type{border-top:none; padding-top:4px}
 /* Cabecera de la card: la persona/empresa son METADATO (chico, apagado). La señal manda. */
 .acct-head{display:flex; gap:11px; align-items:baseline; margin-bottom:11px}
@@ -164,22 +164,10 @@ h1.ac{color:var(--accent)}
     <li>{{prio4}}</li>
   </ul>
 
-  <footer class="page-footer"><span>Inbound-Tools.com ● Análisis de Mercado · {{empresa}}</span><span>Página 1 / 2</span></footer>
+  <footer class="page-footer"><span>Inbound-Tools.com ● Análisis de Mercado · {{empresa}}</span><span>Página 1 / {{total_pages}}</span></footer>
 </section>
 
-<section class="page">
-  <header class="page-header">
-    <div class="logo-pill"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" alt="IBT"></div>
-    <span class="doc-date">{{fecha}}</span>
-  </header>
-  <div class="cards-head">{{cards_head}}</div>
-
-  <div class="cards-wrap">
-{{cards_html}}
-  </div>
-
-  <footer class="page-footer"><span>Inbound-Tools.com ● Análisis de Mercado · {{empresa}}</span><span>Página 2 / 2</span></footer>
-</section>
+{{cards_pages}}
 
 </body>
 </html>
