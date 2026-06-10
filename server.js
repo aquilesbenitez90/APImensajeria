@@ -112,6 +112,10 @@ function _nuevoStats() {
   // NO se contaba (solo tokens) -> el costo reportado subestimaba. Ahora se acumula y entra en costoDe.
   return {
     currentStage: 'gen',
+    // CACHE POR JOB de los ids resueltos del ICP (LOCATION/FUNCTION/SALES_INDUSTRY). El PLAN NO se re-ejecuta
+    // entre pasadas de sourceConRetry, así que estos ids son IDÉNTICOS en las 3 pasadas: resolverlos una sola
+    // vez ahorra ~8-16 llamadas resolve/reporte (rate-limit del MCP: 60 req/min). Se llena en la pasada 1.
+    _resolveCache: null,
     total:  { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
     stages: {
       gen:     { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
@@ -1196,14 +1200,35 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       return matches[0] ? [matches[0].id] : [];
     }catch{ return []; }
   }
-  let fnId=null;
-  try{ fnId=(String(await callMCP('resolve_sales_navigator_id',{type:'FUNCTION',keywords:funcion,limit:3})).match(/id="?([A-Za-z0-9_]+)"?/)||[])[1]||null; }catch{}
+  // ===== RESOLVE_* CACHEADO POR JOB ==========================================================
+  // El ICP no cambia entre pasadas (sourceConRetry llama hasta SOURCE_MAX_PASSES veces sin re-correr el PLAN),
+  // así que LOCATION/FUNCTION/SALES_INDUSTRY resuelven a los MISMOS ids siempre. Resolvemos UNA sola vez por
+  // job (cache en el store de AsyncLocalStorage) y reusamos en las pasadas 2/3 -> ahorra ~8-16 resolve/reporte
+  // (tope MCP 60 req/min). Si la cache ya está, saltamos TODOS los resolve_* de abajo.
+  const _st = _statsALS.getStore();
+  let fnId, indIds, homeLoc, opsIds;
+  if(_st && _st._resolveCache){
+    ({ fnId, indIds, homeLoc, opsIds } = _st._resolveCache);
+    console.log(`[SOURCE] resolve_* REUSADOS de cache por job (0 llamadas resolve): fn=${fnId||'-'} ind=[${indIds.join('+')||'-'}] homeLoc=[${homeLoc.join(',')||'-'}] ops=[${opsIds.join(',')||'-'}].`);
+  } else {
+    fnId=null;
+    try{ fnId=(String(await callMCP('resolve_sales_navigator_id',{type:'FUNCTION',keywords:funcion,limit:3})).match(/id="?([A-Za-z0-9_]+)"?/)||[])[1]||null; }catch{}
 
-  // INDUSTRIAS ANCLA: verticales del ICP -> IDs de Sales Navigator (filtro de fit DURO).
-  // Con esto traemos decisores EN aseguradoras/retailers/inmobiliarias, no admins de cualquier empresa.
-  const indIds=[];
-  for(const ind of (Array.isArray(icp.industrias)?icp.industrias:[]).slice(0,6)){
-    try{ const id=(String(await callMCP('resolve_sales_navigator_id',{type:'SALES_INDUSTRY',keywords:ind,limit:1})).match(/id="?([0-9]+)"?/)||[])[1]; if(id && !indIds.includes(id)) indIds.push(id); }catch{}
+    // INDUSTRIAS ANCLA: verticales del ICP -> IDs de Sales Navigator (filtro de fit DURO).
+    // Con esto traemos decisores EN aseguradoras/retailers/inmobiliarias, no admins de cualquier empresa.
+    indIds=[];
+    for(const ind of (Array.isArray(icp.industrias)?icp.industrias:[]).slice(0,6)){
+      try{ const id=(String(await callMCP('resolve_sales_navigator_id',{type:'SALES_INDUSTRY',keywords:ind,limit:1})).match(/id="?([0-9]+)"?/)||[])[1]; if(id && !indIds.includes(id)) indIds.push(id); }catch{}
+    }
+
+    // GEOGRAFÍA: país principal PRIMERO + países donde el cliente HOY opera (cercanos).
+    homeLoc = await locIds(geografia);    // todos los ids país-level del país principal
+    opsIds  = [];
+    for(const g of secundarias){
+      for(const id of await locIds(g)){ if(!homeLoc.includes(id) && !opsIds.includes(id)) opsIds.push(id); }
+    }
+    if(_st){ _st._resolveCache = { fnId, indIds, homeLoc, opsIds }; }
+    console.log(`[SOURCE] resolve_* RESUELTOS (pasada 1, cacheados por job): fn=${fnId||'-'} ind=[${indIds.join('+')||'-'}] homeLoc=[${homeLoc.join(',')||'-'}] ops=[${opsIds.join(',')||'-'}].`);
   }
 
   // SIN filtro de grado en el search (no es confiable: 1st->0, 2nd mezcla 3ro). Traemos por FIT
@@ -1233,12 +1258,8 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   }
   const _validosHome = arr => arr.filter(p => _rankSenioridad(p.head) >= 2 && _esCerca(p.loc)).length;
 
-  // GEOGRAFÍA: país principal PRIMERO + países donde el cliente HOY opera (cercanos).
-  const homeLoc = await locIds(geografia);    // todos los ids país-level del país principal
-  const opsIds  = [];
-  for(const g of secundarias){
-    for(const id of await locIds(g)){ if(!homeLoc.includes(id) && !opsIds.includes(id)) opsIds.push(id); }
-  }
+  // GEOGRAFÍA: país principal PRIMERO + países donde el cliente HOY opera (cercanos). homeLoc/opsIds ya se
+  // resolvieron (y cachearon por job) arriba en el bloque RESOLVE_* cacheado.
   const geoLoc  = [...new Set([...homeLoc, ...opsIds])];
   const geoLocOrNull = geoLoc.length ? geoLoc : null;
   const HOME_MIN = parseInt(process.env.SOURCE_HOME_MIN || String(NUM_CUENTAS + 2), 10);
@@ -1323,14 +1344,19 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // Las claves son flags REALES del filtro (NO inventamos monto ni fecha). Mapa id -> {funding,hiring,leadership,growth}.
   const coSenales = new Map();   // companyId(string) -> {funding,hiring,leadership,growth}
   const _marcarCo = (lista, flag) => { for(const c of (lista||[])){ if(!c.id) continue; const s = coSenales.get(c.id) || {}; s[flag] = true; coSenales.set(c.id, s); } };
-  // FUNDING DEL NICHO (set por NOMBRE, no por id): la MISMA búsqueda amplia de empresas con fundingEvents:true
-  // que ya corremos en pasada 1 (industry+geo del ICP) nos da TODAS las empresas con funding del nicho, no solo
-  // las cuentas-ancla. La indexamos por _empKey(name) para poder marcar funding en CUALQUIER candidato del pool
-  // (cuya empresa salga del headline, sin id resuelto) por NOMBRE EXACTO, sin pagar 1 resolve+1 search por card.
-  const fundingNombres = new Set();   // _empKey(name) de empresas con funding del nicho (pasada 1)
+  // SEÑALES DEL NICHO POR NOMBRE (set por _empKey, no por id): las MISMAS búsquedas amplias de empresas que ya
+  // corremos en pasada 1 (industry+geo del ICP, una por flag de señal) nos dan TODAS las empresas del nicho con
+  // CADA señal, no solo las cuentas-ancla. Las indexamos por _empKey(name) para poder marcar la señal en
+  // CUALQUIER candidato del pool (cuya empresa salga del headline, sin id resuelto) por NOMBRE EXACTO, sin pagar
+  // 1 resolve+1 search por card. ESTE es el mecanismo que evita las ~15-30 llamadas de enriquecerSenalesEmpresa:
+  // las empresas finales que reciban marca por nombre acá NO se re-consultan post-SELECT.
+  // (funding ya lo hacía; extendido a hiring/leadership/growth con el MISMO patrón y mismo anti-invención).
+  const senalNombres = { funding:new Set(), hiring:new Set(), leadership:new Set(), growth:new Set() };  // _empKey(name) -> flag
+  const fundingNombres = senalNombres.funding;   // alias para no tocar los usos posteriores de funding
+  const _addNombres = (lista, flag) => { for(const c of (lista||[])){ const k=_empKey(c.name||''); if(k) senalNombres[flag].add(k); } };
   if(indIds.length && geoLocOrNull){
     const baseCo = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoLocOrNull}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
-    try{ txtCoSenal = String(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); cuentas = _parseCompanies(txtCoSenal); nConSenal = cuentas.length; _marcarCo(cuentas, 'growth'); }
+    try{ txtCoSenal = String(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); cuentas = _parseCompanies(txtCoSenal); nConSenal = cuentas.length; _marcarCo(cuentas, 'growth'); _addNombres(cuentas, 'growth'); }
     catch(e){ console.warn('[SOURCE] companies (con señal) falló:', e.message); }
     if(cuentas.length < NUM_CUENTAS*2){   // la señal recortó demasiado para este vertical: recall sin señal
       try{ txtCoBase = String(await callMCP('search_sales_navigator_filtered', baseCo)); const more=_parseCompanies(txtCoBase); for(const c of more) if(!cuentas.some(x=>x.id===c.id)) cuentas.push(c); }
@@ -1350,10 +1376,11 @@ async function sourceCandidates(plan, cliente, conSenal = true){
         try{
           const lista = _parseCompanies(await callMCP('search_sales_navigator_filtered', { ...baseCo, ...extra }));
           _marcarCo(lista, flag);
-          // FUNDING PRE-SELECT (1 sola llamada, NO 1 por card): esta búsqueda amplia (industry+geo, fundingEvents:true)
-          // ya trae el top-N de empresas-con-funding del nicho. La indexamos por nombre para marcar funding por
-          // NOMBRE EXACTO a cualquier candidato del pool más abajo, sin resolver el id de cada empresa.
-          if(flag === 'funding'){ for(const c of lista){ const k=_empKey(c.name||''); if(k) fundingNombres.add(k); } }
+          // PRE-SELECT POR NOMBRE (1 sola llamada por flag, NO 1 por card): cada búsqueda amplia (industry+geo +
+          // SU filtro de señal) ya trae el top-N de empresas-con-esa-señal del nicho. Las indexamos por nombre
+          // para marcar la señal por NOMBRE EXACTO a cualquier candidato del pool más abajo, sin resolver el id
+          // de cada empresa, y para saltar el re-chequeo post-SELECT de las empresas finales ya marcadas.
+          _addNombres(lista, flag);
           // las empresas que SOLO aparecen por estas señales (no estaban en la búsqueda base) también son
           // cuentas-ancla válidas: las sumamos al pool de cuentas (dedupe por id).
           for(const c of lista) if(c.id && !cuentas.some(x=>x.id===c.id)) cuentas.push(c);
@@ -1469,11 +1496,20 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     // SEÑALES DE EMPRESA (datos reales del MCP): si la empresa del candidato es una cuenta-ancla marcada,
     // la card hereda {funding,hiring,leadership,growth}. Es ADITIVO (realce + marca), nunca filtro.
     let senalesCo = (emp && anclaSenales.get(_empKey(emp))) || null;
-    // FUNDING PRE-SELECT por NOMBRE EXACTO: si la empresa del candidato (del headline) está en el set de
-    // empresas-con-funding del nicho (búsqueda amplia de pasada 1), marcamos funding aunque NO sea cuenta-ancla
-    // (id desconocido). Match por _empKey EXACTO, NO token-share. Es BOOST de ranking, no dato mostrado: el
-    // display real lo reconfirma post-SELECT en enriquecerSenalesEmpresa, así que un match de nombre alcanza.
-    if(emp && fundingNombres.has(_empKey(emp))){ senalesCo = { ...(senalesCo||{}), funding:true }; }
+    // SEÑALES PRE-SELECT por NOMBRE EXACTO (funding/hiring/leadership/growth): si la empresa del candidato (del
+    // headline) está en el set de empresas-con-esa-señal del nicho (búsquedas amplias de pasada 1), marcamos la
+    // señal aunque NO sea cuenta-ancla (id desconocido). Match por _empKey EXACTO, NO token-share. Cada flag solo
+    // se setea si la empresa apareció REALMENTE en la búsqueda del MCP de ESE filtro (anti-invención). Sirve de
+    // boost de ranking Y de display: enriquecerSenalesEmpresa SALTA el re-chequeo MCP de las empresas ya marcadas.
+    if(emp){
+      const ek = _empKey(emp);
+      const marcadas = {};
+      if(senalNombres.funding.has(ek))    marcadas.funding = true;
+      if(senalNombres.hiring.has(ek))     marcadas.hiring = true;
+      if(senalNombres.leadership.has(ek)) marcadas.leadership = true;
+      if(senalNombres.growth.has(ek))     marcadas.growth = true;
+      if(Object.keys(marcadas).length) senalesCo = { ...(senalesCo||{}), ...marcadas };
+    }
     // SEÑALES DE COMPRA (datos reales del MCP): se propagan tal cual al pool y llegan a SELECT.
     const cand = { id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, ancla, headcount:hcPre, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos), recienAsumio:!!p.recienAsumio, posts:Number(p.posts)||0, senales:senalesCo };
     out.push(cand); vistos.set(p.id, cand);   // el Map apunta al objeto pusheado → el merge de señal lo muta in situ
@@ -1491,8 +1527,11 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // orden inicial: país y cuenta-ancla mandan; después fit; el grado ya cuenta (warmth) antes que la seniority
   out.sort((a,b)=> (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.rank-a.rank));
 
-  // enriquecer el top por cargo y tamaño (solo los que no tienen headcount ya de la cuenta-ancla)
-  const K = parseInt(process.env.SOURCE_ENRICH_TOP || '12', 10);
+  // enriquecer el top por cargo y tamaño (solo los que no tienen headcount ya de la cuenta-ancla).
+  // K bajado de 12 a 8 (rate-limit MCP 60 req/min): SELECT solo elige NUM_CUENTAS (3) y las cuentas-ancla ya
+  // heredaron headcount del search de companies (anclaHC, NO necesitan scrape). Enriquecer el top 8 alcanza para
+  // que SELECT tenga decisores con tamaño conocido sin quemar get_contact_profile (la llamada CARA, scrape vivo).
+  const K = parseInt(process.env.SOURCE_ENRICH_TOP || '8', 10);
   const noCache = String(process.env.SOURCE_ENRICH_NOCACHE||'').toLowerCase()==='true';
   const PISO   = tamMin > 0 ? tamMin : parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
   const top = out.slice(0, K);
@@ -1547,8 +1586,14 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // ENRIQUECER TAMAÑO ANTES DE LA IA: el barrido (pasada C) y la cuota de grado meten candidatas con
   // headcount null (solo el top K se enriqueció arriba). Si llegan así a la IA, el filtro de tamaño no
   // puede juzgar lo desconocido, la IA elige una micro-empresa y recién el gate final la caza → rechazo total.
-  // Leemos el headcount real de los null de `final` (get_contact_profile es lectura, NO gasta créditos).
-  const faltaHC = final.filter(c => c.headcount==null);
+  // get_contact_profile es la llamada CARA (scrape vivo) Y cuenta para el rate-limit del MCP (60 req/min).
+  // TOPE (rate-limit): enriquecemos SOLO el top ~8 por score de los headcount-null, no los hasta 18. SELECT
+  // elige 3; el resto que quede null es caso TOLERADO (el gate de tamaño NO descarta nulls; solo el descarte
+  // EGREGIO actúa y también ignora nulls). NO bajar de ~8 o se arriesga elegir 3 cards sin headcount.
+  const HC_ENRICH_MAX = parseInt(process.env.SOURCE_ENRICH_HC_MAX || String(K), 10);
+  const faltaHC = final.filter(c => c.headcount==null)
+    .sort((a,b)=> ((b.score||0)-(a.score||0)) || (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.fit-a.fit))
+    .slice(0, HC_ENRICH_MAX);
   if(faltaHC.length){
     let _skipHC = 0;
     await _mapLimit(faltaHC, CONC, async (c) => {
@@ -2798,13 +2843,15 @@ async function enriquecerSenales(data, cliente){
 // Si en el resultado aparece una empresa cuyo nombre matchea el de la card (_mismaEmpresa/_empKey),
 // la señal es REAL para esa empresa y se marca. Sin geo/industria en el filtro: la empresa puede NO
 // encajar la industria-id del ICP (es justo el caso no-ancla); el scope lo da keywords + match de nombre.
-// 4 filtros × 3 empresas = 12 llamadas MCP como TOPE, todas en paralelo (gratis, post-SELECT, 3 empresas).
+// COSTO (rate-limit MCP 60 req/min): por empresa SIN marca de pasada 1 = 1 resolve + 4 search = ~5 llamadas.
+// OPTIMIZACIÓN: solo consultamos las empresas finales que NO recibieron NINGUNA señal-de-empresa por NOMBRE en
+// la pasada 1 de sourceCandidates (senalNombres -> senalesVisibles). Las ya marcadas reusan ese dato (mismo
+// filtro real del MCP, ya confirmado) -> 0 llamadas. Tope efectivo: ~0-6 (antes ~15) por reporte; en la ronda
+// de fix solo re-consulta las cards nuevas sin marca, no las 3 de nuevo.
 const COMPANY_SIGNALS = (process.env.COMPANY_SIGNALS || 'on').toLowerCase();
 async function enriquecerSenalesEmpresa(data){
   if(COMPANY_SIGNALS !== 'on') return;
   const cards = (data && Array.isArray(data.cards)) ? data.cards : [];
-  const objetivo = cards.filter(c => c && String(c.empresa||'').trim());
-  if(!objetivo.length) return;
   const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '4', 10);
   // flag -> etiqueta legible (las MISMAS que _senalesVisibles, para no duplicar texto) + filtro MCP.
   const filtros = [
@@ -2813,6 +2860,21 @@ async function enriquecerSenalesEmpresa(data){
     ['leadership', 'Cambio de liderazgo',    { seniorLeadershipChanges: true }],
     ['growth',     'Creciendo en plantilla', { headcountGrowth:{min:8, max:1000} }]
   ];
+  // ETIQUETAS de señal DE EMPRESA (NO incluye "Recién asumió el rol", que es señal de la persona).
+  const _labelsEmpresa = new Set(filtros.map(([, label]) => label));
+  // OPTIMIZACIÓN MCP (rate-limit 60 req/min): la pasada 1 de sourceCandidates ya marcó por NOMBRE EXACTO las
+  // señales de empresa del nicho (senalNombres -> p.senales -> senalesVisibles). Las empresas finales que YA
+  // traen al menos una señal-de-empresa NO se re-consultan acá (mismo dato, ya confirmado por el filtro real del
+  // MCP en pasada 1). Solo pegamos al MCP por las empresas finales SIN ninguna marca de empresa (las no-ancla
+  // que ningún filtro del nicho tocó). Baja estas ~15-30 llamadas a ~0-6.
+  const objetivo = cards.filter(c => {
+    if(!c || !String(c.empresa||'').trim()) return false;
+    const sv = Array.isArray(c.senalesVisibles) ? c.senalesVisibles : [];
+    return !sv.some(s => _labelsEmpresa.has(s));   // ya marcada por nombre en pasada 1 -> no re-consultar
+  });
+  const _reusadas = cards.filter(c => c && String(c.empresa||'').trim()).length - objetivo.length;
+  if(_reusadas > 0) console.log(`[SIGNALS] empresa final: ${_reusadas} card(s) ya con señal-de-empresa marcada por nombre en pasada 1 (0 llamadas MCP); consulto el MCP solo por ${objetivo.length} sin marca.`);
+  if(!objetivo.length) return;
   await _mapLimit(objetivo, CONC, async (card) => {
     const nombre = String(card.empresa||'').trim();
     if(!nombre) return;
