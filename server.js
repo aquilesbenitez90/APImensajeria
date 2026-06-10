@@ -2591,19 +2591,32 @@ async function enriquecerSenalesEmpresa(data){
   await _mapLimit(objetivo, CONC, async (card) => {
     const nombre = String(card.empresa||'').trim();
     if(!nombre) return;
-    const encontradas = new Set();   // flags que el MCP confirmó REALES para esta empresa
+    // 1) ID EXACTO de la empresa del lead (NO match difuso por palabra compartida): una vez que tenemos al
+    // potencial lead, resolvemos SU empresa a su id de Sales Navigator y confirmamos las señales por
+    // IGUALDAD DE ID. Así "Acme Logistics" (id 555) nunca se marca por culpa de "Global Logistics" (id 999)
+    // que comparte el token "logistics". Si resolve no devuelve id, caemos a NOMBRE NORMALIZADO EXACTO
+    // (_empKey), nunca al token-share. resolve(type:COMPANY) es un lookup vivo de LinkedIn.
+    let coId = null, coName = nombre;
+    try{
+      const txt = String(await callMCP('resolve_sales_navigator_id', { type:'COMPANY', keywords:nombre, limit:5 }));
+      const ms = [...txt.matchAll(/id="?([0-9]+)"?\s+"([^"]+)"/g)].map(m=>({ id:m[1], name:m[2] }));
+      const elegido = ms.find(x => _empKey(x.name) === _empKey(nombre)) || ms[0];   // exacto > top
+      if(elegido){ coId = elegido.id; coName = elegido.name; }
+    }catch(e){ /* sin id: el match cae a nombre normalizado exacto abajo (no difuso) */ }
+    // confirma que la empresa devuelta por una búsqueda de señal ES la del lead: por ID si lo tenemos,
+    // si no por igualdad de nombre normalizado (sin el branch de token compartido de _mismaEmpresa).
+    const _esLaMisma = (co) => coId ? String(co.id) === String(coId) : _empKey(co.name) === _empKey(nombre);
+    const encontradas = new Set();   // flags que el MCP confirmó REALES para ESTA empresa (por id exacto)
     // las 4 búsquedas de señal de ESTA empresa en paralelo (independientes entre sí).
     await Promise.all(filtros.map(async ([flag, , extra]) => {
       try{
         const lista = _parseCompanies(await callMCP('search_sales_navigator_filtered', {
-          category:'companies', profilesLimit:10, keywords:nombre, ...extra
+          category:'companies', profilesLimit:10, keywords:coName, ...extra
         }));
-        // match por NOMBRE: la búsqueda por keyword puede traer empresas parecidas; solo marcamos si
-        // alguna de las devueltas ES la empresa de la card (_mismaEmpresa = igualdad/inclusión/token).
-        if(lista.some(co => _mismaEmpresa(co.name, nombre))) encontradas.add(flag);
+        if(lista.some(_esLaMisma)) encontradas.add(flag);
       }catch(e){ /* una señal que falla no rompe las demás ni la card; queda sin marcar */ }
     }));
-    if(!encontradas.size){ console.log(`[SIGNALS] empresa final "${nombre}": (ninguna señal de empresa)`); return; }
+    if(!encontradas.size){ console.log(`[SIGNALS] empresa final "${nombre}"${coId?` (id=${coId})`:' (sin id)'}: (ninguna señal de empresa)`); return; }
     // SUMAR a senalesVisibles SIN duplicar las que ya trae la card (recién asumió, o señales de ancla).
     const ya = new Set(Array.isArray(card.senalesVisibles) ? card.senalesVisibles : []);
     const nuevas = [];
@@ -2611,7 +2624,7 @@ async function enriquecerSenalesEmpresa(data){
     if(nuevas.length){
       card.senalesVisibles = [...(Array.isArray(card.senalesVisibles)?card.senalesVisibles:[]), ...nuevas];
     }
-    console.log(`[SIGNALS] empresa final "${nombre}": ${[...encontradas].join('/')}${nuevas.length?` (agrega: ${nuevas.join(', ')})`:' (ya estaban)'}`);
+    console.log(`[SIGNALS] empresa final "${nombre}"${coId?` (id=${coId})`:' (sin id)'}: ${[...encontradas].join('/')}${nuevas.length?` (agrega: ${nuevas.join(', ')})`:' (ya estaban)'}`);
   });
 }
 
