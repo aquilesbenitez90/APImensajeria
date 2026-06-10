@@ -694,6 +694,13 @@ function _slugLinkedInCompany(input){
   const m = s.match(/linkedin\.com\/(?:company|school|showcase)\/([^/?#\s]+)/i);
   return m ? decodeURIComponent(m[1]).trim() : '';
 }
+// Nombre tentativo de empresa desde un dominio: primer label antes del punto, guiones/underscores -> espacios
+// (ej. "robotic-crew.com" -> "robotic crew"). Para el fallback por nombre en Sales Nav. '' si es LinkedIn.
+function _nombreDeDominio(dom){
+  const s = String(dom||'').trim().replace(/^https?:\/\//i,'').replace(/^www\./i,'');
+  if(!s || /linkedin\.com/i.test(s)) return '';
+  return s.split('/')[0].split('.')[0].replace(/[-_]+/g,' ').trim();
+}
 // Dominio/website REAL de la empresa desde el texto crudo de lookup_company. BEST-EFFORT: el endpoint
 // /api/mcp devuelve TEXTO (no JSON), así que cubrimos formatos plausibles ("Website: X", "Domain: X",
 // "URL: X") y, como último recurso, el primer dominio suelto que NO sea linkedin. NUNCA fabrica: devuelve
@@ -792,17 +799,19 @@ async function resolverCliente({ profileId, dominio, empresa }) {
   if(slugLI){
     try{
       const txt = await _callMCPClienteConRetry('lookup_company', { companyUrlOrName: slugLI });
-      const empLI = _empresaDeLookup(txt) || empresa || slugLI;
+      const empLI = _empresaDeLookup(txt) || empresa || slugLI.replace(/[-_]+/g,' ').trim();
       const domLI = _dominioDeLookup(txt);
-      console.log(`[CLIENTE] link LinkedIn "${slugLI}" -> empresa "${empLI}" (dominio ${domLI || 'no disponible'})`);
-      empresa = empLI;
-      // Si lookup trae dominio real, úsalo (activa el camino de dominio + corroboración). Si no, limpiamos
-      // el `dominio` LinkedIn para que NO contamine downstream como "linkedin.com" (anclamos por nombre).
-      dominio = domLI || '';
+      const hcLI  = _headcountDe(txt);
+      console.log(`[CLIENTE] link LinkedIn "${slugLI}" -> empresa "${empLI}" (dominio ${domLI || 'no disponible'}, ${hcLI ?? '?'} empleados)`);
+      // Anclamos DIRECTO con los datos de la página de la empresa en LinkedIn (nombre + headcount = confiables).
+      // NO re-consultamos el dominio: el lookup POR-DOMINIO puede estar roto aunque la empresa exista (visto:
+      // robotic-crew.com -> 500 "company no longer exists", pero el slug /company/robotic-crew sí resuelve).
+      return { empresa: empLI, dominio: domLI || '', headcount: hcLI, tier: _tier(hcLI), anclado: true, fuente: 'linkedin_company', confianza: hcLI ? 'alta' : 'media' };
     }catch(e){
       console.warn(`[CLIENTE] lookup_company para link LinkedIn "${slugLI}" falló:`, e.message);
-      // Aun fallando: el slug es mejor cliente que "linkedin.com". Lo usamos como nombre y limpiamos dominio.
-      if(!empresa) empresa = slugLI;
+      // Aun fallando: el slug es mejor cliente que "linkedin.com". Lo usamos como nombre (lo agarra el fallback
+      // por nombre de abajo) y limpiamos el dominio LinkedIn para que NO contamine downstream.
+      if(!empresa) empresa = slugLI.replace(/[-_]+/g,' ').trim();
       dominio = '';
     }
   }
@@ -845,6 +854,21 @@ async function resolverCliente({ profileId, dominio, empresa }) {
       console.log(`[CLIENTE] anclado por dominio ${dominio} -> "${emp}" (${hc ?? '?'} empleados, tier ${_tier(hc)})`);
       return { empresa: emp, dominio, headcount: hc, tier: _tier(hc), anclado: true, fuente: 'dominio', confianza: 'media' };
     } catch (e) { console.warn(`[CLIENTE] dominio ${dominio} no resolvió:`, e.message); }
+  }
+  // FALLBACK por NOMBRE (Sales Navigator): no anclamos por perfil ni por dominio. Antes de rendirnos,
+  // confirmamos la empresa por NOMBRE vía resolve — más robusto que el lookup por dominio (resolve encontró
+  // "Robotic Crew" cuando robotic-crew.com daba 500). Si existe en Sales Nav, anclamos por nombre canónico.
+  const nombreCand = String(empresa || '').trim() || (dominio && !_esEmailGratuito(dominio) ? _nombreDeDominio(dominio) : '');
+  if(nombreCand){
+    try{
+      const txt = String(await _callMCPClienteConRetry('resolve_sales_navigator_id', { type:'COMPANY', keywords:nombreCand, limit:5 }));
+      const ms = [...txt.matchAll(/id="?([0-9]+)"?\s+"([^"]+)"/g)].map(m=>({ id:m[1], name:m[2] }));
+      const hit = ms.find(x => _empKey(x.name) === _empKey(nombreCand)) || ms[0];   // match exacto > primer match
+      if(hit){
+        console.log(`[CLIENTE] anclado por NOMBRE vía Sales Nav: "${hit.name}" (id ${hit.id}) [perfil/dominio no resolvió]`);
+        return { empresa: hit.name, dominio: dominio || '', headcount: null, tier: null, anclado: true, fuente: 'sales_nav_nombre', confianza: 'media' };
+      }
+    }catch(e){ console.warn(`[CLIENTE] fallback por nombre "${nombreCand}" falló:`, e.message); }
   }
   console.warn(`[CLIENTE] ⚠️ SIN ANCLAR (dominio="${dominio}", empresa="${empresa}") -> anclado:false`);
   return { empresa: empresa || dominio || '', dominio: dominio || '', headcount: null, tier: null, anclado: false, fuente: 'sin_anclar', confianza: 'baja' };
