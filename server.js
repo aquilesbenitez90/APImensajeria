@@ -2014,6 +2014,18 @@ function _rolRelevante(cargo, titulos, industrias){
   // genérica off-vertical -> NO relevante (que se hunda antes de llegar a la IA).
   return pistas.some(k=>c.includes(k));
 }
+// FIT RELAJADO — "última instancia". Igual que _rolRelevante PERO acepta a un DECISOR (marcador de decisión)
+// AUNQUE no tenga pista de vertical en el cargo. Resuelve el caso nicho (indIds=0): el MCP devuelve headlines
+// en inglés que no matchean las pistas de vertical del PLAN, así que _rolRelevante hunde a TODOS los decisores
+// reales y un pool de cientos sale con 0 cards. SOLO se relaja la "pista de vertical"; el resto de innegociables
+// (IC suelto, competidor/par, vertical excluida, empresa real, geo) se chequean APARTE en armarReporte.
+function _rolRelevanteLaxo(cargo, titulos, industrias){
+  const c = _norm(cargo);
+  if(!c) return false;
+  const kws = (titulos||[]).map(k=>_norm(k)).filter(k=>k.length>=3);
+  if(kws.some(k=>c.includes(k))) return true;                 // (a) fit de función directo (igual que estricto)
+  return _MARCADOR_DECISION.test(c);                          // (b laxo) decisor SIN exigir pista de vertical
+}
 
 // Etiquetas legibles de las señales REALES que un candidato del pool ya trae. Mapea los flags
 // (`recienAsumio` por persona, `senales:{funding,leadership,hiring,growth}` por empresa-ancla) a texto
@@ -2037,11 +2049,40 @@ function armarReporte(plan, seleccion, pool, senales){
   const cards=[]; const usados=new Set(); const usadasEmp=new Set();
   // ROL: solo cuando el ICP pide gerencia/dueño preferimos NO tomar IC sueltos si hay decisores disponibles.
   const pideDecisores = _icpPideDecisores(plan);
+  const MIN = parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10);
+
+  // --- INNEGOCIABLES para el FIT RELAJADO (no se relajan; ver _rolRelevanteLaxo) ---
+  // Detector de competidor/par (mismo armado que sourceConRetry): competidores explícitos + competidor_terminos
+  // (sin pisar el vertical del propio comprador), match contra el NOMBRE de empresa.
+  const _icp = (plan && plan._plan) || {};
+  const _raiz = w => w.slice(0, Math.max(5, w.length - 2));
+  const _vertTokens = _vocabVertical(_icp);
+  const competidores = (Array.isArray(_icp.competidores)?_icp.competidores:[]).map(_norm).filter(c=>c.length>=4);
+  const compTerminos = (Array.isArray(_icp.competidor_terminos)?_icp.competidor_terminos:[])
+    .map(_norm).filter(t => {
+      if(t.length < 4) return false;
+      const rt = _raiz(t);
+      return !_vertTokens.some(w => { const rw=_raiz(w); return w.includes(t)||t.includes(w)||rt.startsWith(rw)||rw.startsWith(rt); });
+    });
+  const _esComp = (emp) => { const e=_norm(emp||''); if(!e) return false; return _esCompetidor(e, competidores) || compTerminos.some(t=>e.includes(t)); };
+  const excluir = _verticalesExcluir(plan);
+  // GEO objetivo del reporte: países nombrados en el título/lead de página 1 + geografía declarada del PLAN.
+  // Sirve para el chequeo de geo INNEGOCIABLE del fit relajado (el geo a nivel reporte ya corre downstream).
+  const _paisesObjetivo = new Set([
+    ..._paisesDeTexto(plan.h1_post), ..._paisesDeTexto(plan.lead),
+    ..._paisesDeTexto((plan._plan && plan._plan.geografia) || '')
+  ]);
+  const _geoOk = (loc) => {
+    if(!_paisesObjetivo.size) return true;            // sin país objetivo reconocible -> no podemos juzgar geo
+    const pc = _paisesDeTexto(loc);
+    if(!pc.length) return true;                       // ubicación sin país reconocible -> no bloqueamos por geo
+    return pc.some(p => _paisesObjetivo.has(p));
+  };
 
   // Intenta materializar UNA card desde la selección de la IA. Devuelve la card (sin pushear) o null si no
   // pasa los guards. NO muta estado salvo cuando `commit` es true (reserva id/empresa). Así podemos correr
   // dos pasadas (decisores primero, IC sueltos como fallback) sin tocar la lógica de cada guard.
-  function intentarCard(s, { commit }){
+  function intentarCard(s, { commit, laxo }={}){
     const p = byId.get(s.id);
     if(!p){ console.warn(`[SELECT] id fuera del pool, ignorado: ${s.id}`); return null; }
     if(usados.has(s.id)){ if(commit) console.warn(`[SELECT] id DUPLICADO, ignorado: ${p.name}`); return null; }
@@ -2049,9 +2090,23 @@ function armarReporte(plan, seleccion, pool, senales){
     if(!angulo || !hook){ if(commit) console.warn(`[SELECT] card sin ángulo/hook, descartada: ${p.name}`); return null; }
     const empresa = p.empresa || _empresaDeHeadline(p.head) || '';
     if(!empresa){ if(commit) console.warn(`[SELECT] card sin empresa real, descartada: ${p.name}`); return null; }
+    const cargoBase = String(p.head||'').split('@')[0];
 
     // --- GUARDA DE FUNCIÓN: el cargo tiene que mostrar la función objetivo o ser un decisor ---
-    if(!_rolRelevante(String(p.head||'').split('@')[0], titulos, industrias)){
+    // Modo ESTRICTO: _rolRelevante (función del ICP, o decisión + pista de vertical).
+    // Modo LAXO (fallback de piso, última instancia): _rolRelevanteLaxo acepta a un DECISOR sin pista de
+    // vertical, PERO igual exige los INNEGOCIABLES que NO se relajan: no IC suelto, no competidor/par, no
+    // vertical excluida, empresa real (ya chequeada arriba) y geo correcta. Solo se relaja la pista de vertical.
+    if(laxo){
+      if(!_rolRelevanteLaxo(cargoBase, titulos, industrias)){
+        if(commit) console.warn(`[FIT-RELAJADO] descartada: no es decisor ni on-función: ${p.name} ("${cargoBase.slice(0,50)}")`);
+        return null;
+      }
+      if(_esICsuelto(cargoBase)){ if(commit) console.warn(`[FIT-RELAJADO] descartada por IC suelto: ${p.name} ("${cargoBase.slice(0,50)}")`); return null; }
+      if(_esComp(empresa) || _esComp(p.name)){ if(commit) console.warn(`[FIT-RELAJADO] descartada por COMPETIDOR/par: ${p.name} @ ${empresa}`); return null; }
+      if(excluir.length && (_matchVerticalExcluir(empresa, excluir) || _matchVerticalExcluir(p.head, excluir))){ if(commit) console.warn(`[FIT-RELAJADO] descartada por vertical EXCLUIDA: ${p.name} @ ${empresa}`); return null; }
+      if(!_geoOk(p.loc)){ if(commit) console.warn(`[FIT-RELAJADO] descartada por GEO fuera de objetivo: ${p.name} ("${p.loc||''}")`); return null; }
+    } else if(!_rolRelevante(cargoBase, titulos, industrias)){
       if(commit) console.warn(`[SELECT] card DESCARTADA por FUNCIÓN equivocada/irrelevante: ${p.name} ("${String(p.head||'').slice(0,50)}")`);
       return null;
     }
@@ -2112,6 +2167,9 @@ function armarReporte(plan, seleccion, pool, senales){
       // liderazgo, contratando, creciendo. Si no hay señales, queda []. OJO: distinto de `card.senales`,
       // que `enriquecerSenales` PISA con [{tipo,texto,fuente,fecha}] generado por la IA.
       senalesVisibles: _senalesVisibles(p),
+      // fit_relajado: card materializada en la SEGUNDA pasada (gate laxo). Interno: telemetría/juez. No lo
+      // toca el render. Las cards de fit ESTRICTO no llevan el flag (quedan undefined -> falsy).
+      ...(laxo ? { fit_relajado:true } : {}),
       angulo: _limpia(angulo), hook: _limpia(hook)
     };
   }
@@ -2147,6 +2205,25 @@ function armarReporte(plan, seleccion, pool, senales){
       const card = intentarCard(s, { commit:true });
       if(card) cards.push(card);
     }
+  }
+  // --- FALLBACK DE PISO (fit relajado) ----------------------------------------------------------------
+  // Si la pasada ESTRICTA no llegó a MIN cards, completamos hasta NUM_CUENTAS con una SEGUNDA pasada sobre el
+  // pool restante (los ids de la selección aún no usados) usando el gate LAXO (_rolRelevanteLaxo): aceptamos a
+  // un DECISOR aunque su cargo no traiga pista de vertical (caso nicho indIds=0, headlines en inglés del MCP).
+  // Los INNEGOCIABLES NO se relajan (IC suelto / competidor-par / vertical excluida / empresa real / geo: se
+  // chequean dentro de intentarCard en modo laxo). Las cards estrictas YA están pusheadas primero (mejor
+  // calidad), así que el fallback solo RELLENA: nunca reemplaza una buena por una relajada. El dedupe por id y
+  // por empresa lo mantiene intentarCard (usados/usadasEmp). MOTIVO: un pool de cientos de decisores reales no
+  // puede salir con 0 cards.
+  if(cards.length < MIN){
+    const estrictas = cards.length;
+    for(const s of (seleccion||[])){
+      if(cards.length >= NUM_CUENTAS) break;
+      const card = intentarCard(s, { commit:true, laxo:true });
+      if(card) cards.push(card);
+    }
+    const relajadas = cards.length - estrictas;
+    if(relajadas > 0) console.warn(`[FIT-RELAJADO] piso estricto dio ${estrictas}/${MIN}; completo ${relajadas} cards con fit relajado.`);
   }
   if(cards.length < NUM_CUENTAS) console.warn(`[SELECT] ⚠️ solo ${cards.length}/${NUM_CUENTAS} cards válidas tras dedupe/guards.`);
   const { _plan, ...base } = plan;
@@ -2963,7 +3040,7 @@ module.exports = {
   _norm, _empresaDeHeadline, _empKey, _slugCos, _degOrdinal, _headlineLimpio, _fechaHoy,
   _esICsuelto, _icpPideDecisores, _matchFuncion, _warmth, _geoAliasSet,
   _geoIncoherente, _paisesIncoherente, _reescribirPaisesPagina1, _calidezInsuficiente, _paisesDeTexto,
-  _rolRelevante, _verticalesExcluir, _matchVerticalExcluir, _candBueno, _candViable,
+  _rolRelevante, _rolRelevanteLaxo, _verticalesExcluir, _matchVerticalExcluir, _candBueno, _candViable,
   _cardsFitBueno, _resolverGateCalidez, sourceConRetry, runPlanConRetry,
   _saneaCargo, _dedupUbicacion
 };
