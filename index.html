@@ -31,6 +31,8 @@
   button:disabled{opacity:.5; cursor:not-allowed}
   .err{color:#D02B2B; font-size:13px; margin-top:14px; text-align:center; min-height:18px}
   .hint{color:var(--ink-3); font-size:12px; margin-top:16px; text-align:center; line-height:1.5}
+  .field .hint{margin-top:7px; text-align:left; font-size:11px}
+  .field .hint b{color:var(--ink-2); font-weight:700}
   /* estados */
   .stage{display:none}
   .stage.on{display:block}
@@ -63,8 +65,9 @@
       <!-- FORM -->
       <div id="stageForm" class="stage on">
         <div class="field">
-          <label>Sitio o dominio de la empresa</label>
-          <input id="dominio" type="text" placeholder="ej: brandtrack.fm" autocomplete="off">
+          <label>Empresa a analizar</label>
+          <input id="dominio" type="text" placeholder="linkedin.com/company/robotic-crew" autocomplete="off">
+          <div class="hint">Pegá el <b>link de LinkedIn</b> de la empresa (más confiable). También funciona el dominio, ej: brandtrack.fm</div>
         </div>
         <div class="field">
           <label>Clave de acceso</label>
@@ -156,7 +159,7 @@ async function generar(){
   const dominio = normDom($('dominio').value);
   const clave = $('clave').value.trim();
   $('err').textContent = '';
-  if(!dominio){ $('err').textContent = 'Ingresá el dominio de la empresa.'; return; }
+  if(!dominio){ $('err').textContent = 'Pegá el link de LinkedIn o el dominio de la empresa.'; return; }
   if(!clave){ $('err').textContent = 'Ingresá la clave de acceso.'; return; }
 
   let jobId;
