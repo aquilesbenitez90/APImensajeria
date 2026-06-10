@@ -60,6 +60,10 @@ const MODEL_JUDGE = 'claude-sonnet-4-6';
 const SIGNALS_MODE = (process.env.SIGNALS_MODE || 'off').toLowerCase();
 const MODEL_SIGNALS = process.env.MODEL_SIGNALS || 'claude-haiku-4-5-20251001';
 const SIGNALS_PER_CARD = parseInt(process.env.SIGNALS_PER_CARD || '3', 10);
+// Tamaño de cada búsqueda en Sales Navigator (filas por llamada). Más grande = pool más grande para el
+// fallback de piso, mismas llamadas (una por término de rol). Tuneable por env. People 100, companies 50.
+const SOURCE_PROFILES_LIMIT = parseInt(process.env.SOURCE_PROFILES_LIMIT || '100', 10);
+const SOURCE_CO_LIMIT = parseInt(process.env.SOURCE_CO_LIMIT || '50', 10);
 
 // Temperatura del JUEZ: baja = veredicto consistente (mismo reporte → mismo veredicto).
 // El juez corría a la temperatura por defecto (1.0), lo que disparaba la varianza
@@ -1077,7 +1081,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // SEÑALES: guardamos el último texto crudo de una búsqueda de people (para leer un total si lo trae el MCP).
   let txtPeopleSenal = '';
   async function buscarUno(locIds, conIndustria, kwUnico, soloRecienCambio){
-    const f={ category:'people', profilesLimit:50 };
+    const f={ category:'people', profilesLimit:SOURCE_PROFILES_LIMIT };
     if(kwUnico) f.keywords = kwUnico;                       // UNA sola palabra/término (multi-palabra da 0)
     if(locIds && locIds.length) f.location={ include: locIds };
     if(fnId) f.function={ include:[fnId] };
@@ -1190,7 +1194,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const coSenales = new Map();   // companyId(string) -> {funding,hiring,leadership,growth}
   const _marcarCo = (lista, flag) => { for(const c of (lista||[])){ if(!c.id) continue; const s = coSenales.get(c.id) || {}; s[flag] = true; coSenales.set(c.id, s); } };
   if(indIds.length && geoLocOrNull){
-    const baseCo = { category:'companies', profilesLimit:25, location:{include:geoLocOrNull}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
+    const baseCo = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoLocOrNull}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
     try{ txtCoSenal = String(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); cuentas = _parseCompanies(txtCoSenal); nConSenal = cuentas.length; _marcarCo(cuentas, 'growth'); }
     catch(e){ console.warn('[SOURCE] companies (con señal) falló:', e.message); }
     if(cuentas.length < NUM_CUENTAS*2){   // la señal recortó demasiado para este vertical: recall sin señal
@@ -1234,7 +1238,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       .filter(t=>t && t.split(' ').length===1 && t.length>=3)   // UNA sola palabra por búsqueda (multi-palabra da 0)
       .filter((t,i,a)=>a.indexOf(t)===i)
       .slice(0,4);
-    const baseKw = { category:'companies', profilesLimit:25, location:{include:geoLocOrNull}, headcount:_hcDesde(hcMin) };
+    const baseKw = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoLocOrNull}, headcount:_hcDesde(hcMin) };
     const listas = await _mapLimit(kwAncla, CONC, async kw => {
       try{ return _parseCompanies(await callMCP('search_sales_navigator_filtered', {...baseKw, keywords: kw})); }
       catch(e){ console.warn(`[SOURCE] companies por keyword "${kw}" falló:`, e.message); return []; }
@@ -1263,7 +1267,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // ===== PASADA B — DECISORES dentro de las cuentas-ancla (fit alto, empresa controlada) =====
   let enCuentas = [];
   if(anclaIds.length){
-    const f={ category:'people', profilesLimit:50, company:{include: anclaIds} };
+    const f={ category:'people', profilesLimit:SOURCE_PROFILES_LIMIT, company:{include: anclaIds} };
     if(geoLocOrNull) f.location={include:geoLocOrNull};
     if(terminos.length) f.jobPosition={ include: terminos };   // acota a los cargos objetivo dentro de la cuenta
     try{ enCuentas = _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{}
