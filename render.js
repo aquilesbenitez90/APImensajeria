@@ -70,14 +70,26 @@ function _senalesCard(senales) {
   return '\n    <div class="angle-label">Señales</div>\n    <ul class="acct-sigs">\n' + items + '\n    </ul>';
 }
 
-// Señales de compra DURAS (flags reales del MCP) como badges visibles en la cuadrilla de cada lead.
+// Señales de compra DURAS (flags reales del MCP) como DISPARADORES visibles en la cuadrilla de cada lead.
 // c.senalesVisibles = array de etiquetas (ej. "Recién asumió el rol", "Levantó financiamiento").
 // Si no hay, devuelve '' y la card queda igual. NO incluye "activo en LinkedIn" (regla anti-creepy, se excluye en server).
+// Peso comercial (mayor = más arriba y destacada), criterio del auditor GTM: financiamiento (plata + mandato)
+// > decisor nuevo (ventana real de recompra) > contratando (condicional) > creciendo en plantilla (contexto).
+const _PESO_SENAL = {
+  'Levantó financiamiento': 5,
+  'Cambio de liderazgo': 4,
+  'Recién asumió el rol': 4,
+  'Está contratando': 3,
+  'Creciendo en plantilla': 2,
+};
 function _senalesBadges(senalesVisibles) {
   const arr = Array.isArray(senalesVisibles) ? senalesVisibles.filter(s => String(s || '').trim()) : [];
   if (!arr.length) return '';
-  const pills = arr.map(s => '<span class="sig-badge">' + _esc(s) + '</span>').join(' ');
-  return '\n    <div class="sig-badges">' + pills + '</div>';
+  // Ordena por peso comercial (desc) y muestra hasta 2: la fuerte destacada (↑), la secundaria tenue (●).
+  // "Pocas pero que pesen": apilar señales flojas lee como relleno y dispara la sensación de humo.
+  const top = arr.slice().sort((a, b) => (_PESO_SENAL[b] || 1) - (_PESO_SENAL[a] || 1)).slice(0, 2);
+  const flags = top.map(s => '<div class="sig-flag">' + _esc(s) + '</div>').join('');
+  return '\n    <div class="sig-flags">' + flags + '</div>';
 }
 
 // Genera el <article> de UNA card. Las cards se renderizan por código (NO por la IA) desde
