@@ -2557,6 +2557,64 @@ async function enriquecerSenales(data, cliente){
   await Promise.all(pend.map(async c => { c.senales = await _senalesDeCuenta(c, prodCtx); }));
 }
 
+// SEÑALES DE EMPRESA EN LAS CARDS FINALES (id-cross, datos REALES del MCP — NUNCA inventados).
+// PROBLEMA QUE RESUELVE: las señales de empresa (funding/hiring/leadership/growth) hoy SOLO se marcan
+// en las cuentas-ancla del sourcing (coSenales en sourceCandidates). Un lead cuya empresa NO fue ancla
+// (caso robotic-crew: 0 cuentas-ancla) sale sin ninguna señal de empresa en la card. Acá, post-SELECT,
+// chequeamos las señales de CADA empresa final DIRECTAMENTE y las sumamos a card.senalesVisibles.
+//
+// APPROACH B (id-cross), elegido sobre A (structuredContent de lookup_company): el id-cross es el MISMO
+// mecanismo YA probado en prod en sourceCandidates (search companies + filtro de señal + match por id).
+// El structuredContent de lookup_company está CONFIRMADO presente, pero NO hay evidencia de que traiga
+// los flags de señal (en el código solo se le lee website/headcount); marcar señales desde un campo no
+// confirmado violaría anti-invención (podría marcar de más o de menos). Por eso usamos el filtro real.
+//
+// CÓMO: por empresa final, una búsqueda `companies` con keywords=nombre + UN filtro de señal por vez.
+// Si en el resultado aparece una empresa cuyo nombre matchea el de la card (_mismaEmpresa/_empKey),
+// la señal es REAL para esa empresa y se marca. Sin geo/industria en el filtro: la empresa puede NO
+// encajar la industria-id del ICP (es justo el caso no-ancla); el scope lo da keywords + match de nombre.
+// 4 filtros × 3 empresas = 12 llamadas MCP como TOPE, todas en paralelo (gratis, post-SELECT, 3 empresas).
+const COMPANY_SIGNALS = (process.env.COMPANY_SIGNALS || 'on').toLowerCase();
+async function enriquecerSenalesEmpresa(data){
+  if(COMPANY_SIGNALS !== 'on') return;
+  const cards = (data && Array.isArray(data.cards)) ? data.cards : [];
+  const objetivo = cards.filter(c => c && String(c.empresa||'').trim());
+  if(!objetivo.length) return;
+  const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '4', 10);
+  // flag -> etiqueta legible (las MISMAS que _senalesVisibles, para no duplicar texto) + filtro MCP.
+  const filtros = [
+    ['funding',    'Levantó financiamiento', { fundingEvents: true }],
+    ['hiring',     'Está contratando',       { hasJobOffers: true }],
+    ['leadership', 'Cambio de liderazgo',    { seniorLeadershipChanges: true }],
+    ['growth',     'Creciendo en plantilla', { headcountGrowth:{min:8, max:1000} }]
+  ];
+  await _mapLimit(objetivo, CONC, async (card) => {
+    const nombre = String(card.empresa||'').trim();
+    if(!nombre) return;
+    const encontradas = new Set();   // flags que el MCP confirmó REALES para esta empresa
+    // las 4 búsquedas de señal de ESTA empresa en paralelo (independientes entre sí).
+    await Promise.all(filtros.map(async ([flag, , extra]) => {
+      try{
+        const lista = _parseCompanies(await callMCP('search_sales_navigator_filtered', {
+          category:'companies', profilesLimit:10, keywords:nombre, ...extra
+        }));
+        // match por NOMBRE: la búsqueda por keyword puede traer empresas parecidas; solo marcamos si
+        // alguna de las devueltas ES la empresa de la card (_mismaEmpresa = igualdad/inclusión/token).
+        if(lista.some(co => _mismaEmpresa(co.name, nombre))) encontradas.add(flag);
+      }catch(e){ /* una señal que falla no rompe las demás ni la card; queda sin marcar */ }
+    }));
+    if(!encontradas.size){ console.log(`[SIGNALS] empresa final "${nombre}": (ninguna señal de empresa)`); return; }
+    // SUMAR a senalesVisibles SIN duplicar las que ya trae la card (recién asumió, o señales de ancla).
+    const ya = new Set(Array.isArray(card.senalesVisibles) ? card.senalesVisibles : []);
+    const nuevas = [];
+    for(const [flag, label] of filtros){ if(encontradas.has(flag) && !ya.has(label)){ nuevas.push(label); ya.add(label); } }
+    if(nuevas.length){
+      card.senalesVisibles = [...(Array.isArray(card.senalesVisibles)?card.senalesVisibles:[]), ...nuevas];
+    }
+    console.log(`[SIGNALS] empresa final "${nombre}": ${[...encontradas].join('/')}${nuevas.length?` (agrega: ${nuevas.join(', ')})`:' (ya estaban)'}`);
+  });
+}
+
 async function procesar(jobId, { email, dominio, empresa, nombre, profileId, evalMode }) {
   return _statsALS.run(_nuevoStats(), async () => {
   try {
@@ -2572,6 +2630,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
     if (!pool.length) throw new Error(`Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.`);
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
     await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
+    await enriquecerSenalesEmpresa(data);     // señales REALES de EMPRESA en las 3 cards finales (id-cross MCP)
 
     let cleanHtml = limpiarHtml(renderReport(data));
     if (!cleanHtml) throw new Error('No se pudo renderizar el reporte');
@@ -2598,6 +2657,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
         }
         data = fixedData;
         await enriquecerSenales(data, cliente);   // re-busca señales para las cuentas nuevas del fix
+        await enriquecerSenalesEmpresa(data);     // re-chequea señales de EMPRESA para las cuentas del fix
         cleanHtml = limpiarHtml(renderReport(data));
         console.log(`[Job ${jobId}] Re-validando con el juez (re-render incluye normalización de países)...`);
         judgeResult = await runJudge(cleanHtml, null);
@@ -2858,6 +2918,7 @@ app.post('/generar-reporte', async (req, res) => {
     if (!pool.length) return res.status(422).json({ error: `Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.` });
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
     await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
+    await enriquecerSenalesEmpresa(data);     // señales REALES de EMPRESA en las 3 cards finales (id-cross MCP)
 
     let cleanHtml = limpiarHtml(renderReport(data));
     if (!cleanHtml) return res.status(500).json({ error: 'No se pudo renderizar el reporte' });
@@ -2880,6 +2941,7 @@ app.post('/generar-reporte', async (req, res) => {
         }
         data = fixedData;
         await enriquecerSenales(data, cliente);   // re-busca señales para las cuentas nuevas del fix
+        await enriquecerSenalesEmpresa(data);     // re-chequea señales de EMPRESA para las cuentas del fix
         cleanHtml = limpiarHtml(renderReport(data));
         judgeResult = await runJudge(cleanHtml, null);
       } catch (e) {
