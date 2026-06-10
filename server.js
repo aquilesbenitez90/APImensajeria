@@ -243,11 +243,32 @@ function contarYLoguearWebSearch(data, stage) {
 // que un idle-timeout no aplica: para un perfil lento-pero-progresando no llega ningún byte hasta el final
 // igual que en un cuelgue real, y no podríamos distinguirlos. Por eso usamos un TOPE TOTAL generoso.
 // get_contact_profile hace un fetch VIVO de LinkedIn que LEGÍTIMAMENTE tarda 40-90s; un tope de 30s lo
-// abortaba en pleno enriquecimiento. Subido a 90s: tolera el perfil lento real y sigue cortando el cuelgue
-// infinito (los 250s patológicos) muy por debajo del cinturón global de 8 min. Tuneable por env.
+// abortaba en pleno enriquecimiento. Estaba en 90s; lo BAJAMOS a 60s: sigue tolerando el perfil lento real
+// (la gran mayoría resuelve <60s) pero cada CUELGUE del MCP cuesta 30s menos. El deadline de fase de abajo
+// (ENRICH_DEADLINE_MS) es la protección PRINCIPAL contra el agotamiento de los 8 min; este timeout por-perfil
+// es secundario (acota el costo de cada cuelgue individual). Tuneable por env por si hay que volver a 90s.
 const MCP_TIMEOUT_MS         = parseInt(process.env.MCP_TIMEOUT_MS || '45000', 10);
-const MCP_PROFILE_TIMEOUT_MS = parseInt(process.env.MCP_PROFILE_TIMEOUT_MS || '90000', 10);
+const MCP_PROFILE_TIMEOUT_MS = parseInt(process.env.MCP_PROFILE_TIMEOUT_MS || '60000', 10);
 const _mcpTimeoutDe = (toolName) => toolName === 'get_contact_profile' ? MCP_PROFILE_TIMEOUT_MS : MCP_TIMEOUT_MS;
+
+// DEADLINE DE FASE para el ENRIQUECIMIENTO (get_contact_profile que trae headcount/cargo del pool).
+// Bug visto (robotic-crew): el MCP throttleó perfiles, cada uno costó hasta MCP_PROFILE_TIMEOUT_MS, y con
+// el multi-pass (sourceConRetry llama sourceCandidates hasta SOURCE_MAX_PASSES veces) la SUMA de enriquecimiento
+// se comió los 8 min del cinturón global (JOB_TIMEOUT_MS) y el job MURIÓ con TIMEOUT GLOBAL.
+// Solución: techo de tiempo TOTAL ACUMULADO POR JOB para el enriquecimiento (best-effort). El deadline se
+// inicializa la PRIMERA vez que se enriquece dentro del job y vive en el store ALS (NUNCA global mutable),
+// así abarca TODAS las pasadas. Pasado el deadline, NO se lanzan más get_contact_profile de enriquecimiento:
+// el candidato queda con headcount=null (el pipeline lo tolera; sigue siendo card válida con sus datos del search).
+// Solo aplica al enriquecimiento de pool; NO toca la resolución de cliente ni otros usos de get_contact_profile.
+const ENRICH_DEADLINE_MS = parseInt(process.env.ENRICH_DEADLINE_MS || '150000', 10);
+// Devuelve true si AÚN hay presupuesto para enriquecer; arranca el reloj acumulado en el primer uso del job.
+// Guarda { start, deadline } en el store ALS para que sea cumulativo entre pasadas y aislado por job.
+function _enrichTienePresupuesto() {
+  const st = _statsALS.getStore();
+  if (!st) return true;  // fuera de un job (no debería) -> no bloquear
+  if (st.enrichStart == null) st.enrichStart = Date.now();   // arranca el reloj la 1ra vez
+  return (Date.now() - st.enrichStart) < ENRICH_DEADLINE_MS;
+}
 
 // CACHE POR JOB de get_contact_profile (positivo Y negativo), aislado con AsyncLocalStorage (NUNCA global
 // mutable). El multi-pass (sourceConRetry/SOURCE_MAX_PASSES) re-llama get_contact_profile sobre los MISMOS
@@ -1468,9 +1489,13 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const noCache = String(process.env.SOURCE_ENRICH_NOCACHE||'').toLowerCase()==='true';
   const PISO   = tamMin > 0 ? tamMin : parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
   const top = out.slice(0, K);
+  let _skipTop = 0;
   await _mapLimit(top, CONC, async (c) => {
     if(c.headcount==null){
-      try{
+      // DEADLINE DE FASE (best-effort, acumulado por job): si el MCP está lento y ya gastamos el presupuesto
+      // de enriquecimiento, NO lanzamos más get_contact_profile; el candidato queda con headcount=null (tolerado).
+      if(!_enrichTienePresupuesto()){ _skipTop++; }
+      else try{
         const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
         if(prof.headcount!=null) c.headcount=prof.headcount;
         if(prof.headRich && prof.headRich.length>=3){
@@ -1487,6 +1512,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     c.icSuelto = pideDecisores && _esICsuelto(c.head);
     c.score = _scoreCand(c);
   });
+  if(_skipTop) console.warn(`[ENRICH] deadline alcanzado (>${ENRICH_DEADLINE_MS}ms acumulado/job) en enriquecimiento del top: ${_skipTop} candidato(s) sin enriquecer (headcount null), sigo best-effort.`);
   // piso de tamaño contra el ICP, SIN vaciar el pool
   const cumplen  = top.filter(c => !(c.headcount!=null && c.headcount < PISO));
   const fueraTam = top.filter(c => c.headcount!=null && c.headcount < PISO);
@@ -1517,7 +1543,11 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // Leemos el headcount real de los null de `final` (get_contact_profile es lectura, NO gasta créditos).
   const faltaHC = final.filter(c => c.headcount==null);
   if(faltaHC.length){
+    let _skipHC = 0;
     await _mapLimit(faltaHC, CONC, async (c) => {
+      // Mismo deadline de fase (acumulado por job, compartido con el loop del top): si ya se agotó el
+      // presupuesto de enriquecimiento, dejamos headcount=null (tolerado) en vez de seguir pegando al MCP lento.
+      if(!_enrichTienePresupuesto()){ _skipHC++; return; }
       try{
         const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
         if(prof.headcount!=null) c.headcount=prof.headcount;
@@ -1530,6 +1560,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
         c.score = _scoreCand(c);
       }catch{}
     });
+    if(_skipHC) console.warn(`[ENRICH] deadline alcanzado (>${ENRICH_DEADLINE_MS}ms acumulado/job) en enriquecimiento de headcount: ${_skipHC} candidato(s) sin enriquecer (headcount null), sigo best-effort.`);
   }
 
   // DESCARTE EGREGIO (opción B): el tamaño es señal de VALOR, no de credibilidad. Solo sacamos del pool de la
