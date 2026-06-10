@@ -248,9 +248,9 @@ async function callMCP(toolName, args) {
   const ms = _mcpTimeoutDe(toolName);
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), ms);
-  let res;
+  let text;
   try {
-    res = await fetch(MCP_URL, {
+    const res = await fetch(MCP_URL, {
       method: 'POST',
       headers: IBT_HEADERS,
       signal: ac.signal,
@@ -261,15 +261,19 @@ async function callMCP(toolName, args) {
         id: Date.now()
       })
     });
+    // La lectura del body DEBE ir dentro del try: el MCP responde SSE en stream y si manda los
+    // headers pero deja el stream colgado sin emitir el `data:`, res.text() espera al cierre para
+    // siempre. Al estar bajo el mismo AbortController, el timeout aborta también la lectura del body.
+    text = await res.text();
   } catch (e) {
-    // AbortError = se cortó por timeout. Lo logueamos (los catch de los callers son silenciosos) y
-    // re-lanzamos: el caller que ya está envuelto en try/catch devuelve vacío y el pool sigue.
+    // AbortError = se cortó por timeout (en el fetch o en la lectura del stream). Lo logueamos (los
+    // catch de los callers son silenciosos) y re-lanzamos: el caller envuelto en try/catch devuelve
+    // vacío y el pool sigue.
     if (e && e.name === 'AbortError') console.error(`[MCP] ${toolName} ABORTADA por timeout (${ms}ms).`);
     throw e;
   } finally {
     clearTimeout(timer);
   }
-  const text = await res.text();
   const match = text.match(/data: ({.*})\n\n/);
   if (!match) {
     console.error(`[MCP] ERROR: no se pudo parsear respuesta de ${toolName}`);
@@ -302,21 +306,23 @@ async function listMCPTools() {
   // Mismo patrón de timeout que callMCP: sin AbortController, un MCP colgado dejaba este fetch (y el job) pendiente para siempre.
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), MCP_TIMEOUT_MS);
-  let res;
+  let text;
   try {
-    res = await fetch(MCP_URL, {
+    const res = await fetch(MCP_URL, {
       method: 'POST',
       headers: IBT_HEADERS,
       signal: ac.signal,
       body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', params: {}, id: 1 })
     });
+    // La lectura del body va dentro del try (igual que callMCP): un stream SSE colgado tras los
+    // headers haría que res.text() espere para siempre fuera del alcance del AbortController.
+    text = await res.text();
   } catch (e) {
     if (e && e.name === 'AbortError') console.error(`[MCP] listMCPTools ABORTADA por timeout (${MCP_TIMEOUT_MS}ms).`);
     throw e;
   } finally {
     clearTimeout(timer);
   }
-  const text = await res.text();
   const match = text.match(/data: ({.*})\n\n/);
   if (!match) throw new Error('No se pudo listar tools');
   const parsed = JSON.parse(match[1]);
@@ -761,6 +767,22 @@ function _matchVerticalExcluir(txt, excluir){
   return (excluir||[]).some(v => t.includes(v));
 }
 
+// UN reintento ACOTADO para la resolución INICIAL del cliente: es la PRIMERA llamada MCP del job y si
+// el MCP está frío (post-redeploy) y la primera se cae por timeout, mata el job entero antes de empezar.
+// Solo reintenta ante timeout/red (AbortError o falla de fetch), NO ante respuesta inservible. Costo de
+// latencia: 1 reintento = hasta 2x MCP_TIMEOUT_MS (~90s) en el peor caso, aceptable dentro del cinturón
+// global de 8 min. NO se usa en `corroborar` (enriquecimiento, no crítico) para no sumar latencia ahí.
+async function _callMCPClienteConRetry(toolName, args) {
+  try {
+    return await callMCP(toolName, args);
+  } catch (e) {
+    const reintentable = (e && (e.name === 'AbortError' || e.name === 'TypeError' || /fetch|network|ECONN/i.test(e.message || '')));
+    if (!reintentable) throw e;
+    console.warn(`[CLIENTE] ${toolName} falló (${e.name || e.message}); 1 reintento (MCP posiblemente frío)...`);
+    return await callMCP(toolName, args);
+  }
+}
+
 async function resolverCliente({ profileId, dominio, empresa }) {
   // LINK DE LINKEDIN DE EMPRESA: si en `dominio` (o `empresa`) llega un link/slug de company/school de
   // LinkedIn, NO es un dominio usable (quedaría "linkedin.com"). Lo resolvemos vía lookup_company para
@@ -769,7 +791,7 @@ async function resolverCliente({ profileId, dominio, empresa }) {
   const slugLI = _slugLinkedInCompany(dominio) || _slugLinkedInCompany(empresa);
   if(slugLI){
     try{
-      const txt = await callMCP('lookup_company', { companyUrlOrName: slugLI });
+      const txt = await _callMCPClienteConRetry('lookup_company', { companyUrlOrName: slugLI });
       const empLI = _empresaDeLookup(txt) || empresa || slugLI;
       const domLI = _dominioDeLookup(txt);
       console.log(`[CLIENTE] link LinkedIn "${slugLI}" -> empresa "${empLI}" (dominio ${domLI || 'no disponible'})`);
@@ -806,7 +828,7 @@ async function resolverCliente({ profileId, dominio, empresa }) {
 
   if (profileId != null && String(profileId).trim() !== '' && !isNaN(Number(profileId))) {
     try {
-      const txt = await callMCP('get_contact_profile', { profileId: Number(profileId) });
+      const txt = await _callMCPClienteConRetry('get_contact_profile', { profileId: Number(profileId) });
       const emp = _empresaDeHeadline(txt);
       const hc = _headcountDe(txt);
       if (emp) {
@@ -817,7 +839,7 @@ async function resolverCliente({ profileId, dominio, empresa }) {
   }
   if (dominio && !_esEmailGratuito(dominio)) {
     try {
-      const txt = await callMCP('lookup_company', { companyUrlOrName: dominio });
+      const txt = await _callMCPClienteConRetry('lookup_company', { companyUrlOrName: dominio });
       const emp = _empresaDeLookup(txt) || empresa || dominio;
       const hc = _headcountDe(txt);
       console.log(`[CLIENTE] anclado por dominio ${dominio} -> "${emp}" (${hc ?? '?'} empleados, tier ${_tier(hc)})`);
