@@ -95,6 +95,175 @@ const IBT_HEADERS = {
   'x-password': process.env.IBT_PASSWORD
 };
 
+// ---------------------------------------------------------------------------
+// BACKEND DE SOURCING: 'mcp' (default, comportamiento idéntico al histórico) o 'rest'.
+// El MISMO backend de IBT expone los datos por DOS vías:
+//   - /api/mcp  -> JSON-RPC + SSE de TEXTO. Tope DURO de 60 req/min (nos rate-limitea).
+//   - REST (/api/list/..., /api/linkedin-lookup/...) -> JSON real, SIN ese tope.
+// `callREST` es un ADAPTADOR opción-A: hace la request REST y FORMATEA el JSON al MISMO TEXTO
+// que `callMCP` devuelve hoy, para que _parsePeople/_parseCompanies/_parseProfile y los regex de
+// resolve funcionen SIN tocarse (esos parsers SON la spec del formato). callMCP despacha a callREST
+// al inicio si SOURCE_BACKEND==='rest', así NINGÚN caller cambia. Default 'mcp' = cero cambio.
+const SOURCE_BACKEND = (process.env.SOURCE_BACKEND || 'mcp').toLowerCase();
+const REST_BASE = 'https://backoffice-server-production.up.railway.app';
+// JWT del login REST cacheado en módulo (vive entre requests; NO es secreto-en-log: nunca se loguea).
+// Se re-loguea ante 401 (token expirado/revocado) y en el primer uso. Sin TTL fijo: confiamos en el 401.
+let _restToken = null;
+let _restLoginInFlight = null;   // de-dupe: si varias llamadas concurrentes necesitan login, una sola request.
+async function _restLogin(force = false) {
+  if (_restToken && !force) return _restToken;
+  if (_restLoginInFlight) return _restLoginInFlight;   // ya hay un login en curso -> esperamos ese
+  _restLoginInFlight = (async () => {
+    const r = await fetch(REST_BASE + '/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: process.env.IBT_EMAIL, password: process.env.IBT_PASSWORD })
+    });
+    if (!r.ok) throw new Error(`[REST] login falló (HTTP ${r.status})`);
+    const j = await r.json();
+    // El token vive en body.data.token (confirmado en vivo; len ~317). Fallback a body.token por si cambia.
+    const tok = j?.data?.token || j?.token;
+    if (!tok) throw new Error('[REST] login sin token en la respuesta');
+    _restToken = tok;
+    console.log('[REST] login OK (token cacheado).');   // NUNCA logueamos el token.
+    return tok;
+  })().finally(() => { _restLoginInFlight = null; });
+  return _restLoginInFlight;
+}
+// fetch REST con Bearer y RE-LOGIN automático ante 401 (un único reintento). Devuelve el JSON parseado.
+async function _restFetch(path, { method = 'GET', body = null, signal = null } = {}) {
+  const _do = async (tok) => {
+    const headers = { 'Authorization': 'Bearer ' + tok };
+    if (body != null) headers['Content-Type'] = 'application/json';
+    return fetch(REST_BASE + path, { method, headers, body: body != null ? JSON.stringify(body) : undefined, signal });
+  };
+  let tok = await _restLogin(false);
+  let res = await _do(tok);
+  if (res.status === 401) {
+    console.warn('[REST] 401 -> re-login y reintento único.');
+    tok = await _restLogin(true);
+    res = await _do(tok);
+  }
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`[REST] ${method} ${path.split('?')[0]} HTTP ${res.status} ${t.slice(0, 120)}`);
+  }
+  return res.json();
+}
+
+// --- FORMATEADORES: JSON REST -> TEXTO que esperan los parsers (ver _parsePeople/_parseCompanies/etc). ---
+// _parsePeople espera por persona: id=URN "Nombre" Headline (DISTANCE_N, Location) <tail señales>
+function _restFmtPeople(items) {
+  return (items || []).map(it => {
+    const id = it.id || it.member_urn || '';
+    const name = (it.name || `${it.first_name || ''} ${it.last_name || ''}`).trim();
+    // El headline crudo puede traer paréntesis; los parsers cortan en el primer '(' del bloque DISTANCE,
+    // así que neutralizamos paréntesis del headline para no romper el cierre del grupo DISTANCE.
+    const head = String(it.headline || '').replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim();
+    const dist = it.network_distance || 'DISTANCE_OUT_OF_NETWORK';   // ya viene "DISTANCE_2" / "DISTANCE_OUT_OF_NETWORK"
+    const loc = String(it.location || '').replace(/[()]/g, ' ').trim();
+    // SEÑAL recién-asumió: del puesto actual. tenure_at_role.years==0/ausente con start reciente, o months bajos.
+    const pos = Array.isArray(it.current_positions) && it.current_positions[0] ? it.current_positions[0] : null;
+    let tail = '';
+    if (pos && pos.tenure_at_role) {
+      const tr = pos.tenure_at_role;
+      const yrs = Number(tr.years || 0), mos = Number(tr.months || 0);
+      if (yrs === 0 && mos > 0) tail += ` ${mos} months in role`;   // _parseProfile/_parsePeople lo leen como recién asumió
+    }
+    return `id=${id} "${name}" ${head} (${dist}, ${loc})${tail}`;
+  }).join('\n');
+}
+// _parseCompanies espera: id=NUMERO "Nombre" Industria (NNN employees)
+function _restFmtCompanies(items) {
+  return (items || []).map(it => {
+    const id = it.id || '';
+    const name = it.name || '';
+    const ind = String(it.industry || '').replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim();
+    const hc = it.headcount != null ? it.headcount : '?';
+    return `id=${id} "${name}" ${ind} (${hc} employees)`;
+  }).join('\n');
+}
+// resolve: el regex espera id="?NUMERO"? "Nombre" (LOCATION) o id="?ID (FUNCTION/SALES_INDUSTRY).
+function _restFmtResolve(items) {
+  return (items || []).map(it => `id=${it.id} "${it.title || it.name || ''}"`).join('\n');
+}
+// _parseProfile lee: "(N employees)" para headcount y "— headline (N" para el headline rico.
+// Construimos un texto que contenga ambos: `Nombre — <headline> @ <empresa> (N employees)`.
+function _restFmtProfile(data) {
+  const prof = (data && data.profile) || {};
+  const co = (data && data.company) || {};
+  const name = `${prof.first_name || ''} ${prof.last_name || ''}`.trim();
+  const head = String(prof.headline || '').replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim();
+  const emp = co.name || '';
+  const hc = co.staff_count != null ? co.staff_count : null;
+  // _parseProfile: /—\s*(.+?)\s*\(\s*(?:\?|\d)/  -> necesita "— <head...> (<dígito o ?>".
+  // _empresaDeHeadline lee "@ <empresa>"; _headcountDe lee "<N> employees".
+  let txt = `${name} — ${head}`;
+  if (emp) txt += ` @ ${emp}`;
+  txt += hc != null ? ` (${hc} employees)` : ` (? )`;
+  return txt;
+}
+// lookup_company -> texto: _empresaDeLookup lee "Company: <name>", _headcountDe "<N> employees",
+// _dominioDeLookup el website. Usamos el primer resultado de la búsqueda de empresas por nombre.
+function _restFmtLookupCompany(co) {
+  if (!co) return '';
+  let txt = `Company: ${co.name || ''}`;
+  if (co.industry) txt += ` — ${co.industry}`;
+  const hc = co.headcount != null ? co.headcount : (co.staff_count != null ? co.staff_count : null);
+  if (hc != null) txt += ` (${hc} employees)`;
+  if (co.website) txt += ` website: ${co.website}`;
+  return txt;
+}
+
+// callREST(toolName, args): arma la request REST por tool y devuelve el TEXTO con el formato del parser.
+async function callREST(toolName, args, signal) {
+  switch (toolName) {
+    case 'search_sales_navigator_filtered': {
+      // Mismos filtros que el MCP, pasados tal cual (category, keywords, location/function/industry.include,
+      // company.include/exclude, profilesLimit, changedJobsLast90Days, headcountGrowth, etc.).
+      const j = await _restFetch('/api/list/linkedin/sales-navigator/search', { method: 'POST', body: args, signal });
+      const items = j?.data?.items || [];
+      const cat = String(args?.category || 'people').toLowerCase();
+      return cat === 'companies' ? _restFmtCompanies(items) : _restFmtPeople(items);
+    }
+    case 'resolve_sales_navigator_id': {
+      const qs = new URLSearchParams();
+      if (args?.type) qs.set('type', args.type);
+      if (args?.keywords) qs.set('keywords', args.keywords);
+      if (args?.limit != null) qs.set('limit', String(args.limit));
+      const j = await _restFetch('/api/list/linkedin/search-parameters?' + qs.toString(), { signal });
+      return _restFmtResolve(j?.data?.items || []);
+    }
+    case 'get_contact_profile': {
+      const nc = args?.noCache ? '?noCache=true' : '';
+      let path;
+      if (args?.profileId != null && !isNaN(Number(args.profileId))) {
+        path = `/api/linkedin-lookup/profile/${encodeURIComponent(args.profileId)}${nc}`;
+      } else {
+        const pub = args?.publicIdOrUrl ?? args?.urn ?? '';
+        path = `/api/linkedin-lookup/profile-by-public-id/${encodeURIComponent(pub)}${nc}`;
+      }
+      const j = await _restFetch(path, { signal });
+      return _restFmtProfile(j?.data || {});
+    }
+    case 'lookup_company': {
+      // REST de lookup-por-dominio/universal-name NO confirmado (rutas /api/linkedin-lookup/company* dieron 404).
+      // Resolvemos con la BÚSQUEDA de empresas (confirmada): primer match por nombre/dominio -> name/industry/headcount.
+      const kw = String(args?.companyUrlOrName || '')
+        .replace(/^https?:\/\//i, '').replace(/^www\./i, '')
+        .replace(/.*linkedin\.com\/company\//i, '').replace(/[/?#].*$/, '')
+        .replace(/\.[a-z]{2,}$/i, '').replace(/[-_]+/g, ' ').trim();
+      const j = await _restFetch('/api/list/linkedin/sales-navigator/search', {
+        method: 'POST', body: { category: 'companies', keywords: kw, profilesLimit: 1 }, signal
+      });
+      const co = j?.data?.items?.[0] || null;
+      return _restFmtLookupCompany(co);
+    }
+    default:
+      throw new Error(`[REST] tool no soportada por callREST: ${toolName}`);
+  }
+}
+
 const WEB_SEARCH_TOOL = {
   type: 'web_search_20250305',
   name: 'web_search',
@@ -295,6 +464,48 @@ function _profileCacheKey(args) {
 
 async function callMCP(toolName, args) {
   console.log(`[MCP] Llamando ${toolName} con args:`, JSON.stringify(args).substring(0, 200));
+  // DESPACHO A REST (flag SOURCE_BACKEND='rest'): mismo timeout/cache-por-job que el MCP. callREST devuelve
+  // el MISMO texto que el parser espera, así que el resto de callMCP (cache, structured, return) NO se ejecuta.
+  if (SOURCE_BACKEND === 'rest') {
+    // cache por job (solo get_contact_profile), idéntico contrato que la rama MCP de abajo.
+    const _cacheableR = toolName === 'get_contact_profile' && !(args && args.noCache === true);
+    const _ckeyR = _cacheableR ? _profileCacheKey(args) : null;
+    if (_ckeyR != null) {
+      const st0 = _statsALS.getStore();
+      const cache = st0 && (st0.profileCache || (st0.profileCache = new Map()));
+      if (cache && cache.has(_ckeyR)) {
+        const hit = cache.get(_ckeyR);
+        if (hit.ok) { console.log(`[MCP] ${toolName} CACHE HIT (positivo) [rest] ${_ckeyR.substring(0,40)}.`); return hit.value; }
+        console.log(`[MCP] ${toolName} CACHE HIT (negativo) [rest] ${_ckeyR.substring(0,40)} -> sin reintento.`);
+        const err = new Error('get_contact_profile cacheado como fallido (timeout previo)'); err.name = 'AbortError'; throw err;
+      }
+    }
+    const msR = _mcpTimeoutDe(toolName);
+    const acR = new AbortController();
+    const timerR = setTimeout(() => acR.abort(), msR);
+    try {
+      const out = await callREST(toolName, args, acR.signal);
+      console.log(`[MCP] ${toolName} OK [rest] (${out.length} chars)`);
+      if (_ckeyR != null) {
+        const st = _statsALS.getStore();
+        const cache = st && (st.profileCache || (st.profileCache = new Map()));
+        if (cache) cache.set(_ckeyR, { ok: true, value: out, structured: null });
+      }
+      return out;
+    } catch (e) {
+      if (e && e.name === 'AbortError') {
+        console.error(`[MCP] ${toolName} ABORTADA por timeout [rest] (${msR}ms).`);
+        if (_ckeyR != null) {
+          const st = _statsALS.getStore();
+          const cache = st && (st.profileCache || (st.profileCache = new Map()));
+          if (cache) cache.set(_ckeyR, { ok: false });
+        }
+      } else {
+        console.error(`[MCP] ${toolName} ERROR [rest]: ${e.message}`);
+      }
+      throw e;
+    } finally { clearTimeout(timerR); }
+  }
   // --- cache por job (solo get_contact_profile) ---
   const _cacheable = toolName === 'get_contact_profile' && !(args && args.noCache === true);
   const _ckey = _cacheable ? _profileCacheKey(args) : null;
@@ -3415,5 +3626,6 @@ module.exports = {
   _geoIncoherente, _paisesIncoherente, _reescribirPaisesPagina1, _calidezInsuficiente, _paisesDeTexto,
   _rolRelevante, _rolRelevanteLaxo, _verticalesExcluir, _matchVerticalExcluir, _candBueno, _candViable,
   _cardsFitBueno, _resolverGateCalidez, sourceConRetry, runPlanConRetry,
-  _saneaCargo, _dedupUbicacion, enriquecerSenales, _senalesDeCuenta
+  _saneaCargo, _dedupUbicacion, enriquecerSenales, _senalesDeCuenta,
+  callREST, _parsePeople, _parseCompanies
 };
