@@ -76,19 +76,25 @@ function _senalesCard(senales) {
 // Peso comercial (mayor = más arriba y destacada), criterio del auditor GTM: financiamiento (plata + mandato)
 // > decisor nuevo (ventana real de recompra) > contratando (condicional) > creciendo en plantilla (contexto).
 const _PESO_SENAL = {
-  'Levantó financiamiento': 5,
-  'Cambio de liderazgo': 4,
-  'Recién asumió el rol': 4,
+  'Levantó financiamiento': 6,   // la "reina": plata fresca + mandato de gastar
+  'Recién asumió el rol': 5,     // señal de la PERSONA (es sobre ella) -> manda el ↑ cuando está
+  'Cambio de liderazgo': 4,      // señal de EMPRESA
   'Está contratando': 3,
   'Creciendo en plantilla': 2,
+};
+// Reetiquetado de PRESENTACIÓN: "Cambio de liderazgo" es una señal de EMPRESA (seniorLeadershipChanges del
+// MCP, binaria a nivel compañía). En la card de una persona implicaría que cambió ELLA, lo cual es dudoso
+// (un fundador no "cambió de liderazgo"; su empresa sí). Lo aclaramos. El resto ya se lee como nivel-empresa.
+const _LABEL_SENAL = {
+  'Cambio de liderazgo': 'Cambio de liderazgo en su empresa',
 };
 function _senalesBadges(senalesVisibles) {
   const arr = Array.isArray(senalesVisibles) ? senalesVisibles.filter(s => String(s || '').trim()) : [];
   if (!arr.length) return '';
-  // Ordena por peso comercial (desc) y muestra hasta 2: la fuerte destacada (↑), la secundaria tenue (●).
-  // "Pocas pero que pesen": apilar señales flojas lee como relleno y dispara la sensación de humo.
-  const top = arr.slice().sort((a, b) => (_PESO_SENAL[b] || 1) - (_PESO_SENAL[a] || 1)).slice(0, 2);
-  const flags = top.map(s => '<div class="sig-flag">' + _esc(s) + '</div>').join('');
+  // Orden por peso comercial (desc). Mostramos hasta 4: TODAS las señales reales que tenga la card (no
+  // inventamos; si solo hay 1, va 1). La más fuerte destacada (↑), el resto tenue (●).
+  const top = arr.slice().sort((a, b) => (_PESO_SENAL[b] || 1) - (_PESO_SENAL[a] || 1)).slice(0, 4);
+  const flags = top.map(s => '<div class="sig-flag">' + _esc(_LABEL_SENAL[s] || s) + '</div>').join('');
   return '\n    <div class="sig-flags">' + flags + '</div>';
 }
 
