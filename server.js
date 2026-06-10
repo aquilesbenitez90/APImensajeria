@@ -59,7 +59,10 @@ const MODEL_JUDGE = 'claude-sonnet-4-6';
 // La EXTRACCIÓN usa Sonnet (mejor grounding/instrucción que Haiku para no inventar fecha/fuente/URL). Off por
 // default: cero costo/latencia/riesgo hasta que se prenda. Máx 2 señales por card (super resumidas, con link).
 const SIGNALS_MODE = (process.env.SIGNALS_MODE || 'off').toLowerCase();
-const MODEL_SIGNALS = process.env.MODEL_SIGNALS || 'claude-sonnet-4-6';
+// Signals es EXTRACCIÓN pura (encontrar noticia con web_search → copiar fuente/fecha/URL real), no razonamiento:
+// Haiku alcanza y es ~3x más barato que Sonnet. La fase signals era ~50% del costo del reporte; con Haiku baja a ~$0.10.
+// Reversible por env (MODEL_SIGNALS=claude-sonnet-4-6 vuelve al comportamiento anterior).
+const MODEL_SIGNALS = process.env.MODEL_SIGNALS || 'claude-haiku-4-5-20251001';
 const SIGNALS_PER_CARD = parseInt(process.env.SIGNALS_PER_CARD || '2', 10);
 // Tamaño de cada búsqueda en Sales Navigator (filas por llamada). Más grande = pool más grande para el
 // fallback de piso, mismas llamadas (una por término de rol). Tuneable por env. People 100, companies 50.
@@ -270,6 +273,15 @@ const WEB_SEARCH_TOOL = {
   max_uses: 8
 };
 
+// Tool de web_search DEDICADO para signals con tope BAJO. El PLAN sí necesita 8 búsquedas para investigar al
+// cliente; signals solo extrae 1-2 señales con fuente, así que 3 alcanzan de sobra. Antes signals heredaba el
+// max_uses:8 del PLAN → hasta 8 búsquedas × 3 cards = se iba a 17+ por reporte (la mitad del costo).
+const SIGNALS_WEB_SEARCH_TOOL = {
+  type: 'web_search_20250305',
+  name: 'web_search',
+  max_uses: parseInt(process.env.SIGNALS_MAX_USES || '3', 10)
+};
+
 // Acumulador de tokens POR REQUEST (aislado por job con AsyncLocalStorage).
 // Antes eran globales mutables (tokenStats/stageStats/currentStage) que se corrompían
 // cuando dos jobs corrían en paralelo en la misma réplica. Ahora cada job tiene el suyo.
@@ -285,6 +297,9 @@ function _nuevoStats() {
     // entre pasadas de sourceConRetry, así que estos ids son IDÉNTICOS en las 3 pasadas: resolverlos una sola
     // vez ahorra ~8-16 llamadas resolve/reporte (rate-limit del MCP: 60 req/min). Se llena en la pasada 1.
     _resolveCache: null,
+    // CACHE POR JOB de señales de compra por empresa (_senalesDeCuenta). Evita re-buscar la misma empresa
+    // cuando una ronda de fix re-arma cards del mismo nombre. Lazy (Map) en _senalesDeCuenta.
+    _signalsCache: null,
     total:  { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
     stages: {
       gen:     { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
@@ -299,10 +314,18 @@ function _nuevoStats() {
 function _stats()     { return _statsALS.getStore() || _nuevoStats(); }
 function _setStage(s) { const st = _statsALS.getStore(); if (st) st.currentStage = s; }
 
-// Costo Anthropic: tokens (tarifa Sonnet) + fee de web_search ($10/1000 req = 10000/1e6 c/u).
-function costoDe({ input, output, cache_write, cache_read, web_searches }) {
-  return (input * 3 + output * 15 + cache_write * 3.75 + cache_read * 0.30 + (web_searches || 0) * 10000) / 1e6;
+// Tarifas Anthropic por millón de tokens (input/output/cache_write/cache_read) + fee de web_search ($10/1000 req).
+const RATES_SONNET = { in: 3, out: 15, cw: 3.75, cr: 0.30, ws: 10000 };
+const RATES_HAIKU  = { in: 1, out: 5,  cw: 1.25, cr: 0.10, ws: 10000 };
+function _ratesDe(model){ return /haiku/i.test(String(model || '')) ? RATES_HAIKU : RATES_SONNET; }
+// Tarifa de cada etapa según el modelo que la corre (signals puede ser Haiku → no sobre-costear).
+function _ratesEtapa(etapa){ return _ratesDe(etapa === 'signals' ? MODEL_SIGNALS : etapa === 'gen' ? MODEL_GEN : MODEL_JUDGE); }
+// Costo Anthropic de un bucket de tokens, a la tarifa indicada (default Sonnet).
+function costoDe({ input, output, cache_write, cache_read, web_searches }, rates = RATES_SONNET) {
+  return (input * rates.in + output * rates.out + cache_write * rates.cw + cache_read * rates.cr + (web_searches || 0) * rates.ws) / 1e6;
 }
+// Costo total REAL = suma por etapa con su tarifa (el total agregado a tarifa Sonnet sobre-costearía la parte Haiku de signals).
+function _costoTotal(st){ return ['gen','signals','judge','fix'].reduce((c,e)=> c + costoDe(st.stages[e], _ratesEtapa(e)), 0); }
 
 // ---------------------------------------------------------------------------
 // LOG DE RESULTADOS (JSONL) — una línea estructurada por job para análisis con IA.
@@ -368,19 +391,19 @@ function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnv
     icp: { funcion: icp.funcion || '', geografia: icp.geografia || '', geografias: icp.geografias || [], industrias: icp.industrias || [], tamano_min: icp.tamano_min || 0 },
     juez_fixes: (judgeResult && judgeResult.fixes) || [],
     cards,
-    costo: +costoDe(t).toFixed(4),
+    costo: +_costoTotal(_stats()).toFixed(4),
     tokens: { ...t }
   };
 }
 
 function logTokenCost(label) {
   const st = _stats();
-  const total = costoDe(st.total);
+  const total = _costoTotal(st);
   const wsT = st.total.web_searches || 0;
-  console.log(`[TOKENS] ${label} | in:${st.total.input} out:${st.total.output} cache_w:${st.total.cache_write} cache_r:${st.total.cache_read} | web_search:${wsT} (~$${(wsT*0.01).toFixed(2)}) | ~$${total.toFixed(4)} (Sonnet) [solo Anthropic; MCP/Lusha aparte]`);
+  console.log(`[TOKENS] ${label} | in:${st.total.input} out:${st.total.output} cache_w:${st.total.cache_write} cache_r:${st.total.cache_read} | web_search:${wsT} (~$${(wsT*0.01).toFixed(2)}) | ~$${total.toFixed(4)} (por modelo; signals=${MODEL_SIGNALS}) [solo Anthropic; MCP/Lusha aparte]`);
   for (const etapa of ['gen', 'signals', 'judge', 'fix']) {
     const s = st.stages[etapa];
-    const c = costoDe(s);
+    const c = costoDe(s, _ratesEtapa(etapa));
     if (s.input || s.output || s.cache_read || s.cache_write || s.web_searches) {
       console.log(`[TOKENS]   └─ ${etapa.padEnd(7)} | in:${s.input} out:${s.output} cache_w:${s.cache_write} cache_r:${s.cache_read} | web_search:${s.web_searches||0} | ~$${c.toFixed(4)}`);
     }
@@ -2990,6 +3013,12 @@ function _urlKey(u){ return String(u||'').trim().replace(/^https?:\/\//i,'').rep
 async function _senalesDeCuenta(card, prodCtx){
   const empresa = String(card.empresa||'').trim();
   if(!empresa) return [];
+  // CACHE POR JOB por empresa: en una ronda de fix el SELECT re-arma las cards (objeto nuevo, sin `senales`),
+  // así que la MISMA empresa (PepsiCo/Mayo) se re-buscaba → costo de signals duplicado. Reusamos lo ya hallado
+  // (0 búsquedas web). Aislado por job en el store ALS (nunca global). Cachea también el resultado vacío.
+  const st = _statsALS.getStore();
+  const ck = _empKey(empresa);
+  if(st){ if(!st._signalsCache) st._signalsCache = new Map(); if(st._signalsCache.has(ck)){ console.log(`[SIGNALS] "${empresa}" desde cache de job (0 búsquedas).`); return st._signalsCache.get(ck); } }
   const user = `Empresa target: ${empresa}\nUbicación: ${card.ubicacion||'-'}\nProducto del proveedor que le quiere vender: ${prodCtx || '(general)'}\n\nBuscá señales de compra recientes de "${empresa}" y devolvé el JSON.`;
   try {
     // LOOP agentic de web_search (igual que PLAN): el search es server-side y devuelve pause_turn hasta que
@@ -2999,7 +3028,7 @@ async function _senalesDeCuenta(card, prodCtx){
     const MAX = parseInt(process.env.SIGNALS_MAX_ITERS || '6', 10);
     let it = 0, jsonText = '';
     while(true){
-      const data = await callClaude({ model: MODEL_SIGNALS, system: _promptSignals(), messages, tools:[WEB_SEARCH_TOOL], maxTokens:1500, temperature:0 });
+      const data = await callClaude({ model: MODEL_SIGNALS, system: _promptSignals(), messages, tools:[SIGNALS_WEB_SEARCH_TOOL], maxTokens:1500, temperature:0 });
       contarYLoguearWebSearch(data, 'SIGNALS');
       for(const b of (data.content||[])){
         if(b.type==='web_search_tool_result' && Array.isArray(b.content)){
@@ -3016,13 +3045,15 @@ async function _senalesDeCuenta(card, prodCtx){
     // GUARDA DURA anti-invención: solo señales con fuente real y texto. El url se conserva SOLO si es una URL
     // REAL que web_search devolvió en ESTA búsqueda (si el modelo la inventó o no matchea, va sin link — NUNCA
     // una URL fabricada). El link es un extra; la señal con fuente+fecha vale aunque no haya link válido.
-    return arr.filter(s => s && String(s.texto||'').trim() && String(s.fuente||'').trim())
+    const out = arr.filter(s => s && String(s.texto||'').trim() && String(s.fuente||'').trim())
               .slice(0, SIGNALS_PER_CARD)
               .map(s => {
                 const u = String(s.url||'').trim();
                 const urlOk = /^https?:\/\//i.test(u) && urlsReales.has(_urlKey(u));
                 return { tipo:String(s.tipo||'').trim(), texto:String(s.texto||'').trim(), fuente:String(s.fuente||'').trim(), fecha:String(s.fecha||'').trim(), url: urlOk ? u : '' };
               });
+    if(st){ if(!st._signalsCache) st._signalsCache = new Map(); st._signalsCache.set(ck, out); }
+    return out;
   } catch(e){
     console.warn(`[SIGNALS] "${empresa}" falló: ${e.message}`);
     return [];
