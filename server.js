@@ -1764,6 +1764,63 @@ async function sourceConRetry(plan, cliente){
 
   const N_IA = parseInt(process.env.SOURCE_TO_IA || '18', 10);
   const pool = acumulado.slice(0, N_IA);
+
+  // ===== FUNDING PRE-SELECT (sobre la lista corta que ve la IA) ==============================
+  // NEGOCIO: una empresa que LEVANTÓ FINANCIAMIENTO es el mejor target (presupuesto fresco + mandato).
+  // En runs CON cuentas-ancla el funding ya viene marcado (coSenales -> senales.funding) y re-rankea en
+  // _scoreCand. En runs SIN ancla (cuentas-ancla:0) las señales de empresa recién se descubren POST-SELECT,
+  // así que el funding NO influía en QUIÉN elige la IA. Acá cerramos ese hueco: SOLO sobre el pool de ~18
+  // que va a SELECT (NUNCA el pool entero de cientos), chequeamos UNA sola señal (funding) por candidato
+  // cuya empresa NO traiga funding ya conocido. Mismo patrón resolve+match-por-id que usa el ancla/cliente.
+  // GATES DUROS: el funding re-rankea SOLO entre candidatos que YA son válidos para la cuadrícula. NO mete a
+  // un mal-fit por tener plata: el boost se SUMA al score, pero el orden de `pool` sigue gobernado por _nivel
+  // (off-vertical/frío-mal-fit AL FONDO), que domina sobre cualquier score. El funding solo reordena DENTRO
+  // del mismo nivel (fit de rol/geo/competidor ya resueltos por el ranking de sourceCandidates + descartes).
+  if(String(process.env.FUNDING_PRESELECT || 'on').toLowerCase() !== 'off'){
+    const CONC  = parseInt(process.env.SOURCE_CONCURRENCY || '4', 10);
+    const BOOST = parseInt(process.env.FUNDING_BOOST || '100', 10);   // grande para ganarle al score, NO al _nivel
+    // candidatos del pool cuya empresa NO trae funding ya conocido (ancla) y tienen empresa resoluble.
+    const aChequear = pool.filter(c => c && c.empresa && !(c.senales && c.senales.funding));
+    const yaConFunding = pool.filter(c => c.senales && c.senales.funding).length;
+    if(aChequear.length){
+      // dedupe por empresa: varias cards pueden ser de la misma empresa → 1 resolve + 1 search por empresa.
+      const porEmp = new Map();   // _empKey(empresa) -> { nombre, cands:[] }
+      for(const c of aChequear){ const k=_empKey(c.empresa); if(!k) continue; const e=porEmp.get(k)||{nombre:c.empresa,cands:[]}; e.cands.push(c); porEmp.set(k,e); }
+      const empresas = [...porEmp.values()];
+      let marcadas = 0, errores = 0;
+      // TECHO de latencia (best-effort): si el MCP se pone lento, NO arrastramos el job. Lo que no se
+      // alcanzó a chequear a tiempo simplemente no recibe boost (el display post-SELECT igual muestra sus
+      // señales reales). Tuneable por env; corta el ranking, no el reporte.
+      const CAP_MS = parseInt(process.env.FUNDING_PRESELECT_MS || '60000', 10);
+      let _capT;
+      const _cap = new Promise(r => { _capT = setTimeout(() => { console.warn(`[FUNDING] pre-SELECT cortado por techo (${CAP_MS}ms): lo no chequeado no recibe boost.`); r(); }, CAP_MS); });
+      const _trabajo = _mapLimit(empresas, CONC, async (e) => {
+        try{
+          // 1) resolver el nombre de empresa a id de Sales Navigator (match EXACTO por nombre, si no el primero).
+          const txt = String(await callMCP('resolve_sales_navigator_id', { type:'COMPANY', keywords:e.nombre, limit:5 }));
+          const ms  = [...txt.matchAll(/id="?([0-9]+)"?\s+"([^"]+)"/g)].map(m=>({ id:m[1], name:m[2] }));
+          const hit = ms.find(x => _empKey(x.name) === _empKey(e.nombre)) || ms[0];
+          if(!hit) return;
+          // 2) 1 search companies acotado a ese id con fundingEvents:true; confirmamos por ID EXACTO.
+          const co = _parseCompanies(await callMCP('search_sales_navigator_filtered', { category:'companies', profilesLimit:SOURCE_CO_LIMIT, company:{include:[hit.id]}, fundingEvents:true }));
+          if(co.some(x => String(x.id) === String(hit.id))){
+            for(const c of e.cands){ c.senales = { ...(c.senales||{}), funding:true }; }   // mismo campo que consume _scoreCand/_senalesVisibles/runSelectWrite
+            marcadas++;
+          }
+        }catch(err){ errores++; /* fallo de MCP por empresa NO rompe nada: queda sin marcar */ }
+      });
+      await Promise.race([_trabajo, _cap]);
+      clearTimeout(_capT);
+      // re-rankeo: sumamos el BOOST al score de los recién-marcados y re-ordenamos el pool por _nivel (gate duro)
+      // y DESPUÉS por score. Así el funding sube al candidato DENTRO de su nivel sin saltarse los gates.
+      for(const c of pool){ if(c.senales && c.senales.funding) c.score = (c.score||0) + BOOST; }
+      pool.sort((a,b)=> (_nivel(b)-_nivel(a)) || ((b.score||0)-(a.score||0)) || (b.cerca-a.cerca) || (b.fit-a.fit));
+      console.log(`[FUNDING] pre-SELECT: ${marcadas}/${empresas.length} empresas con funding marcadas (boost +${BOOST}); ${yaConFunding} ya venían con funding (ancla); ${errores} fallos MCP (sin marcar).`);
+    } else {
+      console.log(`[FUNDING] pre-SELECT: 0 empresas a chequear (${yaConFunding} ya con funding de ancla); nada que hacer.`);
+    }
+  }
+
   return { pool, senales };
 }
 
