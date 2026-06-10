@@ -116,6 +116,20 @@ h1.ac{color:var(--accent)}
 .sig-flag + .sig-flag{font-weight:500; color:var(--ink-2)}
 .sig-flag + .sig-flag::before{content:"●"; font-size:7px; top:4px}
 
+/* ---------- LAYOUT EDITORIAL DOS COLUMNAS (página 1) ---------- */
+/* El cuerpo crece para llenar la hoja y reparte sus bloques (no deja hueco abajo). */
+.p1-body{flex:1; display:flex; flex-direction:column; justify-content:space-between; gap:6px}
+/* Dos columnas con filete fino al medio, sin cajas. */
+.diag-grid{display:grid; grid-template-columns:1fr 1fr; align-items:start}
+.diag-grid .col{padding-right:36px; min-width:0}
+.diag-grid .col + .col{padding-right:0; padding-left:36px; border-left:1px solid var(--line)}
+/* ICP como lista etiqueta/valor (definición), no cajas. */
+.kv{display:grid; grid-template-columns:max-content 1fr; gap:9px 16px; margin-bottom:11px}
+.kv dt{font-family:var(--mono); font-size:8px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3); padding-top:2px; white-space:nowrap}
+.kv dd{font-size:11px; line-height:1.45; color:var(--ink-2)}
+/* En el cuerpo de 2 columnas, las listas no necesitan margen inferior grande. */
+.p1-body .signals, .p1-body .prio{margin-bottom:0}
+
 @page{size:A4; margin:0}
 @media print{
   html,body{background:#fff}
@@ -135,41 +149,54 @@ h1.ac{color:var(--accent)}
   <p class="h1-sub">{{h1_post}}</p>
   <p class="val-intro">Así entendimos su negocio antes de buscar. Si algo no encaja, lo ajustamos en una llamada.</p>
 
-  <div class="sec-label">Cómo lo entendimos</div>
-  <p class="lead">{{lead}}</p>
+  <div class="p1-body">
+    <div>
+      <div class="sec-label">Cómo lo entendimos</div>
+      <p class="lead">{{lead}}</p>
+    </div>
 
-  <div class="sec-label">Su cliente ideal</div>
-  <div class="icp">
-    <div class="card"><h3>Decisor / comprador</h3><p>{{icp1_desc}}</p></div>
-    <div class="card"><h3>Industrias objetivo</h3><p>{{industrias_list}}</p></div>
-    <div class="card"><h3>Geografía</h3><p>{{ribbon2_value}}</p></div>
-    <div class="card"><h3>Tamaño de empresa</h3><p>{{icp4_desc}}</p></div>
+    <div class="diag-grid">
+      <div class="col">
+        <div class="sec-label">Su cliente ideal</div>
+        <dl class="kv">
+          <dt>Decisor</dt><dd>{{icp1_desc}}</dd>
+          <dt>Industrias</dt><dd>{{industrias_list}}</dd>
+          <dt>Geografía</dt><dd>{{ribbon2_value}}</dd>
+          <dt>Tamaño</dt><dd>{{icp4_desc}}</dd>
+        </dl>
+        <p class="co-line">Modelo · <b>{{ribbon3_value}}</b>&nbsp;&nbsp;·&nbsp;&nbsp;Vertical · <b>{{ribbon1_value}}</b></p>
+      </div>
+      <div class="col">
+        <div class="sec-label">Por qué ahora</div>
+        <ul class="signals">
+          <li><b>Señal de compra.</b> {{icp2_desc}}</li>
+          <li><b>Pain primario.</b> {{icp3_desc}}</li>
+        </ul>
+        {{anti_icp_html}}
+      </div>
+    </div>
+
+    <div class="diag-grid">
+      <div class="col">
+        <div class="sec-label">Contexto de mercado</div>
+        <ul class="signals">
+          <li>{{context1}}</li>
+          <li>{{context2}}</li>
+        </ul>
+      </div>
+      <div class="col">
+        <div class="sec-label">Por dónde empezar</div>
+        <ul class="prio">
+          <li>{{prio1}}</li>
+          <li>{{prio2}}</li>
+          <li>{{prio3}}</li>
+          <li>{{prio4}}</li>
+        </ul>
+      </div>
+    </div>
+
+    {{universo_html}}
   </div>
-  <p class="co-line">Modelo · <b>{{ribbon3_value}}</b>&nbsp;&nbsp;·&nbsp;&nbsp;Vertical · <b>{{ribbon1_value}}</b></p>
-
-  <div class="sec-label">Por qué ahora</div>
-  <ul class="signals">
-    <li><b>Señal de compra.</b> {{icp2_desc}}</li>
-    <li><b>Pain primario.</b> {{icp3_desc}}</li>
-  </ul>
-
-  {{anti_icp_html}}
-
-  <div class="sec-label">Contexto de mercado</div>
-  <ul class="signals">
-    <li>{{context1}}</li>
-    <li>{{context2}}</li>
-  </ul>
-
-  <div class="sec-label">Por dónde empezar</div>
-  <ul class="prio">
-    <li>{{prio1}}</li>
-    <li>{{prio2}}</li>
-    <li>{{prio3}}</li>
-    <li>{{prio4}}</li>
-  </ul>
-
-  {{universo_html}}
 
   <footer class="page-footer"><span>Inbound-Tools.com ● Análisis de Mercado · {{empresa}}</span><span>Página 1 / {{total_pages}}</span></footer>
 </section>
