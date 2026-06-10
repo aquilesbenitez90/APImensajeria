@@ -3014,8 +3014,12 @@ app.get('/pdf/:jobId', (req, res) => {
   if (!job.pdf_base64) return res.status(422).json({ error: 'el reporte no generó PDF (no apto o sin cuentas)' });
   const buf = Buffer.from(job.pdf_base64, 'base64');
   const nombre = String(job.pdf_filename || 'Analisis de Mercado.pdf').replace(/[\\/:*?"<>|]/g, '');
+  // Los headers HTTP viajan en Latin-1, así que un filename con acentos ("Análisis") se corrompe
+  // ("Anýlisis"). RFC 5987: filename* en UTF-8 percent-encoded para navegadores modernos + un filename
+  // ASCII (sin acentos) de fallback para clientes viejos.
+  const nombreAscii = nombre.normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7E]/g, '_');
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="${nombre}"`);
+  res.setHeader('Content-Disposition', `attachment; filename="${nombreAscii}"; filename*=UTF-8''${encodeURIComponent(nombre)}`);
   res.send(buf);
 });
 
