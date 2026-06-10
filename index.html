@@ -23,8 +23,8 @@
   .wrap{flex:1; display:flex; align-items:center; justify-content:center; padding:40px 20px}
   .card{background:var(--panel); border-radius:16px; box-shadow:0 30px 80px -40px rgba(0,0,0,.5); width:100%; max-width:460px; padding:34px}
   label{font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); display:block; margin-bottom:7px}
-  input{width:100%; font-family:var(--font); font-size:15px; padding:13px 15px; border:1px solid var(--line); border-radius:10px; outline:none; transition:border .15s}
-  input:focus{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
+  input,select{width:100%; font-family:var(--font); font-size:15px; padding:13px 15px; border:1px solid var(--line); border-radius:10px; outline:none; transition:border .15s; background:#fff; -webkit-appearance:none; appearance:none}
+  input:focus,select:focus{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
   .field{margin-bottom:18px}
   button{width:100%; font-family:var(--font); font-size:15px; font-weight:600; color:#fff; background:var(--ink); border:none; border-radius:10px; padding:14px; cursor:pointer; transition:opacity .15s}
   button:hover{opacity:.88}
@@ -68,6 +68,15 @@
           <label>Empresa a analizar</label>
           <input id="dominio" type="text" placeholder="linkedin.com/company/robotic-crew" autocomplete="off">
           <div class="hint">Pegá el <b>link de LinkedIn</b> de la empresa (más confiable). También funciona el dominio, ej: brandtrack.fm</div>
+        </div>
+        <div class="field">
+          <label>Idioma del documento</label>
+          <select id="idioma" autocomplete="off">
+            <option value="es" selected>Español</option>
+            <option value="en">Inglés</option>
+            <option value="pt">Portugués</option>
+          </select>
+          <div class="hint">El idioma del reporte. El mensaje a cada lead se adapta al idioma de su país automáticamente.</div>
         </div>
         <div class="field">
           <label>Clave de acceso</label>
@@ -158,6 +167,7 @@ function mostrarOk(jobId, empresa){
 async function generar(){
   const dominio = normDom($('dominio').value);
   const clave = $('clave').value.trim();
+  const idioma = ($('idioma') && $('idioma').value) || 'es';
   $('err').textContent = '';
   if(!dominio){ $('err').textContent = 'Pegá el link de LinkedIn o el dominio de la empresa.'; return; }
   if(!clave){ $('err').textContent = 'Ingresá la clave de acceso.'; return; }
@@ -167,7 +177,7 @@ async function generar(){
     const r = await fetch('/generar', {
       method:'POST',
       headers:{ 'Content-Type':'application/json', 'x-landing-key': clave },
-      body: JSON.stringify({ dominio })
+      body: JSON.stringify({ dominio, idioma })
     });
     const j = await r.json().catch(()=>({}));
     if(r.status === 401){ $('err').textContent = 'Clave incorrecta.'; return; }

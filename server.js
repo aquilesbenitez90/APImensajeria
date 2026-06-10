@@ -300,6 +300,8 @@ function _nuevoStats() {
     // CACHE POR JOB de señales de compra por empresa (_senalesDeCuenta). Evita re-buscar la misma empresa
     // cuando una ronda de fix re-arma cards del mismo nombre. Lazy (Map) en _senalesDeCuenta.
     _signalsCache: null,
+    // Idioma del DOCUMENTO (lo pisa el endpoint con el valor elegido en la landing). Default español.
+    idiomaDoc: 'es',
     total:  { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
     stages: {
       gen:     { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
@@ -313,6 +315,32 @@ function _nuevoStats() {
 // devuelve uno efímero para no romper el conteo.
 function _stats()     { return _statsALS.getStore() || _nuevoStats(); }
 function _setStage(s) { const st = _statsALS.getStore(); if (st) st.currentStage = s; }
+
+// ---------------------------------------------------------------------------
+// IDIOMA — dos ejes INDEPENDIENTES:
+//   1) DOCUMENTO: lo elige el usuario en la landing (manual). Default 'es' → si no se elige, NADA cambia.
+//      Vive en el store ALS por-job (_idiomaDoc) para no pasarlo por todas las firmas del pipeline.
+//   2) HOOK: por PAÍS de cada lead (_idiomaHookDeLoc). El hook es el mensaje que se le ENVÍA a esa persona,
+//      así que va en SU idioma, que puede diferir del documento. Proxy ~85-90% (país != idioma garantizado).
+//      Sin profileLanguage confiable en el MCP, la ubicación es la mejor señal disponible.
+// ---------------------------------------------------------------------------
+const _IDIOMAS_DOC   = { es: 'español neutro latinoamericano', en: 'inglés (English, Estados Unidos)', pt: 'portugués (português do Brasil)' };
+const _TRATO_FORMAL  = { es: 'trato formal de "usted" (sin voseo ni modismos)', en: 'professional second person ("you")', pt: 'tratamento formal ("você")' };
+const _idiomaCode    = (c) => { const k = String(c||'').trim().toLowerCase().slice(0,2); return _IDIOMAS_DOC[k] ? k : 'es'; };
+const _idiomaNombre  = (c) => _IDIOMAS_DOC[_idiomaCode(c)];
+function _idiomaDoc() { const st = _statsALS.getStore(); return _idiomaCode(st && st.idiomaDoc); }
+// Idioma del HOOK según el país que aparece en la ubicación del lead. null = país no determinado → cae al idioma del documento.
+const _PAISES_HOOK_EN = ['estados unidos','united states','usa','eeuu','ee uu','canada','reino unido','united kingdom','inglaterra','escocia','irlanda','ireland','australia','nueva zelanda','new zealand'];
+const _PAISES_HOOK_PT = ['brasil','brazil','portugal'];
+const _HOOK_LANG_LABEL = { es: 'español', en: 'inglés', pt: 'portugués' };
+function _idiomaHookDeLoc(loc){
+  const n = _norm(loc || '');
+  if(!n) return null;
+  if(_PAISES_HOOK_EN.some(p => n.includes(_norm(p)))) return 'en';
+  if(_PAISES_HOOK_PT.some(p => n.includes(_norm(p)))) return 'pt';
+  if(_PAISES.some(p => n.includes(p))) return 'es';   // _PAISES = LatAm + España (normalizado)
+  return null;
+}
 
 // Tarifas Anthropic por millón de tokens (input/output/cache_write/cache_read) + fee de web_search ($10/1000 req).
 const RATES_SONNET = { in: 3, out: 15, cw: 3.75, cr: 0.30, ws: 10000 };
@@ -2139,7 +2167,7 @@ async function sourceConRetry(plan, cliente){
 }
 
 // FASE 1 — IA: research + ICP + página 1. Prompt parametrizado por N.
-function _promptPlan(N){ return `# IBT GTM — Fase PLAN (research + ICP + página 1)
+function _promptPlan(N){ const _id = _idiomaDoc(); return `# IBT GTM — Fase PLAN (research + ICP + página 1)
 
 Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un prospecto. NO elegís personas todavía: eso lo hace el sistema. Vos investigás al cliente y definís a QUIÉN hay que buscar.
 
@@ -2171,7 +2199,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   REGLA ANTI FALSO NEGATIVO (innegociable): si el research es pobre o dudás, redactá el comprador_ideal de forma INCLUSIVA (qué empresas SÍ compran) y agregá la EXCLUSIÓN SOLO cuando el research la respalde; nunca inventes una exclusión que deje fuera compradores legítimos. Es razonamiento de negocio aproximado, no una verdad dura: marcá el anti-patrón cuando es claramente el caso, no por sospecha. Español neutro, sin guiones.
 - TÍTULO (H1): el CLIENTE va PRIMERO y resaltado. h1_pre = "" (vacío); h1_company = nombre del cliente (lo resaltado, va primero); h1_post = "${N} clientes potenciales en [País o región]" (es un SUBTÍTULO que va DEBAJO del nombre; SIN "·" ni guion al principio). PROHIBIDO "para escalar".
 - TÍTULO == GEOGRAFÍA SOURCEADA (REGLA DURA, defecto grave que contradice el reporte): el/los país(es) que nombra "h1_post" tienen que ser EXACTAMENTE los de "geografias", con "geografia" (el principal, geografias[0]) SIEMPRE incluido y nombrado PRIMERO. El título refleja DÓNDE se va a buscar de verdad, y el sistema busca en el principal: si el título promete un país y el reporte entrega otro, el reporte se contradice a sí mismo (caso real: título "clientes potenciales en España" mientras toda la página 1 y el sourcing hablaban de Argentina = principal). PROHIBIDO que h1_post nombre un país que NO esté en "geografias". PROHIBIDO omitir el país principal de h1_post. PROHIBIDO nombrar en h1_post un país suelto distinto del principal. Si el cliente opera en varios, h1_post nombra ESE SET (los de "geografias", con el principal primero), no uno solo distinto del principal. Misma regla para cualquier país que nombres en "lead" o "proof": solo países de "geografias". CIERRE OBLIGATORIO: antes de devolver, verificá que el país (o set de países) de h1_post sea IGUAL a "geografias", con el principal (geografias[0]) incluido y primero; si no coincide, corregí h1_post (no la geografia) antes de cerrar.
-- IDIOMA: TODO en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.
+- IDIOMA: TODO el contenido del reporte (página 1: lead, icp, context, apertura, prioridades, etc.) va en ${_idiomaNombre(_id)}, ${_TRATO_FORMAL[_id]}.${_id==='es'?' Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.':' Escribí de forma natural y profesional en ese idioma, no una traducción literal del español.'}
 - SIN GUIONES (importante): NUNCA uses guiones largos (—) ni guiones (-) como conectores o para incisos, en NINGÚN texto (lead, proof, context, apertura, icp, prioridades). Reemplazalos por comas, paréntesis o dos puntos. Ej: en vez de "servicios técnicos —plomería, electricidad— con cobertura", escribí "servicios técnicos (plomería, electricidad) con cobertura". El texto tiene que sonar humano, no de IA.
 - GEOGRAFÍA (CRÍTICO): "geografia" = país del cliente (prioritario). "geografias" = país del cliente PRIMERO + SOLO los demás países donde el cliente HOY ya puede prestar el servicio de verdad (sus países de operación actuales). PROHIBIDO mercados de expansión futura o donde el cliente todavía NO opera. El sistema prioriza fuerte el país del cliente; los demás solo rellenan.
 - PAÍS DEL CLIENTE, NO DE LA AGENCIA (REGLA DURA, defecto recurrente): "geografia" y "geografias" son el/los país(es) donde opera el CLIENTE de ESTE reporte, deducidos de SU propio research (web, dominio, sede, idioma del sitio, clientes, TLD). NUNCA pongas Argentina (ni ningún otro país) "por defecto" ni porque sea el país de quien encarga el reporte: este servicio lo corre una agencia argentina, pero ESO ES IRRELEVANTE para la geografía del cliente. Ej: una empresa con sede/operación en Estados Unidos (aunque tenga dominio .com) → geografia="Estados Unidos", JAMÁS "Argentina". Si el research no deja claro el país, usá el MÁS RESPALDADO por las señales (sede, idioma del sitio, clientes, TLD), nunca Argentina por descarte. NO inventes países: si solo hay evidencia de UN país, geografias = [ese país] y geografia = ese país.
@@ -2266,7 +2294,7 @@ async function runPlanConRetry(args){
 }
 
 // FASE 3 — IA: elige + escribe. Prompt parametrizado por (pedir, usar).
-function _promptSelect(pedir, usar){ return `# IBT GTM — Fase SELECT (elegir + escribir)
+function _promptSelect(pedir, usar){ const _id = _idiomaDoc(); return `# IBT GTM — Fase SELECT (elegir + escribir)
 
 Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo textual, empresa, país y grado de conexión) y el contexto del cliente. Elegís los ${pedir} MEJORES decisores EN ORDEN de prioridad (el mejor primero) y escribís, para cada uno, un ángulo y un hook. El sistema usa los primeros ${usar} válidos.
 
@@ -2306,7 +2334,7 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 - DIVERSIDAD ESTRUCTURAL OBLIGATORIA DE HOOKS (el defecto MÁS frecuente: las cards salen con el mismo esqueleto): los hooks tienen que usar ${pedir} ABERTURAS DISTINTAS de este MENÚ, una forma diferente por card. (1) OBSERVACIÓN concreta sobre su empresa o su cargo ("Clara, vi que en [empresa] el área de [X] viene creciendo..."); (2) PREGUNTA DIRECTA sobre una decisión propia de ESE rol ("Marcos, cómo están resolviendo hoy [decisión del rol] en [empresa]"); (3) AFIRMACIÓN que conecta lo que hace el cliente con lo que esa persona maneja, SIN pregunta ("Lucía, su rol en [empresa] toca de lleno [lo que ofrece el cliente]."). PROHIBIDO que DOS hooks compartan el mismo molde sintáctico: ni los ${pedir} terminando en "¿...?", ni los ${pedir} con la plantilla "[Nombre], en [empresa] el [X] es [adj]", ni los ${pedir} arrancando con la misma palabra después del nombre. Si al releerlos dos suenan calcados, reescribí uno con otra abertura del menú.
 - PROHIBIDO EL CONDICIONAL VACÍO (en ángulo Y hook): nada de "puede ser relevante si...", "podría necesitar...", "pueden requerir...", "puede ser útil...", "quizás le interese", "tal vez le sirva". Ese hedging suena a IA y no dice nada. Si NO tenés una señal concreta de esa persona, NO te la inventes (regla de anti-invención) PERO TAMPOCO hedgees: afirmá EN PRESENTE el punto de contacto REAL entre lo que hace ese rol y lo que el cliente OFRECE (ej. no "como Head of Ops quizás necesite cobertura técnica", sí "como Head of Ops usted gestiona la red de mantenimiento que [cliente] cubre"). Cualitativo, presente, sin "si/podría/quizás".
 - NUNCA menciones el grado de conexión (1er/2do/3er grado) ni inventes datos que no estén en lo que te paso.
-- IDIOMA: ángulo y hook en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos.
+- IDIOMA (DOS idiomas distintos, OJO): el ÁNGULO y todo lo demás van en ${_idiomaNombre(_id)} (${_TRATO_FORMAL[_id]}). EXCEPCIÓN, el HOOK: cada hook va en el idioma que indica SU candidato al FINAL de su línea de la lista ("HOOK EN: inglés/portugués/español"), porque el hook es el mensaje que se le ENVÍA a ESA persona y tiene que estar en SU idioma, que puede diferir del documento (ej. documento en español pero el lead está en Estados Unidos, su hook va en inglés). Si la línea NO indica idioma de hook, ese hook va en ${_idiomaNombre(_id)}. El trato formal y la regla SIN GUIONES valen en cualquier idioma; en inglés/portugués escribí natural y profesional, no una traducción literal. SIGNOS DE PUNTUACIÓN POR IDIOMA: los signos de apertura "¿" y "¡" son SOLO del español; en inglés y portugués una pregunta abre directo y cierra con "?" (correcto: "Marcus, how are you handling...?"; NUNCA "¿...?"). En español sí van apareados (¿...?).
 - Texto plano: NADA de markdown (sin **negritas**, sin asteriscos). Solo el objeto JSON.
 - SIN GUIONES: NUNCA uses guiones largos (—) ni guiones (-) como conectores o incisos en el ángulo ni en el hook. Usá comas, paréntesis o dos puntos. El texto tiene que sonar a persona, no a IA. OJO con el guion PEGADO a una palabra con espacio de un solo lado (el patrón que más se escapa): "su rol -clave en operaciones" o "el área- de mantenimiento" también están PROHIBIDOS; reescribilos con coma o paréntesis ("su rol, clave en operaciones"). El guion SOLO es válido dentro de compuestos legítimos sin espacios (e-commerce, C-level, co-fundador, start-up).
 - ESTILO HUMANO (sutil): los hooks se mandan como si los escribiera una persona real, no una IA impecable. Está bien (y preferible) que ALGÚN hook corto AFIRMATIVO no termine en punto, como cuando uno escribe rápido por chat. Que sea SUTIL y OCASIONAL: a lo sumo UN detalle así, y SOLO en una afirmación. OJO, ESTO NO ES UNA EXCEPCIÓN A "HOOK COMPLETO Y CERRADO": la oración SIEMPRE va entera (nunca cortada a mitad de frase) y una PREGUNTA SIEMPRE cierra con "?" (abre "¿" y cierra "?", apareados); el único relajo permitido es omitir el punto final de una afirmación corta, jamás dejar una frase trunca ni una pregunta sin "?". PROHIBIDO errores de ortografía, palabras mal escritas o mayúsculas raras. El mensaje tiene que verse profesional y creíble, solo que humano.
@@ -2334,6 +2362,9 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
     const ctx = (p.headRich && p.headRich!==p.head) ? ` | perfil: ${p.headRich}` : '';
     const loc = p.loc ? ` | ${p.loc}` : '';
     const home = p.cerca ? ' ★(país del cliente)' : '';
+    // Idioma del HOOK por país de ESTE lead (el mensaje se le envía a él; va en SU idioma, no en el del documento).
+    const _hl = _idiomaHookDeLoc(p.loc);
+    const hookLang = _hl ? ` · HOOK EN: ${_HOOK_LANG_LABEL[_hl]}` : '';
     // SEÑAL DE COMPRA (dato real del MCP, NO inventado): marcador para que SELECT pueda tejerlo en el ángulo.
     // Marcadores LITERALES (sin monto/fecha: el detalle datado llega en otra fase con web_search):
     //   " · SEÑAL: asumió el rol hace poco"            (recienAsumio, por persona)
@@ -2349,7 +2380,7 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
       + `${s.leadership?' · SEÑAL: cambio de liderazgo en la empresa':''}`
       + `${s.growth?' · SEÑAL: la empresa está creciendo en plantilla':''}`
       + `${p.posts>0?' · activo en LinkedIn':''}`;
-    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}${senal}`;
+    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}${senal}${hookLang}`;
   }).join('\n');
   const _pisoTam = (plan._plan && parseInt(plan._plan.tamano_min||0,10)) || 0;
   const vertAlta = (plan._plan && Array.isArray(plan._plan.industrias) ? plan._plan.industrias.filter(Boolean) : []);
@@ -3168,8 +3199,9 @@ async function enriquecerSenalesEmpresa(data){
   });
 }
 
-async function procesar(jobId, { email, dominio, empresa, nombre, profileId, evalMode }) {
+async function procesar(jobId, { email, dominio, empresa, nombre, profileId, evalMode, idioma }) {
   return _statsALS.run(_nuevoStats(), async () => {
+  const _st0 = _statsALS.getStore(); if (_st0) _st0.idiomaDoc = _idiomaCode(idioma);   // idioma del DOCUMENTO (manual desde la landing)
   try {
     console.log(`\n========== Job ${jobId} - Inicio (${NUM_CUENTAS} cuentas) ==========`);
     console.log(`Empresa: ${empresa} | Email: ${email} | Dominio: ${dominio} | profileId: ${profileId ?? '-'}`);
@@ -3380,7 +3412,7 @@ app.post('/generar', (req, res) => {
   if (process.env.LANDING_KEY && req.header('x-landing-key') !== process.env.LANDING_KEY) {
     return res.status(401).json({ error: 'Clave invalida' });
   }
-  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug } = req.body || {};
+  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug, idioma } = req.body || {};
   if (!empresa && !dominio && !profileId) {
     return res.status(400).json({ error: 'Falta empresa, dominio o profileId' });
   }
@@ -3421,7 +3453,7 @@ app.post('/generar', (req, res) => {
   });
 
   Promise.race([
-    procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug }),
+    procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug, idioma }),
     timeoutGlobal
   ])
   // CATCH DEFENSIVO: procesar() maneja sus errores internamente (try/catch -> status:'error'),
@@ -3465,10 +3497,11 @@ app.get('/pdf/:jobId', (req, res) => {
 });
 
 app.post('/generar-reporte', async (req, res) => {
-  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug } = req.body || {};
+  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug, idioma } = req.body || {};
   if (!email || !dominio) return res.status(400).json({ error: 'email y dominio son obligatorios' });
 
   await _statsALS.run(_nuevoStats(), async () => {
+  const _st0 = _statsALS.getStore(); if (_st0) _st0.idiomaDoc = _idiomaCode(idioma);   // idioma del DOCUMENTO (manual desde la landing)
   try {
     const cliente = await resolverCliente({ profileId, dominio, empresa: empresa || dominio });
     const empresaFinal = cliente.empresa || empresa || dominio;
@@ -3669,5 +3702,6 @@ module.exports = {
   _rolRelevante, _rolRelevanteLaxo, _verticalesExcluir, _matchVerticalExcluir, _candBueno, _candViable,
   _cardsFitBueno, _resolverGateCalidez, sourceConRetry, runPlanConRetry,
   _saneaCargo, _dedupUbicacion, enriquecerSenales, _senalesDeCuenta,
-  callREST, _parsePeople, _parseCompanies
+  callREST, _parsePeople, _parseCompanies,
+  _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS
 };
