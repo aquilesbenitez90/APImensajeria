@@ -148,6 +148,12 @@ function flatten(data) {
   (data.apertura || []).forEach((c, i) => { f[`apertura${i + 1}`] = c; });
   (data.prioridades || []).forEach((c, i) => { f[`prio${i + 1}`] = c; });
 
+  // HOJA DE VALIDACIÓN (página 1): industrias objetivo como lista, derivado del ICP interno (_plan).
+  // El anti-ICP ("a quién NO apuntamos") se inyecta como sección completa en renderReport ({{anti_icp_html}}),
+  // para no dejar un encabezado con cuerpo en blanco cuando el PLAN no trae verticales_excluir.
+  const _icp = (data && data._plan) || {};
+  f['industrias_list'] = Array.isArray(_icp.industrias) ? _icp.industrias.filter(Boolean).join(' · ') : '';
+
   (data.cards || []).forEach((c, i) => {
     const n = i + 1;
     // saneo invisibles (zero-width, etc.) que rompen el link aunque no se vean
@@ -221,6 +227,22 @@ ${cardsHtml}
   html = html.split('{{total_pages}}').join(String(totalPages));
   // Señales de mercado reales (inyección CRUDA, es HTML). Vacío si no hay señales.
   html = html.split('{{senales_html}}').join(_senalesHtml(data.senales));
+  // PUENTE DE VENTA (universo -> muestra): "Identificamos N decisores con este perfil; estos son los 3
+  // prioritarios". El N es el conteo REAL de la búsqueda (data.senales[0].value), no inventado. Convierte
+  // el diagnóstico en inventario (las 3 cards = muestra de algo más grande). Vacío si no hay conteo.
+  const _s0 = (Array.isArray(data.senales) ? data.senales.find(s => s && String(s.value == null ? '' : s.value).trim()) : null);
+  const _geoU = _esc((data.ribbon && data.ribbon[1] && data.ribbon[1].value) || '');
+  const universoHtml = _s0
+    ? `  <p class="puente">Encontramos <b>${_esc(_s0.value)}</b> decisores que encajan con este perfil${_geoU ? (' en ' + _geoU) : ''}. En esta ocasión, te mostramos ${cards.length} potenciales clientes.</p>`
+    : '';
+  html = html.split('{{universo_html}}').join(universoHtml);
+  // A QUIÉN NO APUNTAMOS (anti-ICP): sección COMPLETA o vacía si el PLAN no trae verticales_excluir
+  // (no dejamos un encabezado con cuerpo en blanco). Datos del ICP interno (_plan).
+  const _excl = (data && data._plan && Array.isArray(data._plan.verticales_excluir)) ? data._plan.verticales_excluir.filter(Boolean) : [];
+  const antiIcpHtml = _excl.length
+    ? `  <div class="sec-label">A quién no apuntamos</div>\n  <p class="anti">${_esc(_excl.join(' · '))}</p>`
+    : '';
+  html = html.split('{{anti_icp_html}}').join(antiIcpHtml);
 
   // Logo del repo: pisa el base64 embebido en TODAS las páginas (flag g) si el archivo existe.
   const logo = _logoDataUri();

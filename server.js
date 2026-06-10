@@ -2692,7 +2692,9 @@ function armarReporte(plan, seleccion, pool, senales){
   // SEÑALES DE MERCADO: datos REALES del MCP (sourceCandidates), no generados por IA. Se pegan tal cual.
   // Si el sourcing no logró ninguna señal real, queda [] (el template/render decide cómo mostrarlo).
   const senalesReales = Array.isArray(senales) ? senales.filter(s => s && s.label && (s.value!=null && String(s.value).trim()!=='')) : [];
-  return { ...base, cards, senales: senalesReales };
+  // _plan vuelve adjunto (no se publica en página 1 ni en cards): render.js lo usa para la hoja de
+  // diagnóstico (industrias_list + anti_icp_html). Belt en el punto donde se arma data → sirve a ambos endpoints.
+  return { ...base, cards, senales: senalesReales, _plan };
 }
 
 function _cardCompleta(c){

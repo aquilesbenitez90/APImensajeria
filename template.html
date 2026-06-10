@@ -44,6 +44,10 @@ h1.ac{color:var(--accent)}
 .lead{font-size:11px; line-height:1.55; color:var(--ink-2); margin-bottom:6px; max-width:172mm}
 .lead b{color:var(--ink); font-weight:600}
 .respaldo{font-size:10px; line-height:1.5; color:var(--ink-3); margin-bottom:12px; max-width:172mm}
+.val-intro{font-size:10.5px; line-height:1.5; color:var(--ink-3); font-style:italic; margin-bottom:14px; max-width:172mm}
+.anti{font-size:11px; line-height:1.5; color:var(--ink-2); margin-bottom:13px; max-width:172mm}
+.puente{font-size:12px; line-height:1.5; color:var(--ink); margin-top:14px; padding-top:12px; border-top:1px solid var(--line); max-width:172mm}
+.puente b{color:var(--accent); font-weight:700}
 .respaldo b{color:var(--accent); font-weight:600; font-family:var(--mono); font-size:7.5px; letter-spacing:.12em; text-transform:uppercase}
 
 /* ---------- STATS (sin cajas, fila con reglas) ---------- */
@@ -129,32 +133,33 @@ h1.ac{color:var(--accent)}
   <div class="eyebrow">{{eyebrow}}</div>
   <h1 class="ac">{{h1_company}}</h1>
   <p class="h1-sub">{{h1_post}}</p>
-  <p class="co-line">{{ribbon1_label}} · <b>{{ribbon1_value}}</b>&nbsp;&nbsp;·&nbsp;&nbsp;{{ribbon2_label}} · <b>{{ribbon2_value}}</b>&nbsp;&nbsp;·&nbsp;&nbsp;{{ribbon3_label}} · <b>{{ribbon3_value}}</b></p>
+  <p class="val-intro">Así entendimos su negocio antes de buscar. Si algo no encaja, lo ajustamos en una llamada.</p>
+
+  <div class="sec-label">Cómo lo entendimos</div>
   <p class="lead">{{lead}}</p>
-  <p class="respaldo"><b>Respaldo</b> {{proof}}</p>
 
-  <div class="stats">
-    <div class="stat"><div class="num">{{stat1_num}}</div><div class="lbl">{{stat1_label}}</div></div>
-    <div class="stat"><div class="num"><span class="ac">{{stat2_num}}</span></div><div class="lbl">{{stat2_label}}</div></div>
-    <div class="stat"><div class="num">{{stat3_num}}</div><div class="lbl">{{stat3_label}}</div></div>
-    <div class="stat"><div class="num">{{stat4_num}}</div><div class="lbl">{{stat4_label}}</div></div>
+  <div class="sec-label">Su cliente ideal</div>
+  <div class="icp">
+    <div class="card"><h3>Decisor / comprador</h3><p>{{icp1_desc}}</p></div>
+    <div class="card"><h3>Industrias objetivo</h3><p>{{industrias_list}}</p></div>
+    <div class="card"><h3>Geografía</h3><p>{{ribbon2_value}}</p></div>
+    <div class="card"><h3>Tamaño de empresa</h3><p>{{icp4_desc}}</p></div>
   </div>
+  <p class="co-line">Modelo · <b>{{ribbon3_value}}</b>&nbsp;&nbsp;·&nbsp;&nbsp;Vertical · <b>{{ribbon1_value}}</b></p>
 
-  <div class="sec-label">Señales de mercado</div>
-  {{senales_html}}
+  <div class="sec-label">Por qué ahora</div>
+  <ul class="signals">
+    <li><b>Señal de compra.</b> {{icp2_desc}}</li>
+    <li><b>Pain primario.</b> {{icp3_desc}}</li>
+  </ul>
+
+  {{anti_icp_html}}
+
+  <div class="sec-label">Contexto de mercado</div>
   <ul class="signals">
     <li>{{context1}}</li>
     <li>{{context2}}</li>
-    <li>{{context3}}</li>
   </ul>
-
-  <div class="sec-label">Perfil del cliente ideal</div>
-  <div class="icp">
-    <div class="card"><h3>{{icp1_title}}</h3><p>{{icp1_desc}}</p></div>
-    <div class="card"><h3>{{icp2_title}}</h3><p>{{icp2_desc}}</p></div>
-    <div class="card"><h3>{{icp3_title}}</h3><p>{{icp3_desc}}</p></div>
-    <div class="card"><h3>{{icp4_title}}</h3><p>{{icp4_desc}}</p></div>
-  </div>
 
   <div class="sec-label">Por dónde empezar</div>
   <ul class="prio">
@@ -163,6 +168,8 @@ h1.ac{color:var(--accent)}
     <li>{{prio3}}</li>
     <li>{{prio4}}</li>
   </ul>
+
+  {{universo_html}}
 
   <footer class="page-footer"><span>Inbound-Tools.com ● Análisis de Mercado · {{empresa}}</span><span>Página 1 / {{total_pages}}</span></footer>
 </section>
