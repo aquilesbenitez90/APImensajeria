@@ -43,6 +43,9 @@ h1.ac{color:var(--accent)}
 .co-line b{color:var(--ink-2); font-weight:600}
 .lead{font-size:11px; line-height:1.55; color:var(--ink-2); margin-bottom:6px; max-width:172mm}
 .lead b{color:var(--ink); font-weight:600}
+/* Apertura del documento (lo primero que se lee): un toque más grande y oscuro, es el gancho. */
+.lead.intro{font-size:12.5px; line-height:1.6; color:var(--ink); margin-bottom:0; max-width:none}
+.lead.intro b{color:var(--accent)}
 .respaldo{font-size:10px; line-height:1.5; color:var(--ink-3); margin-bottom:12px; max-width:172mm}
 .val-intro{font-size:10.5px; line-height:1.5; color:var(--ink-3); font-style:italic; margin-bottom:14px; max-width:172mm}
 .anti{font-size:11px; line-height:1.5; color:var(--ink-2); margin-bottom:13px; max-width:172mm}
@@ -147,13 +150,8 @@ h1.ac{color:var(--accent)}
   <div class="eyebrow">{{eyebrow}}</div>
   <h1 class="ac">{{h1_company}}</h1>
   <p class="h1-sub">{{h1_post}}</p>
-  <p class="val-intro">{{lbl_val_intro}}</p>
-
   <div class="p1-body">
-    <div>
-      <div class="sec-label">{{lbl_como}}</div>
-      <p class="lead">{{lead}}</p>
-    </div>
+    <p class="lead intro">{{lead}}</p>
 
     <div class="diag-grid">
       <div class="col">
