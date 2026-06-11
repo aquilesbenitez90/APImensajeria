@@ -2168,7 +2168,10 @@ async function sourceConRetry(plan, cliente){
 
 // FASE 1 — IA: research + ICP + página 1. Prompt parametrizado por N.
 function _promptPlan(N){ const _id = _idiomaDoc(); return `# IBT GTM — Fase PLAN (research + ICP + página 1)
-
+${_id!=='es' ? `
+### ⚠️ IDIOMA DE SALIDA = ${_idiomaNombre(_id)} — REGLA #1, POR ENCIMA DE TODAS
+Este prompt está escrito en español, pero la SALIDA NO. Escribí el VALOR de CADA campo de texto del JSON en ${_idiomaNombre(_id)}: eyebrow, h1_post, lead, icp[].desc, context, apertura, prioridades, ribbon[].value, y también geografia, geografias, industrias y comprador_ideal del _plan, incluidos los NOMBRES DE PAÍS ("Estados Unidos" → su nombre en ${_idiomaNombre(_id)}). PROHIBIDO mezclar idiomas: ni entre campos ni a mitad de una oración. Cualquier frase de ejemplo que veas abajo en español es SOLO para indicarte el contenido: traducila al idioma de salida, NO la copies literal.
+` : ''}
 Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un prospecto. NO elegís personas todavía: eso lo hace el sistema. Vos investigás al cliente y definís a QUIÉN hay que buscar.
 
 ## Qué hacer
@@ -2231,7 +2234,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "h1_pre": "",
   "h1_company": "Nombre del cliente (resaltado, va primero)",
   "h1_post": "${N} clientes potenciales en [País o región]",
-  "lead": "APERTURA del documento (lo PRIMERO que lee el cliente), 3 oraciones cortas, PLANA y HUMANA (como le hablás a un cliente real, NADA corporativo ni jerga). Estructura: (1) '[Cliente] es una empresa que [qué hace, concreto y claro, SIN nombres de marcas/clientes ni tecnicismos]'; (2) 'Sobre esa base armamos este diagnóstico, para que sepas cuándo y cómo contactar a tus clientes potenciales'; (3) 'Te compartimos ${N} de los que encontramos, con el mensaje listo para escribirles'. Redactá (2) y (3) naturales pero SIN cambiar el número ${N} ni inventar métricas. Tratá al cliente de TÚ (cercano y directo: 'sepas', 'te compartimos', 'tus'), sin voseo argentino ni 'usted'. NO menciones tecnología, herramientas ni 'nuestra plataforma'.",
+  "lead": "APERTURA del documento (lo PRIMERO que lee el cliente), 3 oraciones cortas, PLANA y HUMANA (como le hablás a un cliente real, NADA corporativo ni jerga). Estructura (escribí las 3 en el idioma de salida; lo que sigue describe el CONTENIDO, no es texto a copiar): (1) que [Cliente] es una empresa que hace [qué hace, concreto y claro, SIN nombres de marcas/clientes ni tecnicismos]; (2) que, sobre esa base, armaron este diagnóstico para que el cliente sepa cuándo y cómo contactar a sus clientes potenciales; (3) que le comparten ${N} de los que encontraron, con el mensaje listo para escribirles. SIN cambiar el número ${N} ni inventar métricas. Trato directo y cercano al cliente (en español: de TÚ, 'sepas/te compartimos/tus', sin voseo ni 'usted'). NO menciones tecnología, herramientas ni 'nuestra plataforma'.",
   "proof": "El proof point / origen del cliente (1 oración).",
   "ribbon": [ {"label":"Vertical","value":"..."}, {"label":"País","value":"..."}, {"label":"Modelo","value":"..."} ],
   "stats": [ {"num":"...","label":"..."}, {"num":"${N}","label":"Cuentas priorizadas"}, {"num":"...","label":"..."}, {"num":"...","label":"..."} ],
@@ -2296,6 +2299,8 @@ async function runPlanConRetry(args){
 
 // FASE 3 — IA: elige + escribe. Prompt parametrizado por (pedir, usar).
 function _promptSelect(pedir, usar){ const _id = _idiomaDoc(); return `# IBT GTM — Fase SELECT (elegir + escribir)
+${_id!=='es' ? `### ⚠️ IDIOMA: el "angulo" va en ${_idiomaNombre(_id)} (este prompt está en español, la salida no: traducí, no copies frases literales). El "hook" va en el idioma que marca CADA candidato al final de su línea ("HOOK EN: ..."), que puede diferir. NO mezcles idiomas dentro de un campo.
+` : ''}
 
 Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo textual, empresa, país y grado de conexión) y el contexto del cliente. Elegís los ${pedir} MEJORES decisores EN ORDEN de prioridad (el mejor primero) y escribís, para cada uno, un ángulo y un hook. El sistema usa los primeros ${usar} válidos.
 
@@ -3023,8 +3028,9 @@ function _nombreArchivoPDF(empresa){
 // Usa un modelo BARATO (Haiku) porque es EXTRACCIÓN, no juicio. Anti-invención DURO: si no hay señal con fuente
 // real, NO la inventa (devuelve menos o ninguna). Muta data.cards[i].senales. No rompe el pipeline: error o
 // timeout por card -> esa card queda sin señales. No-op si SIGNALS_MODE != 'on'.
-function _promptSignals(){ return `# IBT GTM — Señales de compra (extracción CON fuente)
-
+function _promptSignals(){ const _id = _idiomaDoc(); return `# IBT GTM — Señales de compra (extracción CON fuente)
+${_id!=='es' ? `IDIOMA DE SALIDA = ${_idiomaNombre(_id)}: escribí "texto" y "tipo" en ${_idiomaNombre(_id)}. Este prompt está en español pero la salida NO; traducí, no copies.
+` : ''}
 Te paso UNA empresa y el producto que un proveedor le quiere vender. Buscá en web 2 o 3 SEÑALES DE COMPRA recientes, públicas y VERIFICABLES de esa empresa: hechos que muestren que está en movimiento y podría comprar ahora (rondas de inversión, expansión o nuevas sucursales/países, cambios de ejecutivos relevantes, lanzamientos de producto, alianzas, resultados o hitos).
 
 ## Reglas (anti-invención, INNEGOCIABLE)
@@ -3032,8 +3038,8 @@ Te paso UNA empresa y el producto que un proveedor le quiere vender. Buscá en w
 - PROHIBIDO inventar cifras, fechas, fuentes, URLs o hechos. Si no encontrás una señal con respaldo, devolvé MENOS señales o ninguna. Una señal real vale más que tres inventadas.
 - Preferí señales RECIENTES (últimos ~12 meses) y con fecha. Una señal vieja sin recencia NO sirve como "por qué ahora".
 - La señal tiene que ser RELEVANTE para por qué esa empresa compraría el producto del proveedor, no un dato al azar.
-- "texto": 1 oración corta y concreta (máx 130 caracteres), español neutro, trato de usted, SIN guiones (— ni -).
-- "tipo": una palabra entre inversion, expansion, ejecutivo, producto, alianza, hito.
+- "texto": 1 oración corta y concreta (máx 130 caracteres), en el IDIOMA DE SALIDA, neutro, SIN guiones (— ni -).
+- "tipo": una palabra que clasifique la señal (inversión, expansión, ejecutivo, producto, alianza, hito), EN EL IDIOMA DE SALIDA.
 - No repitas la misma señal redactada distinto.
 
 ## Salida — SOLO JSON (sin texto ni markdown alrededor)
