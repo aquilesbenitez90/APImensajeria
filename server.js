@@ -2750,7 +2750,7 @@ function armarReporte(plan, seleccion, pool, senales){
   const senalesReales = Array.isArray(senales) ? senales.filter(s => s && s.label && (s.value!=null && String(s.value).trim()!=='')) : [];
   // _plan vuelve adjunto (no se publica en página 1 ni en cards): render.js lo usa para la hoja de
   // diagnóstico (industrias_list + anti_icp_html). Belt en el punto donde se arma data → sirve a ambos endpoints.
-  return { ...base, cards, senales: senalesReales, _plan };
+  return { ...base, cards, senales: senalesReales, _plan, _idioma: _idiomaDoc() };
 }
 
 function _cardCompleta(c){

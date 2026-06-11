@@ -147,30 +147,30 @@ h1.ac{color:var(--accent)}
   <div class="eyebrow">{{eyebrow}}</div>
   <h1 class="ac">{{h1_company}}</h1>
   <p class="h1-sub">{{h1_post}}</p>
-  <p class="val-intro">Así entendimos su negocio antes de buscar. Si algo no encaja, lo ajustamos en una llamada.</p>
+  <p class="val-intro">{{lbl_val_intro}}</p>
 
   <div class="p1-body">
     <div>
-      <div class="sec-label">Cómo lo entendimos</div>
+      <div class="sec-label">{{lbl_como}}</div>
       <p class="lead">{{lead}}</p>
     </div>
 
     <div class="diag-grid">
       <div class="col">
-        <div class="sec-label">Su cliente ideal</div>
+        <div class="sec-label">{{lbl_icp}}</div>
         <dl class="kv">
-          <dt>Decisor</dt><dd>{{icp1_desc}}</dd>
-          <dt>Industrias</dt><dd>{{industrias_list}}</dd>
-          <dt>Geografía</dt><dd>{{ribbon2_value}}</dd>
-          <dt>Tamaño</dt><dd>{{icp4_desc}}</dd>
+          <dt>{{lbl_decisor}}</dt><dd>{{icp1_desc}}</dd>
+          <dt>{{lbl_industrias}}</dt><dd>{{industrias_list}}</dd>
+          <dt>{{lbl_geografia}}</dt><dd>{{ribbon2_value}}</dd>
+          <dt>{{lbl_tamano}}</dt><dd>{{icp4_desc}}</dd>
         </dl>
-        <p class="co-line">Modelo · <b>{{ribbon3_value}}</b>&nbsp;&nbsp;·&nbsp;&nbsp;Vertical · <b>{{ribbon1_value}}</b></p>
+        <p class="co-line">{{lbl_modelo}} · <b>{{ribbon3_value}}</b>&nbsp;&nbsp;·&nbsp;&nbsp;{{lbl_vertical}} · <b>{{ribbon1_value}}</b></p>
       </div>
       <div class="col">
-        <div class="sec-label">Por qué ahora</div>
+        <div class="sec-label">{{lbl_porque}}</div>
         <ul class="signals">
-          <li><b>Señal de compra.</b> {{icp2_desc}}</li>
-          <li><b>Pain primario.</b> {{icp3_desc}}</li>
+          <li><b>{{lbl_senal}}</b> {{icp2_desc}}</li>
+          <li><b>{{lbl_pain}}</b> {{icp3_desc}}</li>
         </ul>
         {{anti_icp_html}}
       </div>
@@ -178,14 +178,14 @@ h1.ac{color:var(--accent)}
 
     <div class="diag-grid">
       <div class="col">
-        <div class="sec-label">Contexto de mercado</div>
+        <div class="sec-label">{{lbl_contexto}}</div>
         <ul class="signals">
           <li>{{context1}}</li>
           <li>{{context2}}</li>
         </ul>
       </div>
       <div class="col">
-        <div class="sec-label">Por dónde empezar</div>
+        <div class="sec-label">{{lbl_empezar}}</div>
         <ul class="prio">
           <li>{{prio1}}</li>
           <li>{{prio2}}</li>
@@ -198,7 +198,7 @@ h1.ac{color:var(--accent)}
     {{universo_html}}
   </div>
 
-  <footer class="page-footer"><span>Inbound-Tools.com ● Análisis de Mercado · {{empresa}}</span><span>Página 1 / {{total_pages}}</span></footer>
+  <footer class="page-footer"><span>Inbound-Tools.com ● {{lbl_analisis}} · {{empresa}}</span><span>{{lbl_pagina}} 1 / {{total_pages}}</span></footer>
 </section>
 
 {{cards_pages}}

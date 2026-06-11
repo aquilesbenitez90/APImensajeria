@@ -77,7 +77,7 @@ function _senalesCard(senales) {
     return '      <li class="sig">' + (tag ? '<span class="sig-tag">' + _esc(tag) + '</span>' : '') +
       _esc(s.texto) + src + '</li>';
   }).join('\n');
-  return '\n    <div class="angle-label">Señales</div>\n    <ul class="acct-sigs">\n' + items + '\n    </ul>';
+  return '\n    <div class="angle-label">' + _esc(_L().senales) + '</div>\n    <ul class="acct-sigs">\n' + items + '\n    </ul>';
 }
 
 // Señales de compra DURAS (flags reales del MCP) como DISPARADORES visibles en la cuadrilla de cada lead.
@@ -92,24 +92,71 @@ const _PESO_SENAL = {
   'Está contratando': 3,
   'Creciendo en plantilla': 2,
 };
-// Reetiquetado de PRESENTACIÓN con CONTEXTO (feedback Diego): el prospecto NO es experto en GTM, así que una
-// señal pelada ("Está contratando") no le dice POR QUÉ importa. Cada flag lleva un (por qué) corto y genérico
-// que explica la relevancia comercial, sin sobre-afirmar nada (anti-invención: no decimos que VAN a comprar).
-// "Cambio de liderazgo" además se aclara como nivel-EMPRESA (no cambió la persona, cambió su empresa).
-const _LABEL_SENAL = {
-  'Levantó financiamiento':  'Levantó financiamiento (presupuesto nuevo para invertir)',
-  'Recién asumió el rol':    'Decisor recién asumido (etapa donde define proveedores)',
-  'Cambio de liderazgo':     'Cambio de liderazgo en su empresa (revisan prioridades y proveedores)',
-  'Está contratando':        'Está contratando (señal de crecimiento)',
-  'Creciendo en plantilla':  'Creciendo en plantilla (operación escalando)',
+// ---------------------------------------------------------------------------
+// I18N DE RÓTULOS FIJOS: el contenido (lead, ICP, ángulos) lo traduce el PLAN/SELECT por idioma; estos son
+// los rótulos del ANDAMIAJE (secciones, footer, señales-con-contexto, puente). El idioma del DOCUMENTO viaja
+// en data._idioma (lo setea el server desde el store del job). Default 'es'. _LANG se fija al inicio de
+// renderReport (render es síncrono, así que un módulo-level es seguro). Las señales llevan su "(por qué importa)"
+// genérico (feedback Diego), sin sobre-afirmar que van a comprar (anti-invención).
+const _LBL = {
+  es: {
+    val_intro:'Así entendimos su negocio antes de buscar. Si algo no encaja, lo ajustamos en una llamada.',
+    como:'Cómo lo entendimos', icp:'Su cliente ideal', decisor:'Decisor', industrias:'Industrias', geografia:'Geografía', tamano:'Tamaño',
+    modelo:'Modelo', vertical:'Vertical', porque:'Por qué ahora', senal:'Señal de compra.', pain:'Pain primario.',
+    contexto:'Contexto de mercado', empezar:'Por dónde empezar', anti:'A quién no apuntamos', senales:'Señales', mensaje:'Mensaje para enviar',
+    analisis:'Análisis de Mercado', pagina:'Página', verperfil:'Ver perfil en LinkedIn ↗',
+    clientesN:n=>`Clientes potenciales · 01 — ${n}`, cliente1:'Cliente potencial · 01',
+    universo:(n,geo,k)=>`Encontramos <b>${n}</b> decisores que encajan con este perfil${geo?(' en '+geo):''}. En esta ocasión, te mostramos ${k} potenciales clientes.`,
+    senalCtx:{
+      'Levantó financiamiento':'Levantó financiamiento (presupuesto nuevo para invertir)',
+      'Recién asumió el rol':'Decisor recién asumido (etapa donde define proveedores)',
+      'Cambio de liderazgo':'Cambio de liderazgo en su empresa (revisan prioridades y proveedores)',
+      'Está contratando':'Está contratando (señal de crecimiento)',
+      'Creciendo en plantilla':'Creciendo en plantilla (operación escalando)',
+    },
+  },
+  en: {
+    val_intro:'This is how we understood your business before sourcing. If something is off, we adjust it on a call.',
+    como:'How we understood it', icp:'Your ideal customer', decisor:'Decision-maker', industrias:'Industries', geografia:'Geography', tamano:'Company size',
+    modelo:'Model', vertical:'Vertical', porque:'Why now', senal:'Buying signal.', pain:'Primary pain.',
+    contexto:'Market context', empezar:'Where to start', anti:'Who we are not targeting', senales:'Signals', mensaje:'Message to send',
+    analisis:'Market Analysis', pagina:'Page', verperfil:'View LinkedIn profile ↗',
+    clientesN:n=>`Prospects · 01 — ${n}`, cliente1:'Prospect · 01',
+    universo:(n,geo,k)=>`We found <b>${n}</b> decision-makers matching this profile${geo?(' in '+geo):''}. This time, we are showing you ${k} potential customers.`,
+    senalCtx:{
+      'Levantó financiamiento':'Raised funding (fresh budget to invest)',
+      'Recién asumió el rol':'Newly appointed decision-maker (defining vendors)',
+      'Cambio de liderazgo':'Leadership change at their company (reviewing priorities and vendors)',
+      'Está contratando':'Hiring (growth signal)',
+      'Creciendo en plantilla':'Growing headcount (operation scaling)',
+    },
+  },
+  pt: {
+    val_intro:'Foi assim que entendemos o seu negócio antes de buscar. Se algo não encaixa, ajustamos numa ligação.',
+    como:'Como entendemos', icp:'Seu cliente ideal', decisor:'Decisor', industrias:'Indústrias', geografia:'Geografia', tamano:'Tamanho',
+    modelo:'Modelo', vertical:'Vertical', porque:'Por que agora', senal:'Sinal de compra.', pain:'Dor principal.',
+    contexto:'Contexto de mercado', empezar:'Por onde começar', anti:'A quem não miramos', senales:'Sinais', mensaje:'Mensagem para enviar',
+    analisis:'Análise de Mercado', pagina:'Página', verperfil:'Ver perfil no LinkedIn ↗',
+    clientesN:n=>`Clientes potenciais · 01 — ${n}`, cliente1:'Cliente potencial · 01',
+    universo:(n,geo,k)=>`Encontramos <b>${n}</b> decisores que encaixam neste perfil${geo?(' em '+geo):''}. Nesta ocasião, mostramos ${k} clientes potenciais.`,
+    senalCtx:{
+      'Levantó financiamiento':'Captou investimento (orçamento novo para investir)',
+      'Recién asumió el rol':'Decisor recém-nomeado (define fornecedores)',
+      'Cambio de liderazgo':'Mudança de liderança na empresa (revisam prioridades e fornecedores)',
+      'Está contratando':'Está contratando (sinal de crescimento)',
+      'Creciendo en plantilla':'Crescendo em quadro (operação escalando)',
+    },
+  },
 };
+let _LANG = 'es';
+function _L(){ return _LBL[_LANG] || _LBL.es; }
 function _senalesBadges(senalesVisibles) {
   const arr = Array.isArray(senalesVisibles) ? senalesVisibles.filter(s => String(s || '').trim()) : [];
   if (!arr.length) return '';
   // Orden por peso comercial (desc). Mostramos hasta 4: TODAS las señales reales que tenga la card (no
   // inventamos; si solo hay 1, va 1). La más fuerte destacada (↑), el resto tenue (●).
   const top = arr.slice().sort((a, b) => (_PESO_SENAL[b] || 1) - (_PESO_SENAL[a] || 1)).slice(0, 4);
-  const flags = top.map(s => '<div class="sig-flag">' + _esc(_LABEL_SENAL[s] || s) + '</div>').join('');
+  const flags = top.map(s => '<div class="sig-flag">' + _esc(_L().senalCtx[s] || s) + '</div>').join('');
   return '\n    <div class="sig-flags">' + flags + '</div>';
 }
 
@@ -124,7 +171,7 @@ function _cardArticle(c, i) {
   const slug = String(c.slug || '').replace(/[​-‍﻿­\s]/g, '');
   const href = urn || slug;
   const vis = (slug && !_isOpaque(slug)) ? slug : '';
-  const linktext = vis ? ('linkedin.com/in/' + vis) : 'Ver perfil en LinkedIn ↗';
+  const linktext = vis ? ('linkedin.com/in/' + vis) : _L().verperfil;
   // Empresa + ubicación + grado = METADATO (la persona/empresa van chicas; la SEÑAL manda).
   const meta = [c.empresa, c.ubicacion, c.grado].map(x => String(x || '').trim()).filter(Boolean).map(_esc).join(' · ');
   return `  <article class="acct">
@@ -135,9 +182,9 @@ function _cardArticle(c, i) {
         <div class="meta">${meta}${meta ? ' · ' : ''}<a class="lk" href="https://www.linkedin.com/in/${_esc(href)}">${_esc(linktext)}</a></div>
       </div>
     </div>${_senalesBadges(c.senalesVisibles)}
-    <div class="angle-label">Por qué ahora</div>
+    <div class="angle-label">${_esc(_L().porque)}</div>
     <p class="angle">${_esc(c.angulo)}</p>${_senalesCard(c.senales)}
-    <div class="angle-label">Mensaje para enviar</div>
+    <div class="angle-label">${_esc(_L().mensaje)}</div>
     <p class="acct-hook">${_esc(c.hook)}</p>
   </article>`;
 }
@@ -159,6 +206,14 @@ function flatten(data) {
   // para no dejar un encabezado con cuerpo en blanco cuando el PLAN no trae verticales_excluir.
   const _icp = (data && data._plan) || {};
   f['industrias_list'] = Array.isArray(_icp.industrias) ? _icp.industrias.filter(Boolean).join(' · ') : '';
+
+  // RÓTULOS FIJOS de página 1, según idioma del documento (_LANG ya fijado en renderReport).
+  const L = _L();
+  f['lbl_val_intro']=L.val_intro; f['lbl_como']=L.como; f['lbl_icp']=L.icp;
+  f['lbl_decisor']=L.decisor; f['lbl_industrias']=L.industrias; f['lbl_geografia']=L.geografia; f['lbl_tamano']=L.tamano;
+  f['lbl_modelo']=L.modelo; f['lbl_vertical']=L.vertical; f['lbl_porque']=L.porque;
+  f['lbl_senal']=L.senal; f['lbl_pain']=L.pain; f['lbl_contexto']=L.contexto; f['lbl_empezar']=L.empezar;
+  f['lbl_analisis']=L.analisis; f['lbl_pagina']=L.pagina;
 
   (data.cards || []).forEach((c, i) => {
     const n = i + 1;
@@ -193,6 +248,8 @@ function _senalesHtml(senales) {
 
 function renderReport(data, templatePath) {
   templatePath = templatePath || path.join(__dirname, 'template.html');
+  // IDIOMA del documento (lo trae el server en data._idioma desde el store del job). Default español.
+  _LANG = (data && (data._idioma === 'en' || data._idioma === 'pt')) ? data._idioma : 'es';
   let html = fs.readFileSync(templatePath, 'utf8');
   const flat = flatten(data);
   for (const k of Object.keys(flat)) {
@@ -204,8 +261,8 @@ function renderReport(data, templatePath) {
   // ni se desborda a una página fantasma con el pie mal numerado.
   const cards = Array.isArray(data.cards) ? data.cards : [];
   const cardsHead = cards.length > 1
-    ? ('Clientes potenciales · 01 — ' + String(cards.length).padStart(2, '0'))
-    : 'Cliente potencial · 01';
+    ? _L().clientesN(String(cards.length).padStart(2, '0'))
+    : _L().cliente1;
   const conSenales = cards.some(c => Array.isArray(c.senales) && c.senales.length);
   const perPage = conSenales ? 2 : (cards.length || 1);
   const chunks = [];
@@ -226,7 +283,7 @@ function renderReport(data, templatePath) {
   <div class="cards-wrap">
 ${cardsHtml}
   </div>
-  <footer class="page-footer"><span>Inbound-Tools.com ● Análisis de Mercado · ${empresaEsc}</span><span>Página ${2 + ci} / ${totalPages}</span></footer>
+  <footer class="page-footer"><span>Inbound-Tools.com ● ${_esc(_L().analisis)} · ${empresaEsc}</span><span>${_esc(_L().pagina)} ${2 + ci} / ${totalPages}</span></footer>
 </section>`;
   }).join('\n');
   html = html.split('{{cards_pages}}').join(cardsPages);
@@ -239,14 +296,14 @@ ${cardsHtml}
   const _s0 = (Array.isArray(data.senales) ? data.senales.find(s => s && String(s.value == null ? '' : s.value).trim()) : null);
   const _geoU = _esc((data.ribbon && data.ribbon[1] && data.ribbon[1].value) || '');
   const universoHtml = _s0
-    ? `  <p class="puente">Encontramos <b>${_esc(_s0.value)}</b> decisores que encajan con este perfil${_geoU ? (' en ' + _geoU) : ''}. En esta ocasión, te mostramos ${cards.length} potenciales clientes.</p>`
+    ? `  <p class="puente">${_L().universo(_esc(_s0.value), _geoU, cards.length)}</p>`
     : '';
   html = html.split('{{universo_html}}').join(universoHtml);
   // A QUIÉN NO APUNTAMOS (anti-ICP): sección COMPLETA o vacía si el PLAN no trae verticales_excluir
   // (no dejamos un encabezado con cuerpo en blanco). Datos del ICP interno (_plan).
   const _excl = (data && data._plan && Array.isArray(data._plan.verticales_excluir)) ? data._plan.verticales_excluir.filter(Boolean) : [];
   const antiIcpHtml = _excl.length
-    ? `  <div class="sec-label">A quién no apuntamos</div>\n  <p class="anti">${_esc(_excl.join(' · '))}</p>`
+    ? `  <div class="sec-label">${_esc(_L().anti)}</div>\n  <p class="anti">${_esc(_excl.join(' · '))}</p>`
     : '';
   html = html.split('{{anti_icp_html}}').join(antiIcpHtml);
 
