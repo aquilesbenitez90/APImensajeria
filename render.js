@@ -92,11 +92,16 @@ const _PESO_SENAL = {
   'Está contratando': 3,
   'Creciendo en plantilla': 2,
 };
-// Reetiquetado de PRESENTACIÓN: "Cambio de liderazgo" es una señal de EMPRESA (seniorLeadershipChanges del
-// MCP, binaria a nivel compañía). En la card de una persona implicaría que cambió ELLA, lo cual es dudoso
-// (un fundador no "cambió de liderazgo"; su empresa sí). Lo aclaramos. El resto ya se lee como nivel-empresa.
+// Reetiquetado de PRESENTACIÓN con CONTEXTO (feedback Diego): el prospecto NO es experto en GTM, así que una
+// señal pelada ("Está contratando") no le dice POR QUÉ importa. Cada flag lleva un (por qué) corto y genérico
+// que explica la relevancia comercial, sin sobre-afirmar nada (anti-invención: no decimos que VAN a comprar).
+// "Cambio de liderazgo" además se aclara como nivel-EMPRESA (no cambió la persona, cambió su empresa).
 const _LABEL_SENAL = {
-  'Cambio de liderazgo': 'Cambio de liderazgo en su empresa',
+  'Levantó financiamiento':  'Levantó financiamiento (presupuesto nuevo para invertir)',
+  'Recién asumió el rol':    'Decisor recién asumido (etapa donde define proveedores)',
+  'Cambio de liderazgo':     'Cambio de liderazgo en su empresa (revisan prioridades y proveedores)',
+  'Está contratando':        'Está contratando (señal de crecimiento)',
+  'Creciendo en plantilla':  'Creciendo en plantilla (operación escalando)',
 };
 function _senalesBadges(senalesVisibles) {
   const arr = Array.isArray(senalesVisibles) ? senalesVisibles.filter(s => String(s || '').trim()) : [];
@@ -132,7 +137,8 @@ function _cardArticle(c, i) {
     </div>${_senalesBadges(c.senalesVisibles)}
     <div class="angle-label">Por qué ahora</div>
     <p class="angle">${_esc(c.angulo)}</p>${_senalesCard(c.senales)}
-    <p class="acct-hook">→ ${_esc(c.hook)}</p>
+    <div class="angle-label">Mensaje para enviar</div>
+    <p class="acct-hook">${_esc(c.hook)}</p>
   </article>`;
 }
 
