@@ -102,8 +102,9 @@ const _LBL = {
   es: {
     val_intro:'Así entendimos su negocio antes de buscar. Si algo no encaja, lo ajustamos en una llamada.',
     como:'Cómo lo entendimos', icp:'Tu cliente ideal', decisor:'Decisor', industrias:'Industrias', geografia:'Geografía', tamano:'Tamaño',
-    modelo:'Modelo', vertical:'Vertical', porque:'Por qué ahora', senal:'Señal de compra.', pain:'Pain primario.',
+    modelo:'Modelo', vertical:'Vertical', porque:'Por qué ahora', senales_col:'Señales a tener en cuenta', senal:'Señal de compra.', pain:'Pain primario.',
     contexto:'Contexto de mercado', empezar:'Por dónde empezar', anti:'A quién no apuntamos', senales:'Señales', mensaje:'Mensaje para enviar',
+    guia:'Este es tu diagnóstico: a quién apuntar, qué señales mirar, cómo está el mercado y por dónde empezar. Al final, los 3 clientes potenciales.',
     analisis:'Análisis de Mercado', pagina:'Página', verperfil:'Ver perfil en LinkedIn ↗',
     clientesN:n=>`Clientes potenciales · 01 — ${n}`, cliente1:'Cliente potencial · 01',
     universo:(n,geo,k)=>`Encontramos <b>${n}</b> decisores que encajan con este perfil${geo?(' en '+geo):''}. En esta ocasión, te mostramos ${k} potenciales clientes.`,
@@ -118,8 +119,9 @@ const _LBL = {
   en: {
     val_intro:'This is how we understood your business before sourcing. If something is off, we adjust it on a call.',
     como:'How we understood it', icp:'Your ideal customer', decisor:'Decision-maker', industrias:'Industries', geografia:'Geography', tamano:'Company size',
-    modelo:'Model', vertical:'Vertical', porque:'Why now', senal:'Buying signal.', pain:'Primary pain.',
+    modelo:'Model', vertical:'Vertical', porque:'Why now', senales_col:'Signals to watch', senal:'Buying signal.', pain:'Primary pain.',
     contexto:'Market context', empezar:'Where to start', anti:'Who we are not targeting', senales:'Signals', mensaje:'Message to send',
+    guia:'This is your diagnosis: who to target, what signals to watch, how the market looks, and where to start. At the end, your 3 potential customers.',
     analisis:'Market Analysis', pagina:'Page', verperfil:'View LinkedIn profile ↗',
     clientesN:n=>`Prospects · 01 — ${n}`, cliente1:'Prospect · 01',
     universo:(n,geo,k)=>`We found <b>${n}</b> decision-makers matching this profile${geo?(' in '+geo):''}. This time, we are showing you ${k} potential customers.`,
@@ -134,8 +136,9 @@ const _LBL = {
   pt: {
     val_intro:'Foi assim que entendemos o seu negócio antes de buscar. Se algo não encaixa, ajustamos numa ligação.',
     como:'Como entendemos', icp:'Seu cliente ideal', decisor:'Decisor', industrias:'Indústrias', geografia:'Geografia', tamano:'Tamanho',
-    modelo:'Modelo', vertical:'Vertical', porque:'Por que agora', senal:'Sinal de compra.', pain:'Dor principal.',
+    modelo:'Modelo', vertical:'Vertical', porque:'Por que agora', senales_col:'Sinais a considerar', senal:'Sinal de compra.', pain:'Dor principal.',
     contexto:'Contexto de mercado', empezar:'Por onde começar', anti:'A quem não miramos', senales:'Sinais', mensaje:'Mensagem para enviar',
+    guia:'Este é o seu diagnóstico: quem mirar, que sinais observar, como está o mercado e por onde começar. No final, os 3 clientes potenciais.',
     analisis:'Análise de Mercado', pagina:'Página', verperfil:'Ver perfil no LinkedIn ↗',
     clientesN:n=>`Clientes potenciais · 01 — ${n}`, cliente1:'Cliente potencial · 01',
     universo:(n,geo,k)=>`Encontramos <b>${n}</b> decisores que encaixam neste perfil${geo?(' em '+geo):''}. Nesta ocasião, mostramos ${k} clientes potenciais.`,
@@ -211,7 +214,8 @@ function flatten(data) {
   const L = _L();
   f['lbl_val_intro']=L.val_intro; f['lbl_como']=L.como; f['lbl_icp']=L.icp;
   f['lbl_decisor']=L.decisor; f['lbl_industrias']=L.industrias; f['lbl_geografia']=L.geografia; f['lbl_tamano']=L.tamano;
-  f['lbl_modelo']=L.modelo; f['lbl_vertical']=L.vertical; f['lbl_porque']=L.porque;
+  f['lbl_modelo']=L.modelo; f['lbl_vertical']=L.vertical; f['lbl_porque']=L.porque; f['lbl_senales_col']=L.senales_col;
+  f['lbl_guia']=L.guia;
   f['lbl_senal']=L.senal; f['lbl_pain']=L.pain; f['lbl_contexto']=L.contexto; f['lbl_empezar']=L.empezar;
   f['lbl_analisis']=L.analisis; f['lbl_pagina']=L.pagina;
 
