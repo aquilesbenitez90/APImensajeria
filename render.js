@@ -101,12 +101,12 @@ const _PESO_SENAL = {
 const _LBL = {
   es: {
     val_intro:'Así entendimos su negocio antes de buscar. Si algo no encaja, lo ajustamos en una llamada.',
-    como:'Cómo lo entendimos', icp:'Su cliente ideal', decisor:'Decisor', industrias:'Industrias', geografia:'Geografía', tamano:'Tamaño',
+    como:'Cómo lo entendimos', icp:'Tu cliente ideal', decisor:'Decisor', industrias:'Industrias', geografia:'Geografía', tamano:'Tamaño',
     modelo:'Modelo', vertical:'Vertical', porque:'Por qué ahora', senal:'Señal de compra.', pain:'Pain primario.',
     contexto:'Contexto de mercado', empezar:'Por dónde empezar', anti:'A quién no apuntamos', senales:'Señales', mensaje:'Mensaje para enviar',
     analisis:'Análisis de Mercado', pagina:'Página', verperfil:'Ver perfil en LinkedIn ↗',
     clientesN:n=>`Clientes potenciales · 01 — ${n}`, cliente1:'Cliente potencial · 01',
-    universo:(n,geo,k)=>`Encontramos <b>${n}</b> decisores que encajan con este perfil${geo?(' en '+geo):''}. En esta ocasión, les mostramos ${k} potenciales clientes.`,
+    universo:(n,geo,k)=>`Encontramos <b>${n}</b> decisores que encajan con este perfil${geo?(' en '+geo):''}. En esta ocasión, te mostramos ${k} potenciales clientes.`,
     senalCtx:{
       'Levantó financiamiento':'Levantó financiamiento (tiene presupuesto fresco: buen momento para proponerle)',
       'Recién asumió el rol':'Decisor nuevo en el cargo (al llegar suele redefinir proveedores)',
