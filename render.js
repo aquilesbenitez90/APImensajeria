@@ -106,7 +106,7 @@ const _LBL = {
     contexto:'Contexto de mercado', empezar:'Por dónde empezar', anti:'A quién no apuntamos', senales:'Señales', mensaje:'Mensaje para enviar',
     analisis:'Análisis de Mercado', pagina:'Página', verperfil:'Ver perfil en LinkedIn ↗',
     clientesN:n=>`Clientes potenciales · 01 — ${n}`, cliente1:'Cliente potencial · 01',
-    universo:(n,geo,k)=>`Encontramos <b>${n}</b> decisores que encajan con este perfil${geo?(' en '+geo):''}. En esta ocasión, te mostramos ${k} potenciales clientes.`,
+    universo:(n,geo,k)=>`Encontramos <b>${n}</b> decisores que encajan con este perfil${geo?(' en '+geo):''}. En esta ocasión, les mostramos ${k} potenciales clientes.`,
     senalCtx:{
       'Levantó financiamiento':'Levantó financiamiento (presupuesto nuevo para invertir)',
       'Recién asumió el rol':'Decisor recién asumido (etapa donde define proveedores)',
