@@ -105,7 +105,7 @@ const _LBL = {
     modelo:'Modelo', vertical:'Vertical', porque:'Por qué ahora', senales_col:'Señales a tener en cuenta', senal:'Señal de compra.', pain:'Pain primario.',
     contexto:'Contexto de mercado', empezar:'Por dónde empezar', anti:'A quién no apuntamos', senales:'Señales', mensaje:'Mensaje para enviar',
     guia:'Este es tu diagnóstico: a quién apuntar, qué señales mirar, cómo está el mercado y por dónde empezar. Al final, los 3 clientes potenciales.',
-    analisis:'Análisis de Mercado', pagina:'Página', verperfil:'Ver perfil en LinkedIn ↗',
+    analisis:'Análisis de Mercado', pagina:'Página', verperfil:'Ver perfil en LinkedIn ↗', proofLbl:'Respaldo',
     clientesN:n=>`Clientes potenciales · 01 — ${n}`, cliente1:'Cliente potencial · 01',
     universo:(n,geo,k)=>`Encontramos <b>${n}</b> decisores que encajan con este perfil${geo?(' en '+geo):''}. En esta ocasión, te mostramos ${k} potenciales clientes.`,
     senalCtx:{
@@ -122,7 +122,7 @@ const _LBL = {
     modelo:'Model', vertical:'Vertical', porque:'Why now', senales_col:'Signals to watch', senal:'Buying signal.', pain:'Primary pain.',
     contexto:'Market context', empezar:'Where to start', anti:'Who we are not targeting', senales:'Signals', mensaje:'Message to send',
     guia:'This is your diagnosis: who to target, what signals to watch, how the market looks, and where to start. At the end, your 3 potential customers.',
-    analisis:'Market Analysis', pagina:'Page', verperfil:'View LinkedIn profile ↗',
+    analisis:'Market Analysis', pagina:'Page', verperfil:'View LinkedIn profile ↗', proofLbl:'Track record',
     clientesN:n=>`Prospects · 01 — ${n}`, cliente1:'Prospect · 01',
     universo:(n,geo,k)=>`We found <b>${n}</b> decision-makers matching this profile${geo?(' in '+geo):''}. This time, we are showing you ${k} potential customers.`,
     senalCtx:{
@@ -139,7 +139,7 @@ const _LBL = {
     modelo:'Modelo', vertical:'Vertical', porque:'Por que agora', senales_col:'Sinais a considerar', senal:'Sinal de compra.', pain:'Dor principal.',
     contexto:'Contexto de mercado', empezar:'Por onde começar', anti:'A quem não miramos', senales:'Sinais', mensaje:'Mensagem para enviar',
     guia:'Este é o seu diagnóstico: quem mirar, que sinais observar, como está o mercado e por onde começar. No final, os 3 clientes potenciais.',
-    analisis:'Análise de Mercado', pagina:'Página', verperfil:'Ver perfil no LinkedIn ↗',
+    analisis:'Análise de Mercado', pagina:'Página', verperfil:'Ver perfil no LinkedIn ↗', proofLbl:'Histórico',
     clientesN:n=>`Clientes potenciais · 01 — ${n}`, cliente1:'Cliente potencial · 01',
     universo:(n,geo,k)=>`Encontramos <b>${n}</b> decisores que encaixam neste perfil${geo?(' em '+geo):''}. Nesta ocasião, mostramos ${k} clientes potenciais.`,
     senalCtx:{
@@ -310,6 +310,12 @@ ${cardsHtml}
     ? `  <div class="sec-label">${_esc(_L().anti)}</div>\n  <p class="anti">${_esc(_excl.join(' · '))}</p>`
     : '';
   html = html.split('{{anti_icp_html}}').join(antiIcpHtml);
+  // PROOF POINT (respaldo del cliente): clientes/marcas reales con las que trabaja (lo genera el PLAN en `proof`).
+  // Da credibilidad y deja que el juez VERIFIQUE las referencias que un hook pueda citar (evita falso positivo de
+  // "dato inventado"). Vacío si el PLAN no trae proof (research sin casos). Va bajo la apertura.
+  const _proof = String((data && data.proof) || '').trim();
+  const proofHtml = _proof ? `  <p class="respaldo"><b>${_esc(_L().proofLbl)}</b> ${_esc(_proof)}</p>` : '';
+  html = html.split('{{proof_html}}').join(proofHtml);
 
   // Logo del repo: pisa el base64 embebido en TODAS las páginas (flag g) si el archivo existe.
   const logo = _logoDataUri();

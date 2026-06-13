@@ -2354,7 +2354,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "h1_company": "Nombre del cliente (resaltado, va primero)",
   "h1_post": "${N} clientes potenciales en [País o región]",
   "lead": "APERTURA del documento (lo PRIMERO que lee el cliente), 3 oraciones cortas, PLANA y HUMANA (como le hablás a un cliente real, NADA corporativo ni jerga). Estructura (escribí las 3 en el idioma de salida; lo que sigue describe el CONTENIDO, no es texto a copiar): (1) que [Cliente] es una empresa que hace [qué hace, concreto y claro, SIN nombres de marcas/clientes ni tecnicismos]; (2) que, sobre esa base, armaron este diagnóstico para que el cliente sepa cuándo y cómo contactar a sus clientes potenciales; (3) que le comparten ${N} de los que encontraron, con el mensaje listo para escribirles. SIN cambiar el número ${N} ni inventar métricas. Trato directo y cercano al cliente (en español: de TÚ, 'sepas/te compartimos/tus', sin voseo ni 'usted'). NO menciones tecnología, herramientas ni 'nuestra plataforma'.",
-  "proof": "El proof point / origen del cliente (1 oración).",
+  "proof": "RESPALDO/credencial del cliente en 1 oración corta: clientes o marcas REALES con las que trabaja (sacados del research: casos, logos, clientes mencionados) o un resultado/caso verificable. Es lo que da credibilidad y permite verificar las referencias que los hooks puedan citar. Ej: 'Trabaja con marcas como X e Y'. ANTI-INVENCIÓN: SOLO si el research lo respalda; si no hay casos/clientes verificables, dejá \"\" (vacío). Es el ÚNICO lugar donde se nombran clientes del cliente (la apertura no los nombra).",
   "ribbon": [ {"label":"Vertical","value":"..."}, {"label":"País","value":"..."}, {"label":"Modelo","value":"..."} ],
   "stats": [ {"num":"...","label":"..."}, {"num":"${N}","label":"Cuentas priorizadas"}, {"num":"...","label":"..."}, {"num":"...","label":"..."} ],
   "icp": [ {"title":"Decisor ideal","desc":"frase telegráfica, máx ~14 palabras (cargos del comprador, sin párrafo)"}, {"title":"Señal de compra","desc":"media oración, máx ~14 palabras"}, {"title":"Pain primario","desc":"media oración, máx ~14 palabras"}, {"title":"Tamaño de empresa","desc":"frase corta, ej. 30 a 1000 empleados con flota en producción"} ],
@@ -2866,6 +2866,10 @@ function armarReporte(plan, seleccion, pool, senales){
   if(!base.empresa) base.empresa = base.h1_company || '';
   // Limpieza de guiones + números inventados en TODO el texto generado de página 1.
   for(const f of ['lead','proof','h1_post']) if(typeof base[f]==='string') base[f]=_limpia(base[f]);
+  // TÍTULO coherente con las cards entregadas: no prometer un país sin ni una card ahí (caso Aenima
+  // "Argentina y Estados Unidos" con todas las cards en Argentina). Cosmético, corre acá (sirve a ambos endpoints).
+  { const _rt = _reconciliarTitulo({ h1_post: base.h1_post, cards, _idioma: _idiomaDoc() });
+    if(_rt){ base.h1_post = _rt.despues; console.log(`[GEO] título reconciliado a las cards: "${_rt.antes}" -> "${_rt.despues}"`); } }
   if(Array.isArray(base.context))     base.context     = base.context.map(_limpia);
   if(Array.isArray(base.apertura))    base.apertura    = base.apertura.map(_limpia);
   if(Array.isArray(base.prioridades)) base.prioridades = base.prioridades.map(_limpia);
@@ -2942,6 +2946,37 @@ function _geoIncoherente(data){
   if(!fuera.length) return null;
   // objetivo reportado = el set declarado (lo que se usa en los mensajes de fix).
   return { objetivo:[...declarado], titulo:[...titulo], fuera };
+}
+
+// RECONCILIACIÓN DETERMINÍSTICA DEL TÍTULO (cosmético, NO rechaza): el h1_post no puede PROMETER un país que
+// NINGUNA card representa. Caso real Aenima: título "...en Argentina y Estados Unidos" con las 3 cards en
+// Argentina → el reporte se contradice (promete EE.UU., entrega solo AR). `_geoIncoherente` no lo caza porque
+// AL MENOS una card cae en un país del título (AR). Acá reescribimos h1_post para nombrar SOLO los países
+// presentes en las cards, conservando "N ... en <lista>" y la capitalización original de los nombres del título.
+// Si el caso es "título huérfano" (NINGUNA card en ningún país del título), NO tocamos: eso lo maneja
+// `_geoIncoherente` (rechazo). MUTA data.h1_post in place. Devuelve {antes, despues} o null si no cambia.
+function _reconciliarTitulo(data){
+  if(!data || typeof data.h1_post !== 'string' || !data.h1_post.trim()) return null;
+  const tituloPaises = _paisesDeTexto(data.h1_post);
+  if(tituloPaises.length < 2) return null;                 // 0/1 país en el título → nada que reducir
+  const cardPaises = new Set();
+  for(const c of (data.cards||[])) for(const p of _paisesDeTexto(c.ubicacion)) cardPaises.add(p);
+  if(!cardPaises.size) return null;                        // cards sin país reconocible → no tocar
+  if(tituloPaises.every(p => cardPaises.has(p))) return null;   // el título ya coincide con las cards
+  const m = data.h1_post.match(/^(.*\b(?:en|in|em)\s+)(.+)$/i);  // "<prefijo> en/in/em <lista de países>"
+  if(!m) return null;
+  const prefijo = m[1], lista = m[2];
+  const tokens = lista.split(/\s*,\s*|\s+y\s+|\s+e\s+|\s+and\s+/i).map(t=>t.trim()).filter(Boolean);
+  const quedan = tokens.filter(t => { const ps=_paisesDeTexto(t); return ps.length && ps.some(p=>cardPaises.has(p)); });
+  if(!quedan.length) return null;                          // huérfano → lo maneja _geoIncoherente (rechazo)
+  if(quedan.length === tokens.length) return null;         // no cambió nada
+  const lang = (data._idioma==='en') ? 'en' : (data._idioma==='pt' ? 'pt' : 'es');
+  const conj = lang==='en' ? 'and' : (lang==='pt' ? 'e' : 'y');
+  const nuevaLista = quedan.length===1 ? quedan[0]
+    : quedan.slice(0,-1).join(', ') + ' ' + conj + ' ' + quedan[quedan.length-1];
+  const antes = data.h1_post;
+  data.h1_post = prefijo + nuevaLista;
+  return { antes, despues: data.h1_post };
 }
 
 // --- COHERENCIA DEL CONTEO DE PAÍSES (determinística) -------------------------
@@ -3160,6 +3195,7 @@ Te paso UNA empresa y el producto que un proveedor le quiere vender. Buscá en w
 - "texto": 1 oración corta y concreta (máx 130 caracteres), en el IDIOMA DE SALIDA, neutro, SIN guiones (— ni -).
 - "tipo": una palabra que clasifique la señal (inversión, expansión, ejecutivo, producto, alianza, hito), EN EL IDIOMA DE SALIDA.
 - No repitas la misma señal redactada distinto.
+- ANTI-SEÑAL (CRÍTICO, lo contrario de una señal de compra): si el hecho es que la empresa acaba de CONTRATAR, ELEGIR o firmar con un PROVEEDOR DEL MISMO TIPO que el proveedor que le quiere vender (mirá "Producto del proveedor": si el proveedor es una agencia y la empresa eligió OTRA agencia; si es un software X y eligió otro software X; si es una consultora y contrató otra consultora), eso NO es señal de compra: significa que YA resolvió esa necesidad y NO está en mercado. NO la incluyas, NUNCA como alianza/hito positivo. Una empresa que acaba de elegir a un competidor del proveedor es un MAL momento, no un buen momento.
 
 ## Salida — SOLO JSON (sin texto ni markdown alrededor)
 { "senales": [ {"tipo":"...","texto":"...","fuente":"...","fecha":"Mes Año","url":"https://..."} ] }
@@ -3831,5 +3867,6 @@ module.exports = {
   _cardsFitBueno, _resolverGateCalidez, sourceConRetry, runPlanConRetry,
   _saneaCargo, _dedupUbicacion, enriquecerSenales, _senalesDeCuenta,
   callREST, _parsePeople, _parseCompanies,
-  _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS
+  _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS,
+  _reconciliarTitulo, _geoIncoherente
 };
