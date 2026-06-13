@@ -69,11 +69,11 @@ const SIGNALS_PER_CARD = parseInt(process.env.SIGNALS_PER_CARD || '2', 10);
 const SOURCE_PROFILES_LIMIT = parseInt(process.env.SOURCE_PROFILES_LIMIT || '100', 10);
 const SOURCE_CO_LIMIT = parseInt(process.env.SOURCE_CO_LIMIT || '50', 10);
 
-// COMPANY-FIRST (anti-gigante): flag para activar el TECHO de tamaño (tamano_max) + priorizar cuentas-ancla
-// vetadas (Pasada A/B) sobre el barrido people-first (Pasada C, fuente de ruido), usando el barrido SOLO como
-// fallback de relleno. Default OFF -> comportamiento ACTUAL idéntico (producción/español no cambia). Lo
-// prendemos para testear el fix de "boutique de 37 personas recibe Fortune-50 como target" (Aenima/Robotic Crew).
-const SOURCE_COMPANY_FIRST = String(process.env.SOURCE_COMPANY_FIRST || 'off').toLowerCase() === 'on';
+// COMPANY-FIRST (anti-gigante, SIEMPRE activo): aplica el TECHO de tamaño (tamano_max del PLAN) y prioriza las
+// cuentas-ancla vetadas (Pasada A/B) sobre el barrido people-first (Pasada C, fuente de ruido), usando el barrido
+// SOLO como fallback de relleno. Arregla "boutique de 37 personas recibe Fortune-50 como target" (Aenima/Robotic
+// Crew). NO es un flag: es el comportamiento por default. El techo solo actúa si el PLAN da tamano_max>0 (0=sin
+// techo, degradación digna ante research pobre), y siempre se relaja antes de quedar por debajo de NUM_CUENTAS.
 
 // Temperatura del JUEZ: baja = veredicto consistente (mismo reporte → mismo veredicto).
 // El juez corría a la temperatura por defecto (1.0), lo que disparaba la varianza
@@ -1563,10 +1563,10 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const _offVert = (c) => _matchVerticalExcluir(c.empresa, excluir) || _matchVerticalExcluir(c.head, excluir);
 
   const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
-  // TECHO DE TAMAÑO (anti-gigante, SOLO con SOURCE_COMPANY_FIRST=on): el comprador de una boutique chica NO es
-  // un Fortune-50 (caso Aenima 37 empl. → JPMorgan/Lockheed). El PLAN razona `tamano_max` (0 = sin techo).
-  // Con el flag OFF, tamMax=0 y NADA de la lógica de techo actúa → comportamiento ACTUAL idéntico.
-  const tamMax = SOURCE_COMPANY_FIRST ? (parseInt(icp.tamano_max || 0, 10) || 0) : 0;
+  // TECHO DE TAMAÑO (anti-gigante): el comprador de una boutique chica NO es un Fortune-50 (caso Aenima 37 empl.
+  // → JPMorgan/Lockheed). El PLAN razona `tamano_max`; 0 = sin techo (research pobre → no actúa, degradación
+  // digna). Cuando tamano_max>0, la lógica de techo (3 puntos) veta gigantes y se relaja antes de quedar corto.
+  const tamMax = parseInt(icp.tamano_max || 0, 10) || 0;
 
   // SCORING del candidato (UNA sola definición → las 3 llamadas quedan idénticas, sin drift posible).
   // Principio (auditoría GTM, casos reales Brandtrack/NOCNOK): DECISIÓN y FIT-DE-VERTICAL son los DRIVERS;
@@ -1742,17 +1742,16 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // pool a la IA. DEGRADACIÓN DIGNA: no romper "nunca menos de N" → si enCuentas no llena el pool, el barrido
   // entra a completar (manteniendo recall). Flag OFF → barridoParaPool = barrido (comportamiento ACTUAL).
   const N_IA_TARGET = parseInt(process.env.SOURCE_TO_IA || '18', 10);
+  // COMPANY-FIRST (siempre): ¿cuántos decisores on-fit aportan ya las cuentas-ancla? Si llenan el pool, el
+  // barrido amplio NO se mergea (queda disponible solo para la cuota de 2do grado / repoblado, que reusan `out`,
+  // no `pool`). Si NO alcanzan, el barrido entra como FALLBACK de relleno (recall preservado).
   let barridoParaPool = barrido;
-  if(SOURCE_COMPANY_FIRST){
-    // ¿Cuántos decisores on-fit aportan ya las cuentas-ancla? Si llenan el pool, el barrido NO se mergea
-    // (queda disponible solo para la cuota de 2do grado / repoblado, que reusan `out`, no `pool`).
-    const anclaFit = enCuentas.filter(p => _rankSenioridad(p.head) >= 1).length;
-    if(anclaFit >= N_IA_TARGET){
-      barridoParaPool = [];
-      console.log(`[SOURCE] company-first: ${anclaFit} decisores en cuentas-ancla ≥ ${N_IA_TARGET} → barrido amplio NO se mergea (cuentas-ancla mandan).`);
-    } else {
-      console.log(`[SOURCE] company-first: ${anclaFit} decisores en cuentas-ancla < ${N_IA_TARGET} → barrido amplio entra como FALLBACK de relleno.`);
-    }
+  const anclaFit = enCuentas.filter(p => _rankSenioridad(p.head) >= 1).length;
+  if(anclaFit >= N_IA_TARGET){
+    barridoParaPool = [];
+    console.log(`[SOURCE] company-first: ${anclaFit} decisores en cuentas-ancla ≥ ${N_IA_TARGET} → barrido amplio NO se mergea (cuentas-ancla mandan).`);
+  } else {
+    console.log(`[SOURCE] company-first: ${anclaFit} decisores en cuentas-ancla < ${N_IA_TARGET} → barrido amplio entra como FALLBACK de relleno.`);
   }
 
   // ===== PASADA D — SEÑAL DE COMPRA (ADITIVA): recién-cambiaron de trabajo (changedJobsLast90Days) =====
@@ -2047,7 +2046,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   }
 
   const n2 = final.filter(c=>c.dist===2).length, nAncla = final.filter(c=>c.ancla).length;
-  console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | a la IA ${final.length} (ancla=${nAncla}, 2do=${n2}, terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], piso<${PISO}${tamMax>0?`, techo>${tamMax}, company-first=ON`:''}).`);
+  console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | a la IA ${final.length} (ancla=${nAncla}, 2do=${n2}, terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], piso<${PISO}${tamMax>0?`, techo>${tamMax}`:''}).`);
 
   // ===== SEÑALES DE MERCADO (datos REALES del MCP, jamás generados por IA) =====
   // Norte: "más señales de mercado" sin reabrir el agujero de invención. Cada ítem es un dato que sale
