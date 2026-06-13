@@ -55,11 +55,25 @@ process.on('unhandledRejection', (e) => {
 // ---------------------------------------------------------------------------
 const MODEL_GEN = 'claude-sonnet-4-6';
 const MODEL_JUDGE = 'claude-sonnet-4-6';
-// SEÑALES DE COMPRA por cuenta (opcional, reversible). SIGNALS_MODE=on las activa; la EXTRACCIÓN usa un
-// modelo BARATO (Haiku) porque es leer y extraer, no juzgar. Off por default: cero costo/latencia/riesgo.
+// SEÑALES DE COMPRA por cuenta (opcional, reversible). SIGNALS_MODE=on las activa (env en el copy de Railway).
+// La EXTRACCIÓN usa Sonnet (mejor grounding/instrucción que Haiku para no inventar fecha/fuente/URL). Off por
+// default: cero costo/latencia/riesgo hasta que se prenda. Máx 2 señales por card (super resumidas, con link).
 const SIGNALS_MODE = (process.env.SIGNALS_MODE || 'off').toLowerCase();
+// Signals es EXTRACCIÓN pura (encontrar noticia con web_search → copiar fuente/fecha/URL real), no razonamiento:
+// Haiku alcanza y es ~3x más barato que Sonnet. La fase signals era ~50% del costo del reporte; con Haiku baja a ~$0.10.
+// Reversible por env (MODEL_SIGNALS=claude-sonnet-4-6 vuelve al comportamiento anterior).
 const MODEL_SIGNALS = process.env.MODEL_SIGNALS || 'claude-haiku-4-5-20251001';
-const SIGNALS_PER_CARD = parseInt(process.env.SIGNALS_PER_CARD || '3', 10);
+const SIGNALS_PER_CARD = parseInt(process.env.SIGNALS_PER_CARD || '2', 10);
+// Tamaño de cada búsqueda en Sales Navigator (filas por llamada). Más grande = pool más grande para el
+// fallback de piso, mismas llamadas (una por término de rol). Tuneable por env. People 100, companies 50.
+const SOURCE_PROFILES_LIMIT = parseInt(process.env.SOURCE_PROFILES_LIMIT || '100', 10);
+const SOURCE_CO_LIMIT = parseInt(process.env.SOURCE_CO_LIMIT || '50', 10);
+
+// COMPANY-FIRST (anti-gigante, SIEMPRE activo): aplica el TECHO de tamaño (tamano_max del PLAN) y prioriza las
+// cuentas-ancla vetadas (Pasada A/B) sobre el barrido people-first (Pasada C, fuente de ruido), usando el barrido
+// SOLO como fallback de relleno. Arregla "boutique de 37 personas recibe Fortune-50 como target" (Aenima/Robotic
+// Crew). NO es un flag: es el comportamiento por default. El techo solo actúa si el PLAN da tamano_max>0 (0=sin
+// techo, degradación digna ante research pobre), y siempre se relaja antes de quedar por debajo de NUM_CUENTAS.
 
 // Temperatura del JUEZ: baja = veredicto consistente (mismo reporte → mismo veredicto).
 // El juez corría a la temperatura por defecto (1.0), lo que disparaba la varianza
@@ -90,10 +104,188 @@ const IBT_HEADERS = {
   'x-password': process.env.IBT_PASSWORD
 };
 
+// ---------------------------------------------------------------------------
+// BACKEND DE SOURCING: 'mcp' (default, comportamiento idéntico al histórico) o 'rest'.
+// El MISMO backend de IBT expone los datos por DOS vías:
+//   - /api/mcp  -> JSON-RPC + SSE de TEXTO. Tope DURO de 60 req/min (nos rate-limitea).
+//   - REST (/api/list/..., /api/linkedin-lookup/...) -> JSON real, SIN ese tope.
+// `callREST` es un ADAPTADOR opción-A: hace la request REST y FORMATEA el JSON al MISMO TEXTO
+// que `callMCP` devuelve hoy, para que _parsePeople/_parseCompanies/_parseProfile y los regex de
+// resolve funcionen SIN tocarse (esos parsers SON la spec del formato). callMCP despacha a callREST
+// al inicio si SOURCE_BACKEND==='rest', así NINGÚN caller cambia. Default 'mcp' = cero cambio.
+const SOURCE_BACKEND = (process.env.SOURCE_BACKEND || 'mcp').toLowerCase();
+const REST_BASE = 'https://backoffice-server-production.up.railway.app';
+// JWT del login REST cacheado en módulo (vive entre requests; NO es secreto-en-log: nunca se loguea).
+// Se re-loguea ante 401 (token expirado/revocado) y en el primer uso. Sin TTL fijo: confiamos en el 401.
+let _restToken = null;
+let _restLoginInFlight = null;   // de-dupe: si varias llamadas concurrentes necesitan login, una sola request.
+async function _restLogin(force = false) {
+  if (_restToken && !force) return _restToken;
+  if (_restLoginInFlight) return _restLoginInFlight;   // ya hay un login en curso -> esperamos ese
+  _restLoginInFlight = (async () => {
+    const r = await fetch(REST_BASE + '/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: process.env.IBT_EMAIL, password: process.env.IBT_PASSWORD })
+    });
+    if (!r.ok) throw new Error(`[REST] login falló (HTTP ${r.status})`);
+    const j = await r.json();
+    // El token vive en body.data.token (confirmado en vivo; len ~317). Fallback a body.token por si cambia.
+    const tok = j?.data?.token || j?.token;
+    if (!tok) throw new Error('[REST] login sin token en la respuesta');
+    _restToken = tok;
+    console.log('[REST] login OK (token cacheado).');   // NUNCA logueamos el token.
+    return tok;
+  })().finally(() => { _restLoginInFlight = null; });
+  return _restLoginInFlight;
+}
+// fetch REST con Bearer y RE-LOGIN automático ante 401 (un único reintento). Devuelve el JSON parseado.
+async function _restFetch(path, { method = 'GET', body = null, signal = null } = {}) {
+  const _do = async (tok) => {
+    const headers = { 'Authorization': 'Bearer ' + tok };
+    if (body != null) headers['Content-Type'] = 'application/json';
+    return fetch(REST_BASE + path, { method, headers, body: body != null ? JSON.stringify(body) : undefined, signal });
+  };
+  let tok = await _restLogin(false);
+  let res = await _do(tok);
+  if (res.status === 401) {
+    console.warn('[REST] 401 -> re-login y reintento único.');
+    tok = await _restLogin(true);
+    res = await _do(tok);
+  }
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`[REST] ${method} ${path.split('?')[0]} HTTP ${res.status} ${t.slice(0, 120)}`);
+  }
+  return res.json();
+}
+
+// --- FORMATEADORES: JSON REST -> TEXTO que esperan los parsers (ver _parsePeople/_parseCompanies/etc). ---
+// _parsePeople espera por persona: id=URN "Nombre" Headline (DISTANCE_N, Location) <tail señales>
+function _restFmtPeople(items) {
+  return (items || []).map(it => {
+    const id = it.id || it.member_urn || '';
+    const name = (it.name || `${it.first_name || ''} ${it.last_name || ''}`).trim();
+    // El headline crudo puede traer paréntesis; los parsers cortan en el primer '(' del bloque DISTANCE,
+    // así que neutralizamos paréntesis del headline para no romper el cierre del grupo DISTANCE.
+    const head = String(it.headline || '').replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim();
+    const dist = it.network_distance || 'DISTANCE_OUT_OF_NETWORK';   // ya viene "DISTANCE_2" / "DISTANCE_OUT_OF_NETWORK"
+    const loc = String(it.location || '').replace(/[()]/g, ' ').trim();
+    // SEÑAL recién-asumió: del puesto actual. tenure_at_role.years==0/ausente con start reciente, o months bajos.
+    const pos = Array.isArray(it.current_positions) && it.current_positions[0] ? it.current_positions[0] : null;
+    let tail = '';
+    if (pos && pos.tenure_at_role) {
+      const tr = pos.tenure_at_role;
+      const yrs = Number(tr.years || 0), mos = Number(tr.months || 0);
+      if (yrs === 0 && mos > 0) tail += ` ${mos} months in role`;   // _parseProfile/_parsePeople lo leen como recién asumió
+    }
+    return `id=${id} "${name}" ${head} (${dist}, ${loc})${tail}`;
+  }).join('\n');
+}
+// _parseCompanies espera: id=NUMERO "Nombre" Industria (NNN employees)
+function _restFmtCompanies(items) {
+  return (items || []).map(it => {
+    const id = it.id || '';
+    const name = it.name || '';
+    const ind = String(it.industry || '').replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim();
+    const hc = it.headcount != null ? it.headcount : '?';
+    return `id=${id} "${name}" ${ind} (${hc} employees)`;
+  }).join('\n');
+}
+// resolve: el regex espera id="?NUMERO"? "Nombre" (LOCATION) o id="?ID (FUNCTION/SALES_INDUSTRY).
+function _restFmtResolve(items) {
+  return (items || []).map(it => `id=${it.id} "${it.title || it.name || ''}"`).join('\n');
+}
+// _parseProfile lee: "(N employees)" para headcount y "— headline (N" para el headline rico.
+// Construimos un texto que contenga ambos: `Nombre — <headline> @ <empresa> (N employees)`.
+function _restFmtProfile(data) {
+  const prof = (data && data.profile) || {};
+  const co = (data && data.company) || {};
+  const name = `${prof.first_name || ''} ${prof.last_name || ''}`.trim();
+  const head = String(prof.headline || '').replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim();
+  const emp = co.name || '';
+  const hc = co.staff_count != null ? co.staff_count : null;
+  // _parseProfile: /—\s*(.+?)\s*\(\s*(?:\?|\d)/  -> necesita "— <head...> (<dígito o ?>".
+  // _empresaDeHeadline lee "@ <empresa>"; _headcountDe lee "<N> employees".
+  let txt = `${name} — ${head}`;
+  if (emp) txt += ` @ ${emp}`;
+  txt += hc != null ? ` (${hc} employees)` : ` (? )`;
+  return txt;
+}
+// lookup_company -> texto: _empresaDeLookup lee "Company: <name>", _headcountDe "<N> employees",
+// _dominioDeLookup el website. Usamos el primer resultado de la búsqueda de empresas por nombre.
+function _restFmtLookupCompany(co) {
+  if (!co) return '';
+  let txt = `Company: ${co.name || ''}`;
+  if (co.industry) txt += ` — ${co.industry}`;
+  const hc = co.headcount != null ? co.headcount : (co.staff_count != null ? co.staff_count : null);
+  if (hc != null) txt += ` (${hc} employees)`;
+  if (co.website) txt += ` website: ${co.website}`;
+  return txt;
+}
+
+// callREST(toolName, args): arma la request REST por tool y devuelve el TEXTO con el formato del parser.
+async function callREST(toolName, args, signal) {
+  switch (toolName) {
+    case 'search_sales_navigator_filtered': {
+      // Mismos filtros que el MCP, pasados tal cual (category, keywords, location/function/industry.include,
+      // company.include/exclude, profilesLimit, changedJobsLast90Days, headcountGrowth, etc.).
+      const j = await _restFetch('/api/list/linkedin/sales-navigator/search', { method: 'POST', body: args, signal });
+      const items = j?.data?.items || [];
+      const cat = String(args?.category || 'people').toLowerCase();
+      return cat === 'companies' ? _restFmtCompanies(items) : _restFmtPeople(items);
+    }
+    case 'resolve_sales_navigator_id': {
+      const qs = new URLSearchParams();
+      if (args?.type) qs.set('type', args.type);
+      if (args?.keywords) qs.set('keywords', args.keywords);
+      if (args?.limit != null) qs.set('limit', String(args.limit));
+      const j = await _restFetch('/api/list/linkedin/search-parameters?' + qs.toString(), { signal });
+      return _restFmtResolve(j?.data?.items || []);
+    }
+    case 'get_contact_profile': {
+      const nc = args?.noCache ? '?noCache=true' : '';
+      let path;
+      if (args?.profileId != null && !isNaN(Number(args.profileId))) {
+        path = `/api/linkedin-lookup/profile/${encodeURIComponent(args.profileId)}${nc}`;
+      } else {
+        const pub = args?.publicIdOrUrl ?? args?.urn ?? '';
+        path = `/api/linkedin-lookup/profile-by-public-id/${encodeURIComponent(pub)}${nc}`;
+      }
+      const j = await _restFetch(path, { signal });
+      return _restFmtProfile(j?.data || {});
+    }
+    case 'lookup_company': {
+      // REST de lookup-por-dominio/universal-name NO confirmado (rutas /api/linkedin-lookup/company* dieron 404).
+      // Resolvemos con la BÚSQUEDA de empresas (confirmada): primer match por nombre/dominio -> name/industry/headcount.
+      const kw = String(args?.companyUrlOrName || '')
+        .replace(/^https?:\/\//i, '').replace(/^www\./i, '')
+        .replace(/.*linkedin\.com\/company\//i, '').replace(/[/?#].*$/, '')
+        .replace(/\.[a-z]{2,}$/i, '').replace(/[-_]+/g, ' ').trim();
+      const j = await _restFetch('/api/list/linkedin/sales-navigator/search', {
+        method: 'POST', body: { category: 'companies', keywords: kw, profilesLimit: 1 }, signal
+      });
+      const co = j?.data?.items?.[0] || null;
+      return _restFmtLookupCompany(co);
+    }
+    default:
+      throw new Error(`[REST] tool no soportada por callREST: ${toolName}`);
+  }
+}
+
 const WEB_SEARCH_TOOL = {
   type: 'web_search_20250305',
   name: 'web_search',
   max_uses: 8
+};
+
+// Tool de web_search DEDICADO para signals con tope BAJO. El PLAN sí necesita 8 búsquedas para investigar al
+// cliente; signals solo extrae 1-2 señales con fuente, así que 3 alcanzan de sobra. Antes signals heredaba el
+// max_uses:8 del PLAN → hasta 8 búsquedas × 3 cards = se iba a 17+ por reporte (la mitad del costo).
+const SIGNALS_WEB_SEARCH_TOOL = {
+  type: 'web_search_20250305',
+  name: 'web_search',
+  max_uses: parseInt(process.env.SIGNALS_MAX_USES || '3', 10)
 };
 
 // Acumulador de tokens POR REQUEST (aislado por job con AsyncLocalStorage).
@@ -103,13 +295,25 @@ const { AsyncLocalStorage } = require('async_hooks');
 const _statsALS = new AsyncLocalStorage();
 
 function _nuevoStats() {
+  // web_searches: requests del server-tool web_search (PLAN + SIGNALS). Cuesta $10/1000 = $0.01 c/u y ANTES
+  // NO se contaba (solo tokens) -> el costo reportado subestimaba. Ahora se acumula y entra en costoDe.
   return {
     currentStage: 'gen',
-    total:  { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    // CACHE POR JOB de los ids resueltos del ICP (LOCATION/FUNCTION/SALES_INDUSTRY). El PLAN NO se re-ejecuta
+    // entre pasadas de sourceConRetry, así que estos ids son IDÉNTICOS en las 3 pasadas: resolverlos una sola
+    // vez ahorra ~8-16 llamadas resolve/reporte (rate-limit del MCP: 60 req/min). Se llena en la pasada 1.
+    _resolveCache: null,
+    // CACHE POR JOB de señales de compra por empresa (_senalesDeCuenta). Evita re-buscar la misma empresa
+    // cuando una ronda de fix re-arma cards del mismo nombre. Lazy (Map) en _senalesDeCuenta.
+    _signalsCache: null,
+    // Idioma del DOCUMENTO (lo pisa el endpoint con el valor elegido en la landing). Default español.
+    idiomaDoc: 'es',
+    total:  { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
     stages: {
-      gen:   { input: 0, output: 0, cache_write: 0, cache_read: 0 },
-      judge: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
-      fix:   { input: 0, output: 0, cache_write: 0, cache_read: 0 }
+      gen:     { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
+      signals: { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
+      judge:   { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
+      fix:     { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 }
     }
   };
 }
@@ -118,9 +322,44 @@ function _nuevoStats() {
 function _stats()     { return _statsALS.getStore() || _nuevoStats(); }
 function _setStage(s) { const st = _statsALS.getStore(); if (st) st.currentStage = s; }
 
-function costoDe({ input, output, cache_write, cache_read }) {
-  return (input * 3 + output * 15 + cache_write * 3.75 + cache_read * 0.30) / 1e6;
+// ---------------------------------------------------------------------------
+// IDIOMA — dos ejes INDEPENDIENTES:
+//   1) DOCUMENTO: lo elige el usuario en la landing (manual). Default 'es' → si no se elige, NADA cambia.
+//      Vive en el store ALS por-job (_idiomaDoc) para no pasarlo por todas las firmas del pipeline.
+//   2) HOOK: por PAÍS de cada lead (_idiomaHookDeLoc). El hook es el mensaje que se le ENVÍA a esa persona,
+//      así que va en SU idioma, que puede diferir del documento. Proxy ~85-90% (país != idioma garantizado).
+//      Sin profileLanguage confiable en el MCP, la ubicación es la mejor señal disponible.
+// ---------------------------------------------------------------------------
+const _IDIOMAS_DOC   = { es: 'español neutro latinoamericano', en: 'inglés (English, Estados Unidos)', pt: 'portugués (português do Brasil)' };
+const _TRATO_FORMAL  = { es: 'trato de "tú", cercano y directo (sin voseo argentino ni "usted")', en: 'professional second person ("you")', pt: 'tratamento em "você"' };
+const _idiomaCode    = (c) => { const k = String(c||'').trim().toLowerCase().slice(0,2); return _IDIOMAS_DOC[k] ? k : 'es'; };
+const _idiomaNombre  = (c) => _IDIOMAS_DOC[_idiomaCode(c)];
+function _idiomaDoc() { const st = _statsALS.getStore(); return _idiomaCode(st && st.idiomaDoc); }
+// Idioma del HOOK según el país que aparece en la ubicación del lead. null = país no determinado → cae al idioma del documento.
+const _PAISES_HOOK_EN = ['estados unidos','united states','usa','eeuu','ee uu','canada','reino unido','united kingdom','inglaterra','escocia','irlanda','ireland','australia','nueva zelanda','new zealand'];
+const _PAISES_HOOK_PT = ['brasil','brazil','portugal'];
+const _HOOK_LANG_LABEL = { es: 'español', en: 'inglés', pt: 'portugués' };
+function _idiomaHookDeLoc(loc){
+  const n = _norm(loc || '');
+  if(!n) return null;
+  if(_PAISES_HOOK_EN.some(p => n.includes(_norm(p)))) return 'en';
+  if(_PAISES_HOOK_PT.some(p => n.includes(_norm(p)))) return 'pt';
+  if(_PAISES.some(p => n.includes(p))) return 'es';   // _PAISES = LatAm + España (normalizado)
+  return null;
 }
+
+// Tarifas Anthropic por millón de tokens (input/output/cache_write/cache_read) + fee de web_search ($10/1000 req).
+const RATES_SONNET = { in: 3, out: 15, cw: 3.75, cr: 0.30, ws: 10000 };
+const RATES_HAIKU  = { in: 1, out: 5,  cw: 1.25, cr: 0.10, ws: 10000 };
+function _ratesDe(model){ return /haiku/i.test(String(model || '')) ? RATES_HAIKU : RATES_SONNET; }
+// Tarifa de cada etapa según el modelo que la corre (signals puede ser Haiku → no sobre-costear).
+function _ratesEtapa(etapa){ return _ratesDe(etapa === 'signals' ? MODEL_SIGNALS : etapa === 'gen' ? MODEL_GEN : MODEL_JUDGE); }
+// Costo Anthropic de un bucket de tokens, a la tarifa indicada (default Sonnet).
+function costoDe({ input, output, cache_write, cache_read, web_searches }, rates = RATES_SONNET) {
+  return (input * rates.in + output * rates.out + cache_write * rates.cw + cache_read * rates.cr + (web_searches || 0) * rates.ws) / 1e6;
+}
+// Costo total REAL = suma por etapa con su tarifa (el total agregado a tarifa Sonnet sobre-costearía la parte Haiku de signals).
+function _costoTotal(st){ return ['gen','signals','judge','fix'].reduce((c,e)=> c + costoDe(st.stages[e], _ratesEtapa(e)), 0); }
 
 // ---------------------------------------------------------------------------
 // LOG DE RESULTADOS (JSONL) — una línea estructurada por job para análisis con IA.
@@ -183,23 +422,24 @@ function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnv
     total_cards: cards.length,
     warm,                       // cards en 1er/2do grado (calidez): mejor predictor de conversión
     paginas: pageCount ?? null,
-    icp: { funcion: icp.funcion || '', geografia: icp.geografia || '', geografias: icp.geografias || [], industrias: icp.industrias || [], tamano_min: icp.tamano_min || 0 },
+    icp: { funcion: icp.funcion || '', geografia: icp.geografia || '', geografias: icp.geografias || [], industrias: icp.industrias || [], industrias_search: icp.industrias_search || [], tamano_min: icp.tamano_min || 0, tamano_max: icp.tamano_max || 0 },
     juez_fixes: (judgeResult && judgeResult.fixes) || [],
     cards,
-    costo: +costoDe(t).toFixed(4),
+    costo: +_costoTotal(_stats()).toFixed(4),
     tokens: { ...t }
   };
 }
 
 function logTokenCost(label) {
   const st = _stats();
-  const total = costoDe(st.total);
-  console.log(`[TOKENS] ${label} | in:${st.total.input} out:${st.total.output} cache_w:${st.total.cache_write} cache_r:${st.total.cache_read} | ~$${total.toFixed(4)} (Sonnet)`);
-  for (const etapa of ['gen', 'judge', 'fix']) {
+  const total = _costoTotal(st);
+  const wsT = st.total.web_searches || 0;
+  console.log(`[TOKENS] ${label} | in:${st.total.input} out:${st.total.output} cache_w:${st.total.cache_write} cache_r:${st.total.cache_read} | web_search:${wsT} (~$${(wsT*0.01).toFixed(2)}) | ~$${total.toFixed(4)} (por modelo; signals=${MODEL_SIGNALS}) [solo Anthropic; MCP/Lusha aparte]`);
+  for (const etapa of ['gen', 'signals', 'judge', 'fix']) {
     const s = st.stages[etapa];
-    const c = costoDe(s);
-    if (s.input || s.output || s.cache_read || s.cache_write) {
-      console.log(`[TOKENS]   └─ ${etapa.padEnd(5)} | in:${s.input} out:${s.output} cache_w:${s.cache_write} cache_r:${s.cache_read} | ~$${c.toFixed(4)}`);
+    const c = costoDe(s, _ratesEtapa(etapa));
+    if (s.input || s.output || s.cache_read || s.cache_write || s.web_searches) {
+      console.log(`[TOKENS]   └─ ${etapa.padEnd(7)} | in:${s.input} out:${s.output} cache_w:${s.cache_write} cache_r:${s.cache_read} | web_search:${s.web_searches||0} | ~$${c.toFixed(4)}`);
     }
   }
 }
@@ -233,20 +473,125 @@ function contarYLoguearWebSearch(data, stage) {
 // MCP IBT con logs
 // ---------------------------------------------------------------------------
 // TIMEOUT por llamada MCP: una llamada patológica (vimos get_contact_profile tardando 250s) colgaba el
-// job ENTERO porque fetch no aborta solo. Cada llamada se corta con AbortController. get_contact_profile
-// corre muchos en paralelo durante el enriquecimiento y fue el que se disparó → timeout más corto.
+// job ENTERO porque fetch no aborta solo. Cada llamada se corta con AbortController. El timeout cubre
+// fetch + lectura del body (ver callMCP): el MCP responde SSE con UN solo evento `data: {...}\n\n` al
+// final (no streamea chunks útiles; nuestro parser consume el body entero y matchea un único evento), así
+// que un idle-timeout no aplica: para un perfil lento-pero-progresando no llega ningún byte hasta el final
+// igual que en un cuelgue real, y no podríamos distinguirlos. Por eso usamos un TOPE TOTAL generoso.
+// get_contact_profile hace un fetch VIVO de LinkedIn que LEGÍTIMAMENTE tarda 40-90s; un tope de 30s lo
+// abortaba en pleno enriquecimiento. Estaba en 90s; lo BAJAMOS a 60s: sigue tolerando el perfil lento real
+// (la gran mayoría resuelve <60s) pero cada CUELGUE del MCP cuesta 30s menos. El deadline de fase de abajo
+// (ENRICH_DEADLINE_MS) es la protección PRINCIPAL contra el agotamiento de los 8 min; este timeout por-perfil
+// es secundario (acota el costo de cada cuelgue individual). Tuneable por env por si hay que volver a 90s.
 const MCP_TIMEOUT_MS         = parseInt(process.env.MCP_TIMEOUT_MS || '45000', 10);
-const MCP_PROFILE_TIMEOUT_MS = parseInt(process.env.MCP_PROFILE_TIMEOUT_MS || '30000', 10);
+const MCP_PROFILE_TIMEOUT_MS = parseInt(process.env.MCP_PROFILE_TIMEOUT_MS || '60000', 10);
 const _mcpTimeoutDe = (toolName) => toolName === 'get_contact_profile' ? MCP_PROFILE_TIMEOUT_MS : MCP_TIMEOUT_MS;
+
+// DEADLINE DE FASE para el ENRIQUECIMIENTO (get_contact_profile que trae headcount/cargo del pool).
+// Bug visto (robotic-crew): el MCP throttleó perfiles, cada uno costó hasta MCP_PROFILE_TIMEOUT_MS, y con
+// el multi-pass (sourceConRetry llama sourceCandidates hasta SOURCE_MAX_PASSES veces) la SUMA de enriquecimiento
+// se comió los 8 min del cinturón global (JOB_TIMEOUT_MS) y el job MURIÓ con TIMEOUT GLOBAL.
+// Solución: techo de tiempo TOTAL ACUMULADO POR JOB para el enriquecimiento (best-effort). El deadline se
+// inicializa la PRIMERA vez que se enriquece dentro del job y vive en el store ALS (NUNCA global mutable),
+// así abarca TODAS las pasadas. Pasado el deadline, NO se lanzan más get_contact_profile de enriquecimiento:
+// el candidato queda con headcount=null (el pipeline lo tolera; sigue siendo card válida con sus datos del search).
+// Solo aplica al enriquecimiento de pool; NO toca la resolución de cliente ni otros usos de get_contact_profile.
+const ENRICH_DEADLINE_MS = parseInt(process.env.ENRICH_DEADLINE_MS || '150000', 10);
+// Devuelve true si AÚN hay presupuesto para enriquecer; arranca el reloj acumulado en el primer uso del job.
+// Guarda { start, deadline } en el store ALS para que sea cumulativo entre pasadas y aislado por job.
+function _enrichTienePresupuesto() {
+  const st = _statsALS.getStore();
+  if (!st) return true;  // fuera de un job (no debería) -> no bloquear
+  if (st.enrichStart == null) st.enrichStart = Date.now();   // arranca el reloj la 1ra vez
+  return (Date.now() - st.enrichStart) < ENRICH_DEADLINE_MS;
+}
+
+// CACHE POR JOB de get_contact_profile (positivo Y negativo), aislado con AsyncLocalStorage (NUNCA global
+// mutable). El multi-pass (sourceConRetry/SOURCE_MAX_PASSES) re-llama get_contact_profile sobre los MISMOS
+// URNs en cada pasada; sin cache, un perfil que ya resolvió se vuelve a pedir y uno que ya falló por timeout
+// se REINTENTA y quema otra vez el presupuesto de los 90s. Cacheamos por identidad del perfil dentro del job:
+//   - HIT positivo  -> devolvemos el resultado (re-envolviendo structuredContent para no romper el contrato).
+//   - HIT negativo  -> re-lanzamos un AbortError sin tocar la red (el caller ya lo trata como vacío).
+// Honra noCache:true del caller (bypass total). Solo aplica a get_contact_profile; las demás tools intactas.
+function _profileCacheKey(args) {
+  if (!args) return null;
+  const k = args.publicIdOrUrl ?? args.urn ?? (args.profileId != null ? `pid:${args.profileId}` : null);
+  return k != null ? String(k) : null;
+}
 
 async function callMCP(toolName, args) {
   console.log(`[MCP] Llamando ${toolName} con args:`, JSON.stringify(args).substring(0, 200));
+  // DESPACHO A REST (flag SOURCE_BACKEND='rest'): mismo timeout/cache-por-job que el MCP. callREST devuelve
+  // el MISMO texto que el parser espera, así que el resto de callMCP (cache, structured, return) NO se ejecuta.
+  if (SOURCE_BACKEND === 'rest') {
+    // cache por job (solo get_contact_profile), idéntico contrato que la rama MCP de abajo.
+    const _cacheableR = toolName === 'get_contact_profile' && !(args && args.noCache === true);
+    const _ckeyR = _cacheableR ? _profileCacheKey(args) : null;
+    if (_ckeyR != null) {
+      const st0 = _statsALS.getStore();
+      const cache = st0 && (st0.profileCache || (st0.profileCache = new Map()));
+      if (cache && cache.has(_ckeyR)) {
+        const hit = cache.get(_ckeyR);
+        if (hit.ok) { console.log(`[MCP] ${toolName} CACHE HIT (positivo) [rest] ${_ckeyR.substring(0,40)}.`); return hit.value; }
+        console.log(`[MCP] ${toolName} CACHE HIT (negativo) [rest] ${_ckeyR.substring(0,40)} -> sin reintento.`);
+        const err = new Error('get_contact_profile cacheado como fallido (timeout previo)'); err.name = 'AbortError'; throw err;
+      }
+    }
+    const msR = _mcpTimeoutDe(toolName);
+    const acR = new AbortController();
+    const timerR = setTimeout(() => acR.abort(), msR);
+    try {
+      const out = await callREST(toolName, args, acR.signal);
+      console.log(`[MCP] ${toolName} OK [rest] (${out.length} chars)`);
+      if (_ckeyR != null) {
+        const st = _statsALS.getStore();
+        const cache = st && (st.profileCache || (st.profileCache = new Map()));
+        if (cache) cache.set(_ckeyR, { ok: true, value: out, structured: null });
+      }
+      return out;
+    } catch (e) {
+      if (e && e.name === 'AbortError') {
+        console.error(`[MCP] ${toolName} ABORTADA por timeout [rest] (${msR}ms).`);
+        if (_ckeyR != null) {
+          const st = _statsALS.getStore();
+          const cache = st && (st.profileCache || (st.profileCache = new Map()));
+          if (cache) cache.set(_ckeyR, { ok: false });
+        }
+      } else {
+        console.error(`[MCP] ${toolName} ERROR [rest]: ${e.message}`);
+      }
+      throw e;
+    } finally { clearTimeout(timerR); }
+  }
+  // --- cache por job (solo get_contact_profile) ---
+  const _cacheable = toolName === 'get_contact_profile' && !(args && args.noCache === true);
+  const _ckey = _cacheable ? _profileCacheKey(args) : null;
+  if (_ckey != null) {
+    const st0 = _statsALS.getStore();
+    const cache = st0 && (st0.profileCache || (st0.profileCache = new Map()));
+    if (cache && cache.has(_ckey)) {
+      const hit = cache.get(_ckey);
+      if (hit.ok) {
+        console.log(`[MCP] ${toolName} CACHE HIT (positivo) para ${_ckey.substring(0, 40)}.`);
+        if (hit.structured != null) {
+          const wrapped = new String(hit.value);
+          Object.defineProperty(wrapped, 'structuredContent', { value: hit.structured, enumerable: false });
+          return wrapped;
+        }
+        return hit.value;
+      }
+      console.log(`[MCP] ${toolName} CACHE HIT (negativo: ya abortó por timeout en este job) para ${_ckey.substring(0, 40)} -> sin reintento.`);
+      const err = new Error(`get_contact_profile cacheado como fallido (timeout previo en este job)`);
+      err.name = 'AbortError';
+      throw err;
+    }
+  }
   const ms = _mcpTimeoutDe(toolName);
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), ms);
-  let res;
+  let text;
   try {
-    res = await fetch(MCP_URL, {
+    const res = await fetch(MCP_URL, {
       method: 'POST',
       headers: IBT_HEADERS,
       signal: ac.signal,
@@ -257,15 +602,27 @@ async function callMCP(toolName, args) {
         id: Date.now()
       })
     });
+    // La lectura del body DEBE ir dentro del try: el MCP responde SSE en stream y si manda los
+    // headers pero deja el stream colgado sin emitir el `data:`, res.text() espera al cierre para
+    // siempre. Al estar bajo el mismo AbortController, el timeout aborta también la lectura del body.
+    text = await res.text();
   } catch (e) {
-    // AbortError = se cortó por timeout. Lo logueamos (los catch de los callers son silenciosos) y
-    // re-lanzamos: el caller que ya está envuelto en try/catch devuelve vacío y el pool sigue.
-    if (e && e.name === 'AbortError') console.error(`[MCP] ${toolName} ABORTADA por timeout (${ms}ms).`);
+    // AbortError = se cortó por timeout (en el fetch o en la lectura del stream). Lo logueamos (los
+    // catch de los callers son silenciosos) y re-lanzamos: el caller envuelto en try/catch devuelve
+    // vacío y el pool sigue.
+    if (e && e.name === 'AbortError') {
+      console.error(`[MCP] ${toolName} ABORTADA por timeout (${ms}ms).`);
+      // cache NEGATIVO por job: no reintentar este URN en pasadas siguientes (ya quemó su presupuesto).
+      if (_ckey != null) {
+        const st = _statsALS.getStore();
+        const cache = st && (st.profileCache || (st.profileCache = new Map()));
+        if (cache) cache.set(_ckey, { ok: false });
+      }
+    }
     throw e;
   } finally {
     clearTimeout(timer);
   }
-  const text = await res.text();
   const match = text.match(/data: ({.*})\n\n/);
   if (!match) {
     console.error(`[MCP] ERROR: no se pudo parsear respuesta de ${toolName}`);
@@ -273,7 +630,29 @@ async function callMCP(toolName, args) {
   }
   const parsed = JSON.parse(match[1]);
   const result = parsed?.result?.content?.[0]?.text || JSON.stringify(parsed?.result);
+  // structuredContent: si el MCP lo expone, lo adjuntamos SIN romper el contrato (los callers que
+  // esperan el texto lo siguen recibiendo: devolvemos un String, con el structured como propiedad
+  // NO enumerable para no contaminar JSON.stringify ni los regex de los parsers). Log UNA vez por job.
+  const structured = parsed?.result?.structuredContent ?? null;
+  const st = _statsALS.getStore();
+  if (st && !st.mcpStructuredLogged) {
+    st.mcpStructuredLogged = true;
+    console.log(`[MCP] structuredContent: ${structured ? 'presente' : 'ausente'}`);
+  }
   console.log(`[MCP] ${toolName} OK (${result.length} chars)`);
+  // cache POSITIVO por job: guardamos el texto + structured crudos para re-envolver en HITs siguientes.
+  if (_ckey != null) {
+    const st = _statsALS.getStore();
+    const cache = st && (st.profileCache || (st.profileCache = new Map()));
+    if (cache) cache.set(_ckey, { ok: true, value: result, structured });
+  }
+  // El primitivo string no acepta props; lo envolvemos en String() (objeto) y le colgamos el structured.
+  // `String(x)` en cualquier caller lo re-coacciona al primitivo, así que NO cambia comportamiento.
+  if (structured != null) {
+    const wrapped = new String(result);
+    Object.defineProperty(wrapped, 'structuredContent', { value: structured, enumerable: false });
+    return wrapped;
+  }
   return result;
 }
 
@@ -282,21 +661,23 @@ async function listMCPTools() {
   // Mismo patrón de timeout que callMCP: sin AbortController, un MCP colgado dejaba este fetch (y el job) pendiente para siempre.
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), MCP_TIMEOUT_MS);
-  let res;
+  let text;
   try {
-    res = await fetch(MCP_URL, {
+    const res = await fetch(MCP_URL, {
       method: 'POST',
       headers: IBT_HEADERS,
       signal: ac.signal,
       body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', params: {}, id: 1 })
     });
+    // La lectura del body va dentro del try (igual que callMCP): un stream SSE colgado tras los
+    // headers haría que res.text() espere para siempre fuera del alcance del AbortController.
+    text = await res.text();
   } catch (e) {
     if (e && e.name === 'AbortError') console.error(`[MCP] listMCPTools ABORTADA por timeout (${MCP_TIMEOUT_MS}ms).`);
     throw e;
   } finally {
     clearTimeout(timer);
   }
-  const text = await res.text();
   const match = text.match(/data: ({.*})\n\n/);
   if (!match) throw new Error('No se pudo listar tools');
   const parsed = JSON.parse(match[1]);
@@ -424,10 +805,11 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
     const o = data.usage.output_tokens || 0;
     const cw = data.usage.cache_creation_input_tokens || 0;
     const cr = data.usage.cache_read_input_tokens || 0;
+    const ws = data.usage.server_tool_use?.web_search_requests || 0;   // fee de web_search ($0.01 c/u)
     const _s = _stats();
-    _s.total.input += i; _s.total.output += o; _s.total.cache_write += cw; _s.total.cache_read += cr;
+    _s.total.input += i; _s.total.output += o; _s.total.cache_write += cw; _s.total.cache_read += cr; _s.total.web_searches += ws;
     const st = _s.stages[_s.currentStage];
-    if (st) { st.input += i; st.output += o; st.cache_write += cw; st.cache_read += cr; }
+    if (st) { st.input += i; st.output += o; st.cache_write += cw; st.cache_read += cr; st.web_searches += ws; }
   }
   return data;
 }
@@ -659,6 +1041,40 @@ async function contarPaginas(pdfBuffer) {
 function _empresaDeHeadline(txt){let m=(txt||'').match(/@\s*([^·•|(\n]+)/);if(!m)m=(txt||'').match(/\bat\s+([^·•|(\n]+)/i);const e=m?m[1].trim():'';return e==='?'?'':e;}
 function _empresaDeLookup(txt){const m=(txt||'').match(/Company:\s*(.+?)\s*(?:\[|—|\u2014|,|$)/i);return m?m[1].trim():'';}
 function _headcountDe(txt){const m=(txt||'').match(/([\d][\d.,]*)\s*employees/i);return m?(parseInt(m[1].replace(/[.,]/g,''),10)||null):null;}
+// ¿El input es un link/slug de EMPRESA de LinkedIn (no un dominio real)? Cubre /company/ y /school/
+// (también showcase). Devuelve el slug si lo es, o '' si no. Un dominio común tipo "robotic-crew.com"
+// NO matchea (no contiene linkedin.com/company|school|showcase) → camino normal intacto.
+function _slugLinkedInCompany(input){
+  const s = String(input||'').trim();
+  if(!s) return '';
+  const m = s.match(/linkedin\.com\/(?:company|school|showcase)\/([^/?#\s]+)/i);
+  return m ? decodeURIComponent(m[1]).trim() : '';
+}
+// Nombre tentativo de empresa desde un dominio: primer label antes del punto, guiones/underscores -> espacios
+// (ej. "robotic-crew.com" -> "robotic crew"). Para el fallback por nombre en Sales Nav. '' si es LinkedIn.
+function _nombreDeDominio(dom){
+  const s = String(dom||'').trim().replace(/^https?:\/\//i,'').replace(/^www\./i,'');
+  if(!s || /linkedin\.com/i.test(s)) return '';
+  return s.split('/')[0].split('.')[0].replace(/[-_]+/g,' ').trim();
+}
+// Dominio/website REAL de la empresa desde el texto crudo de lookup_company. BEST-EFFORT: el endpoint
+// /api/mcp devuelve TEXTO (no JSON), así que cubrimos formatos plausibles ("Website: X", "Domain: X",
+// "URL: X") y, como último recurso, el primer dominio suelto que NO sea linkedin. NUNCA fabrica: devuelve
+// '' si no encuentra nada confiable. Limpia esquema/www/path para quedarnos con el host (ej. "robotic-crew.com").
+function _dominioDeLookup(txt){
+  const s = String(txt||'');
+  let m = s.match(/\b(?:website|web site|web|domain|dominio|url|site)\s*[:=]\s*(\S+)/i);
+  let raw = m ? m[1] : '';
+  if(!raw){
+    // Fallback: primer dominio suelto en el texto que no sea de linkedin.
+    const cand = [...s.matchAll(/\bhttps?:\/\/[^\s)"']+|\b[a-z0-9][a-z0-9.-]*\.[a-z]{2,}\b/gi)]
+      .map(x=>x[0]).find(d => !/linkedin\.com/i.test(d));
+    raw = cand || '';
+  }
+  const host = String(raw).replace(/^https?:\/\//i,'').replace(/^www\./i,'').split(/[/?#]/)[0].trim().toLowerCase();
+  if(!host || !host.includes('.') || /linkedin\.com/i.test(host)) return '';
+  return host;
+}
 // SEÑALES: intenta leer un TOTAL agregado del texto crudo de search_sales_navigator_filtered.
 // El gateway de claude.ai expone paging.total_count en JSON, pero el endpoint /api/mcp del server
 // devuelve TEXTO (otra serialización). NO está garantizado que el texto traiga el total; por eso esto
@@ -714,7 +1130,47 @@ function _matchVerticalExcluir(txt, excluir){
   return (excluir||[]).some(v => t.includes(v));
 }
 
+// UN reintento ACOTADO para la resolución INICIAL del cliente: es la PRIMERA llamada MCP del job y si
+// el MCP está frío (post-redeploy) y la primera se cae por timeout, mata el job entero antes de empezar.
+// Solo reintenta ante timeout/red (AbortError o falla de fetch), NO ante respuesta inservible. Costo de
+// latencia: 1 reintento = hasta 2x MCP_TIMEOUT_MS (~90s) en el peor caso, aceptable dentro del cinturón
+// global de 8 min. NO se usa en `corroborar` (enriquecimiento, no crítico) para no sumar latencia ahí.
+async function _callMCPClienteConRetry(toolName, args) {
+  try {
+    return await callMCP(toolName, args);
+  } catch (e) {
+    const reintentable = (e && (e.name === 'AbortError' || e.name === 'TypeError' || /fetch|network|ECONN/i.test(e.message || '')));
+    if (!reintentable) throw e;
+    console.warn(`[CLIENTE] ${toolName} falló (${e.name || e.message}); 1 reintento (MCP posiblemente frío)...`);
+    return await callMCP(toolName, args);
+  }
+}
+
 async function resolverCliente({ profileId, dominio, empresa }) {
+  // LINK DE LINKEDIN DE EMPRESA: si en `dominio` (o `empresa`) llega un link/slug de company/school de
+  // LinkedIn, NO es un dominio usable (quedaría "linkedin.com"). Lo resolvemos vía lookup_company para
+  // obtener el NOMBRE real (siempre) y el dominio/website real (si el MCP lo expone). Con eso seguimos
+  // el flujo normal: dominio real -> camino de dominio; sin dominio -> al menos nombre real para PLAN/sourcing.
+  const slugLI = _slugLinkedInCompany(dominio) || _slugLinkedInCompany(empresa);
+  if(slugLI){
+    try{
+      const txt = await _callMCPClienteConRetry('lookup_company', { companyUrlOrName: slugLI });
+      const empLI = _empresaDeLookup(txt) || empresa || slugLI.replace(/[-_]+/g,' ').trim();
+      const domLI = _dominioDeLookup(txt);
+      const hcLI  = _headcountDe(txt);
+      console.log(`[CLIENTE] link LinkedIn "${slugLI}" -> empresa "${empLI}" (dominio ${domLI || 'no disponible'}, ${hcLI ?? '?'} empleados)`);
+      // Anclamos DIRECTO con los datos de la página de la empresa en LinkedIn (nombre + headcount = confiables).
+      // NO re-consultamos el dominio: el lookup POR-DOMINIO puede estar roto aunque la empresa exista (visto:
+      // robotic-crew.com -> 500 "company no longer exists", pero el slug /company/robotic-crew sí resuelve).
+      return { empresa: empLI, dominio: domLI || '', headcount: hcLI, tier: _tier(hcLI), anclado: true, fuente: 'linkedin_company', confianza: hcLI ? 'alta' : 'media' };
+    }catch(e){
+      console.warn(`[CLIENTE] lookup_company para link LinkedIn "${slugLI}" falló:`, e.message);
+      // Aun fallando: el slug es mejor cliente que "linkedin.com". Lo usamos como nombre (lo agarra el fallback
+      // por nombre de abajo) y limpiamos el dominio LinkedIn para que NO contamine downstream.
+      if(!empresa) empresa = slugLI.replace(/[-_]+/g,' ').trim();
+      dominio = '';
+    }
+  }
   const dominioReal = !!(dominio && !_esEmailGratuito(dominio));
 
   async function corroborar(base) {
@@ -737,7 +1193,7 @@ async function resolverCliente({ profileId, dominio, empresa }) {
 
   if (profileId != null && String(profileId).trim() !== '' && !isNaN(Number(profileId))) {
     try {
-      const txt = await callMCP('get_contact_profile', { profileId: Number(profileId) });
+      const txt = await _callMCPClienteConRetry('get_contact_profile', { profileId: Number(profileId) });
       const emp = _empresaDeHeadline(txt);
       const hc = _headcountDe(txt);
       if (emp) {
@@ -748,12 +1204,27 @@ async function resolverCliente({ profileId, dominio, empresa }) {
   }
   if (dominio && !_esEmailGratuito(dominio)) {
     try {
-      const txt = await callMCP('lookup_company', { companyUrlOrName: dominio });
+      const txt = await _callMCPClienteConRetry('lookup_company', { companyUrlOrName: dominio });
       const emp = _empresaDeLookup(txt) || empresa || dominio;
       const hc = _headcountDe(txt);
       console.log(`[CLIENTE] anclado por dominio ${dominio} -> "${emp}" (${hc ?? '?'} empleados, tier ${_tier(hc)})`);
       return { empresa: emp, dominio, headcount: hc, tier: _tier(hc), anclado: true, fuente: 'dominio', confianza: 'media' };
     } catch (e) { console.warn(`[CLIENTE] dominio ${dominio} no resolvió:`, e.message); }
+  }
+  // FALLBACK por NOMBRE (Sales Navigator): no anclamos por perfil ni por dominio. Antes de rendirnos,
+  // confirmamos la empresa por NOMBRE vía resolve — más robusto que el lookup por dominio (resolve encontró
+  // "Robotic Crew" cuando robotic-crew.com daba 500). Si existe en Sales Nav, anclamos por nombre canónico.
+  const nombreCand = String(empresa || '').trim() || (dominio && !_esEmailGratuito(dominio) ? _nombreDeDominio(dominio) : '');
+  if(nombreCand){
+    try{
+      const txt = String(await _callMCPClienteConRetry('resolve_sales_navigator_id', { type:'COMPANY', keywords:nombreCand, limit:5 }));
+      const ms = [...txt.matchAll(/id="?([0-9]+)"?\s+"([^"]+)"/g)].map(m=>({ id:m[1], name:m[2] }));
+      const hit = ms.find(x => _empKey(x.name) === _empKey(nombreCand)) || ms[0];   // match exacto > primer match
+      if(hit){
+        console.log(`[CLIENTE] anclado por NOMBRE vía Sales Nav: "${hit.name}" (id ${hit.id}) [perfil/dominio no resolvió]`);
+        return { empresa: hit.name, dominio: dominio || '', headcount: null, tier: null, anclado: true, fuente: 'sales_nav_nombre', confianza: 'media' };
+      }
+    }catch(e){ console.warn(`[CLIENTE] fallback por nombre "${nombreCand}" falló:`, e.message); }
   }
   console.warn(`[CLIENTE] ⚠️ SIN ANCLAR (dominio="${dominio}", empresa="${empresa}") -> anclado:false`);
   return { empresa: empresa || dominio || '', dominio: dominio || '', headcount: null, tier: null, anclado: false, fuente: 'sin_anclar', confianza: 'baja' };
@@ -894,6 +1365,58 @@ function _parseCompanies(res){
   return [...String(res||'').matchAll(/id=([0-9]+)\s+"([^"]+)"\s+(.*?)\s*\(\s*([^)]*?)\s*employees/g)]
     .map(x=>({ id:x[1], name:x[2], industry:(x[3]||'').trim(), headcount: _parseHC(x[4]) }));
 }
+
+// ===== TAXONOMÍA LINKEDIN (mapeo LOCAL, reemplaza al resolve_sales_navigator_id difuso) =====
+// PROBLEMA QUE RESUELVE: resolve_sales_navigator_id(SALES_INDUSTRY/FUNCTION) con texto libre en español
+// devolvía 0 resultados (cae el filtro en silencio) o una SUBCATEGORÍA equivocada (con limit:1: "Retail"->id 19
+// = "Retail Apparel", "Consumer Goods"->1786="Consumer Goods Rental"). Verificado en vivo 2026-06-13. La búsqueda
+// real (search_sales_navigator_filtered.industry.include) acepta los IDs OFICIALES V2 de LinkedIn directo
+// (Retail=27 trae Carrefour/Farmacity). Por eso mapeamos NOMBRE -> id contra la tabla oficial V2 (taxonomia-industrias.json,
+// 487 industrias de Microsoft Learn) y la de funciones (taxonomia-funciones.json). Sin llamadas al MCP, determinístico.
+const _TAX_IND = (()=>{ try { return require('./taxonomia-industrias.json'); } catch(e){ console.warn('[TAX] no se pudo cargar taxonomia-industrias.json: '+e.message); return []; } })();
+const _TAX_FUN = (()=>{ try { return require('./taxonomia-funciones.json'); } catch(e){ console.warn('[TAX] no se pudo cargar taxonomia-funciones.json: '+e.message); return { functions:{}, aliases:{} }; } })();
+function _normTax(s){
+  return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')   // sin tildes
+    .replace(/&/g,' and ').replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
+}
+const _IND_BY_NORM = (()=>{ const m=new Map(); for(const x of _TAX_IND){ const k=_normTax(x.label); if(k && !m.has(k)) m.set(k,x); } return m; })();
+// Alias ES->EN canónico (cuando el PLAN manda la industria en español). El target tiene que existir como label en la tabla.
+const _IND_ALIAS_ES = {
+  'bienes de consumo':'Consumer Goods','bienes de consumo masivo':'Consumer Goods','productos de consumo':'Consumer Goods','consumo masivo':'Consumer Goods',
+  'comercio minorista':'Retail','comercio al por menor':'Retail','venta minorista':'Retail','minorista':'Retail',
+  'indumentaria':'Retail Apparel and Fashion','moda':'Retail Apparel and Fashion','ropa':'Retail Apparel and Fashion',
+  'alimentos':'Food and Beverage Services','alimentos y bebidas':'Food and Beverage Services','alimentacion y bebidas':'Food and Beverage Services','bebidas':'Food and Beverage Services',
+  'automotriz':'Automotive','automotor':'Automotive','automovil':'Automotive',
+  'cuidado personal y belleza':'Cosmetics','cuidado personal':'Cosmetics','belleza':'Cosmetics','cosmetica':'Cosmetics','cosmeticos':'Cosmetics',
+  'servicios financieros':'Financial Services','finanzas':'Financial Services','banca':'Banking','bancos':'Banking','seguros':'Insurance',
+  'tecnologia':'Technology, Information and Internet','software':'Software Development','tecnologia de la informacion':'IT Services and IT Consulting','ti':'IT Services and IT Consulting',
+  'salud':'Hospitals and Health Care',
+  'inmobiliario':'Real Estate','bienes raices':'Real Estate','construccion':'Construction',
+  'manufactura':'Manufacturing','industria':'Manufacturing','maquinaria':'Machinery Manufacturing','maquinaria industrial':'Industrial Machinery Manufacturing',
+  'logistica':'Transportation, Logistics, Supply Chain and Storage','hoteleria':'Hospitality','turismo':'Travel Arrangements','educacion':'Education',
+  'telecomunicaciones':'Telecommunications','publicidad':'Advertising Services','agricultura':'Farming','mineria':'Mining','energia':'Utilities'
+};
+// Nombre de industria (ES o EN) -> {id,label} oficial V2. null si no mapea (se loguea, NO se cae en silencio).
+function _mapIndustria(name){
+  const n=_normTax(name); if(!n) return null;
+  if(_IND_BY_NORM.has(n)) return _IND_BY_NORM.get(n);                 // 1) exacto contra tabla oficial
+  const al=_IND_ALIAS_ES[n];                                          // 2) alias ES->EN
+  if(al){ const k=_normTax(al); if(_IND_BY_NORM.has(k)) return _IND_BY_NORM.get(k); }
+  let best=null;                                                      // 3) inclusión: la etiqueta más "madre" (más corta) que matchea
+  for(const x of _TAX_IND){ const k=_normTax(x.label); if(k===n) return x; if(k.includes(n)||n.includes(k)){ if(!best||x.label.length<best.label.length) best=x; } }
+  return best;
+}
+// Nombre de función (ES o EN, ej. "Marketing / Comunicación") -> code del filtro (ej. "mrkt"). null si no mapea.
+function _mapFuncion(name){
+  const fns=_TAX_FUN.functions||{}, al=_TAX_FUN.aliases||{}; const n=_normTax(name); if(!n) return null;
+  for(const [label,code] of Object.entries(fns)){ if(_normTax(label)===n) return code; }      // exacto
+  if(al[n] && fns[al[n]]) return fns[al[n]];                                                   // alias ES exacto
+  // inclusión por PALABRA COMPLETA (no substring: evita que "ti"/"it" matcheen "operaTIons"). Una palabra del input
+  // tiene que ser igual a una palabra de un label de función (ej. "marketing" en "Marketing / Comunicación" -> mrkt).
+  const words = new Set(n.split(' ').filter(w => w.length >= 3));
+  for(const [label,code] of Object.entries(fns)){ const lw=_normTax(label).split(' '); if(lw.some(w => w.length>=3 && words.has(w))) return code; }
+  return null;
+}
 // Sales Navigator NO acepta rangos de headcount arbitrarios: solo estos brackets fijos.
 // Pasar {min:100,max:100000} hace fallar la query (error 500) → 0 cuentas-ancla.
 const _HC_BRACKETS = [
@@ -981,30 +1504,68 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // POBLADO); quedarse con uno solo por match exacto perdía el nodo con datos. País-level = la parte
   // antes de la primera coma, normalizada, === _norm(nombrePais). Así excluimos estados ("New Mexico,
   // United States" -> "new mexico"), ciudades ("Mexico City, Mexico") y provincias ("Jalisco, Mexico").
+  // Sales Navigator indexa LOCATION en INGLÉS. El PLAN da el país en español ("Estados Unidos") y el resolve
+  // devuelve VACÍO (confirmado: "Estados Unidos"->[] vs "United States"->id 103644278) -> homeLoc quedaba
+  // vacío -> SIN filtro de país -> se colaban empresas de otros países (visto: una española). Traducimos los
+  // países más comunes a inglés para el resolve y el match país-level. Si no está en el mapa, usamos el original.
+  const _PAIS_ES_EN = { 'estados unidos':'United States','eeuu':'United States','ee uu':'United States','usa':'United States','espana':'Spain','mexico':'Mexico','brasil':'Brazil','reino unido':'United Kingdom','alemania':'Germany','francia':'France','italia':'Italy','holanda':'Netherlands','paises bajos':'Netherlands','canada':'Canada','colombia':'Colombia','argentina':'Argentina','chile':'Chile','peru':'Peru','uruguay':'Uruguay','ecuador':'Ecuador' };
   async function locIds(nombrePais){
     try{
-      const objetivo = _norm(nombrePais);
-      const txt = String(await callMCP('resolve_sales_navigator_id',{type:'LOCATION',keywords:nombrePais,limit:8}));
+      const objetivoEs = _norm(nombrePais);
+      const enKw = _PAIS_ES_EN[objetivoEs] || nombrePais;   // inglés si lo conocemos; si no, el original
+      const objetivoEn = _norm(enKw);
+      const txt = String(await callMCP('resolve_sales_navigator_id',{type:'LOCATION',keywords:enKw,limit:8}));
       const matches = [...txt.matchAll(/id="?([0-9]+)"?\s+"([^"]+)"/g)].map(m=>({id:m[1],name:m[2]}));
-      const paisLevel = matches.filter(m => _norm(String(m.name).split(',')[0]) === objetivo);
+      // match país-level contra el nombre en inglés O el original (por si el MCP devolviera en español)
+      const paisLevel = matches.filter(m => { const n=_norm(String(m.name).split(',')[0]); return n===objetivoEn || n===objetivoEs; });
       const ids = [...new Set(paisLevel.map(m=>m.id))];
       if(ids.length){
-        console.log(`[SOURCE] LOCATION "${nombrePais}" -> ${ids.length} ids país-level: ${ids.join(', ')}`);
+        console.log(`[SOURCE] LOCATION "${nombrePais}"->"${enKw}" -> ${ids.length} ids país-level: ${ids.join(', ')}`);
         return ids;
       }
       // Ningún match país-level: fallback al primer match (comportamiento previo) con aviso.
-      if(matches[0]) console.warn(`[SOURCE] LOCATION "${nombrePais}": sin match país-level, uso "${matches[0].name}" (${matches[0].id}).`);
+      if(matches[0]) console.warn(`[SOURCE] LOCATION "${nombrePais}"->"${enKw}": sin match país-level, uso "${matches[0].name}" (${matches[0].id}).`);
       return matches[0] ? [matches[0].id] : [];
     }catch{ return []; }
   }
-  let fnId=null;
-  try{ fnId=(String(await callMCP('resolve_sales_navigator_id',{type:'FUNCTION',keywords:funcion,limit:3})).match(/id="?([A-Za-z0-9_]+)"?/)||[])[1]||null; }catch{}
+  // ===== RESOLVE_* CACHEADO POR JOB ==========================================================
+  // El ICP no cambia entre pasadas (sourceConRetry llama hasta SOURCE_MAX_PASSES veces sin re-correr el PLAN),
+  // así que LOCATION/FUNCTION/SALES_INDUSTRY resuelven a los MISMOS ids siempre. Resolvemos UNA sola vez por
+  // job (cache en el store de AsyncLocalStorage) y reusamos en las pasadas 2/3 -> ahorra ~8-16 resolve/reporte
+  // (tope MCP 60 req/min). Si la cache ya está, saltamos TODOS los resolve_* de abajo.
+  const _st = _statsALS.getStore();
+  let fnId, indIds, homeLoc, opsIds;
+  if(_st && _st._resolveCache){
+    ({ fnId, indIds, homeLoc, opsIds } = _st._resolveCache);
+    console.log(`[SOURCE] resolve_* REUSADOS de cache por job (0 llamadas resolve): fn=${fnId||'-'} ind=[${indIds.join('+')||'-'}] homeLoc=[${homeLoc.join(',')||'-'}] ops=[${opsIds.join(',')||'-'}].`);
+  } else {
+    // FUNCIÓN: mapeo LOCAL contra la taxonomía (reemplaza el resolve difuso del MCP). "Marketing / Comunicación" -> "mrkt".
+    fnId = _mapFuncion(funcion);
+    if(!fnId && funcion) console.warn(`[TAX] función "${funcion}" no mapeó a un code de LinkedIn; sourcing sin filtro de función (cae a keywords).`);
 
-  // INDUSTRIAS ANCLA: verticales del ICP -> IDs de Sales Navigator (filtro de fit DURO).
-  // Con esto traemos decisores EN aseguradoras/retailers/inmobiliarias, no admins de cualquier empresa.
-  const indIds=[];
-  for(const ind of (Array.isArray(icp.industrias)?icp.industrias:[]).slice(0,6)){
-    try{ const id=(String(await callMCP('resolve_sales_navigator_id',{type:'SALES_INDUSTRY',keywords:ind,limit:1})).match(/id="?([0-9]+)"?/)||[])[1]; if(id && !indIds.includes(id)) indIds.push(id); }catch{}
+    // INDUSTRIAS ANCLA: verticales del ICP -> IDs OFICIALES V2 (filtro de fit DURO), mapeo LOCAL (no el resolve difuso, que
+    // devolvía subcategorías equivocadas). Preferimos icp.industrias_search (inglés canónico que el PLAN emite para la
+    // búsqueda); si no está, caemos a icp.industrias (con alias ES->EN). Si una industria no mapea, se loguea (no se cae en silencio).
+    indIds=[];
+    const _indNames = (Array.isArray(icp.industrias_search) && icp.industrias_search.length) ? icp.industrias_search
+                    : (Array.isArray(icp.industrias) ? icp.industrias : []);
+    const _indMiss=[];
+    for(const ind of _indNames.slice(0,8)){
+      const hit=_mapIndustria(ind);
+      if(hit){ if(!indIds.includes(hit.id)) indIds.push(hit.id); }
+      else _indMiss.push(ind);
+    }
+    if(_indMiss.length) console.warn(`[TAX] industrias sin mapear (ignoradas): ${_indMiss.join(' · ')}`);
+    console.log(`[TAX] industrias mapeadas: ${indIds.length}/${_indNames.length} -> [${indIds.join(', ')||'-'}] | función "${funcion}" -> ${fnId||'(sin filtro)'}`);
+
+    // GEOGRAFÍA: país principal PRIMERO + países donde el cliente HOY opera (cercanos).
+    homeLoc = await locIds(geografia);    // todos los ids país-level del país principal
+    opsIds  = [];
+    for(const g of secundarias){
+      for(const id of await locIds(g)){ if(!homeLoc.includes(id) && !opsIds.includes(id)) opsIds.push(id); }
+    }
+    if(_st){ _st._resolveCache = { fnId, indIds, homeLoc, opsIds }; }
+    console.log(`[SOURCE] resolve_* RESUELTOS (pasada 1, cacheados por job): fn=${fnId||'-'} ind=[${indIds.join('+')||'-'}] homeLoc=[${homeLoc.join(',')||'-'}] ops=[${opsIds.join(',')||'-'}].`);
   }
 
   // SIN filtro de grado en el search (no es confiable: 1st->0, 2nd mezcla 3ro). Traemos por FIT
@@ -1012,7 +1573,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // SEÑALES: guardamos el último texto crudo de una búsqueda de people (para leer un total si lo trae el MCP).
   let txtPeopleSenal = '';
   async function buscarUno(locIds, conIndustria, kwUnico, soloRecienCambio){
-    const f={ category:'people', profilesLimit:50 };
+    const f={ category:'people', profilesLimit:SOURCE_PROFILES_LIMIT };
     if(kwUnico) f.keywords = kwUnico;                       // UNA sola palabra/término (multi-palabra da 0)
     if(locIds && locIds.length) f.location={ include: locIds };
     if(fnId) f.function={ include:[fnId] };
@@ -1034,12 +1595,8 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   }
   const _validosHome = arr => arr.filter(p => _rankSenioridad(p.head) >= 2 && _esCerca(p.loc)).length;
 
-  // GEOGRAFÍA: país principal PRIMERO + países donde el cliente HOY opera (cercanos).
-  const homeLoc = await locIds(geografia);    // todos los ids país-level del país principal
-  const opsIds  = [];
-  for(const g of secundarias){
-    for(const id of await locIds(g)){ if(!homeLoc.includes(id) && !opsIds.includes(id)) opsIds.push(id); }
-  }
+  // GEOGRAFÍA: país principal PRIMERO + países donde el cliente HOY opera (cercanos). homeLoc/opsIds ya se
+  // resolvieron (y cachearon por job) arriba en el bloque RESOLVE_* cacheado.
   const geoLoc  = [...new Set([...homeLoc, ...opsIds])];
   const geoLocOrNull = geoLoc.length ? geoLoc : null;
   const HOME_MIN = parseInt(process.env.SOURCE_HOME_MIN || String(NUM_CUENTAS + 2), 10);
@@ -1067,6 +1624,10 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const _offVert = (c) => _matchVerticalExcluir(c.empresa, excluir) || _matchVerticalExcluir(c.head, excluir);
 
   const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
+  // TECHO DE TAMAÑO (anti-gigante): el comprador de una boutique chica NO es un Fortune-50 (caso Aenima 37 empl.
+  // → JPMorgan/Lockheed). El PLAN razona `tamano_max`; 0 = sin techo (research pobre → no actúa, degradación
+  // digna). Cuando tamano_max>0, la lógica de techo (3 puntos) veta gigantes y se relaja antes de quedar corto.
+  const tamMax = parseInt(icp.tamano_max || 0, 10) || 0;
 
   // SCORING del candidato (UNA sola definición → las 3 llamadas quedan idénticas, sin drift posible).
   // Principio (auditoría GTM, casos reales Brandtrack/NOCNOK): DECISIÓN y FIT-DE-VERTICAL son los DRIVERS;
@@ -1101,6 +1662,9 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       + (c.cerca?3:0)
       + (c.recienAsumio?8:0)                                   // señal de compra: asumió el rol hace poco
       + (c.posts>0?2:0)                                        // señal de actividad: activo en LinkedIn
+      // SEÑALES DE EMPRESA (reales del MCP): realce ADITIVO modesto, NO filtro. Funding/leadership son los
+      // disparadores de compra más fuertes (+3 c/u); hiring/growth son contexto de actividad (+2 c/u). Capeado.
+      + (c.senales ? Math.min(7, (c.senales.funding?3:0)+(c.senales.leadership?3:0)+(c.senales.hiring?2:0)+(c.senales.growth?2:0)) : 0)
       - (c.icSuelto?60:0)
       // N3/N4: la FUNCIÓN equivocada (off-vertical o sin fit real) se hunde ANTES de cortar los 18 a la IA,
       // para que no llegue. Más fuerte si encima es frío (N4 nunca; N3 frío-buen-fit conserva fit y no se penaliza).
@@ -1117,13 +1681,71 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // SEÑALES (datos reales del MCP, NUNCA inventados): nos guardamos crudos/conteos para armarlas abajo.
   let txtCoSenal = '', txtCoBase = '';   // texto crudo de la búsqueda de empresas (para leer un total si lo trae)
   let nConSenal = 0;                      // cuántas empresas-ancla con crecimiento de headcount (señal de actividad)
+  // SEÑALES DE COMPRA POR EMPRESA (id-cross): cada filtro del MCP que devuelve la empresa la "marca".
+  // Las claves son flags REALES del filtro (NO inventamos monto ni fecha). Mapa id -> {funding,hiring,leadership,growth}.
+  const coSenales = new Map();   // companyId(string) -> {funding,hiring,leadership,growth}
+  const _marcarCo = (lista, flag) => { for(const c of (lista||[])){ if(!c.id) continue; const s = coSenales.get(c.id) || {}; s[flag] = true; coSenales.set(c.id, s); } };
+  // SEÑALES DEL NICHO POR NOMBRE (set por _empKey, no por id): las MISMAS búsquedas amplias de empresas que ya
+  // corremos en pasada 1 (industry+geo del ICP, una por flag de señal) nos dan TODAS las empresas del nicho con
+  // CADA señal, no solo las cuentas-ancla. Las indexamos por _empKey(name) para poder marcar la señal en
+  // CUALQUIER candidato del pool (cuya empresa salga del headline, sin id resuelto) por NOMBRE EXACTO, sin pagar
+  // 1 resolve+1 search por card. ESTE es el mecanismo que evita las ~15-30 llamadas de enriquecerSenalesEmpresa:
+  // las empresas finales que reciban marca por nombre acá NO se re-consultan post-SELECT.
+  // (funding ya lo hacía; extendido a hiring/leadership/growth con el MISMO patrón y mismo anti-invención).
+  const senalNombres = { funding:new Set(), hiring:new Set(), leadership:new Set(), growth:new Set() };  // _empKey(name) -> flag
+  const fundingNombres = senalNombres.funding;   // alias para no tocar los usos posteriores de funding
+  const _addNombres = (lista, flag) => { for(const c of (lista||[])){ const k=_empKey(c.name||''); if(k) senalNombres[flag].add(k); } };
+  // ANCLAS SOLO EN EL PAÍS PRINCIPAL para clientes chicos / techo bajo: una búsqueda de EMPRESAS multi-país
+  // (AR+US) ordena por relevancia/tamaño y trae gigantes globales de EE.UU. (Ford, Walmart, PepsiCo…) que el
+  // techo después veta ~100, dejando 0 anclas reales del país del cliente (caso Aenima, 37 empl.). Para un
+  // comprador de boutique las cuentas objetivo están en SU país. Las PERSONAS siguen multi-país (geoLocOrNull)
+  // para no perder 2do grado disperso. Enterprise (headcount alto y sin techo bajo) NO se toca.
+  const ANCLA_SOLO_HOME_HC  = parseInt(process.env.SOURCE_ANCLA_SOLO_HOME_HC  || '150',  10);
+  const ANCLA_SOLO_HOME_TAM = parseInt(process.env.SOURCE_ANCLA_SOLO_HOME_TAM || '5000', 10);
+  const _clienteChico = (cliente && cliente.headcount != null && cliente.headcount < ANCLA_SOLO_HOME_HC)
+                     || (tamMax > 0 && tamMax <= ANCLA_SOLO_HOME_TAM);
+  const geoAncla = (_clienteChico && homeLoc.length) ? homeLoc : geoLocOrNull;
+  if(_clienteChico && homeLoc.length && (geoAncla||[]).length < (geoLocOrNull||[]).length){
+    console.log(`[SOURCE] cliente chico (hc=${cliente&&cliente.headcount!=null?cliente.headcount:'?'}, techo=${tamMax||'-'}) → cuentas-ancla SOLO en país principal homeLoc=[${homeLoc.join(',')}] (personas siguen multi-país).`);
+  }
   if(indIds.length && geoLocOrNull){
-    const baseCo = { category:'companies', profilesLimit:25, location:{include:geoLocOrNull}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
-    try{ txtCoSenal = String(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); cuentas = _parseCompanies(txtCoSenal); nConSenal = cuentas.length; }
+    const baseCo = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoAncla}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
+    try{ txtCoSenal = String(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); cuentas = _parseCompanies(txtCoSenal); nConSenal = cuentas.length; _marcarCo(cuentas, 'growth'); _addNombres(cuentas, 'growth'); }
     catch(e){ console.warn('[SOURCE] companies (con señal) falló:', e.message); }
     if(cuentas.length < NUM_CUENTAS*2){   // la señal recortó demasiado para este vertical: recall sin señal
       try{ txtCoBase = String(await callMCP('search_sales_navigator_filtered', baseCo)); const more=_parseCompanies(txtCoBase); for(const c of more) if(!cuentas.some(x=>x.id===c.id)) cuentas.push(c); }
       catch(e){ console.warn('[SOURCE] companies (sin señal) falló:', e.message); }
+    }
+    // SEÑALES ADICIONALES POR EMPRESA (financiamiento / contratación / cambio de liderazgo). Gateadas a la
+    // pasada 1 (conSenal): son REALCE de ranking + marca, NO recall, así que no se re-buscan en multi-pass
+    // (mismo criterio que la Pasada D / changedJobsLast90Days; evita chocar el muro de 300s de Railway).
+    // 3 llamadas MCP de companies EXTRA, en PARALELO (tope CONC) para no sumar latencia secuencial.
+    if(conSenal){
+      const filtros = [
+        ['funding',    { fundingEvents: true }],
+        ['hiring',     { hasJobOffers: true }],
+        ['leadership', { seniorLeadershipChanges: true }]
+      ];
+      await _mapLimit(filtros, CONC, async ([flag, extra]) => {
+        try{
+          const lista = _parseCompanies(await callMCP('search_sales_navigator_filtered', { ...baseCo, ...extra }));
+          _marcarCo(lista, flag);
+          // PRE-SELECT POR NOMBRE (1 sola llamada por flag, NO 1 por card): cada búsqueda amplia (industry+geo +
+          // SU filtro de señal) ya trae el top-N de empresas-con-esa-señal del nicho. Las indexamos por nombre
+          // para marcar la señal por NOMBRE EXACTO a cualquier candidato del pool más abajo, sin resolver el id
+          // de cada empresa, y para saltar el re-chequeo post-SELECT de las empresas finales ya marcadas.
+          _addNombres(lista, flag);
+          // las empresas que SOLO aparecen por estas señales (no estaban en la búsqueda base) también son
+          // cuentas-ancla válidas: las sumamos al pool de cuentas (dedupe por id).
+          for(const c of lista) if(c.id && !cuentas.some(x=>x.id===c.id)) cuentas.push(c);
+        }catch(e){ console.warn(`[SIGNALS] companies (${flag}) falló:`, e.message); }
+      });
+      const conFunding = [...coSenales.values()].filter(s=>s.funding).length;
+      const conHiring  = [...coSenales.values()].filter(s=>s.hiring).length;
+      const conLead    = [...coSenales.values()].filter(s=>s.leadership).length;
+      console.log(`[SIGNALS] señales por empresa (pasada 1): funding=${conFunding}, hiring=${conHiring}, leadership=${conLead}, growth=${nConSenal} sobre ${coSenales.size} empresas marcadas.`);
+    } else {
+      console.log('[SIGNALS] señales por empresa (funding/hiring/leadership) SALTADAS (pasada de recall; son realce, no recall).');
     }
   } else if(geoLocOrNull){
     // PASADA A' — FALLBACK por KEYWORD: ninguna industria del ICP resolvió a un id de Sales Navigator
@@ -1136,7 +1758,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       .filter(t=>t && t.split(' ').length===1 && t.length>=3)   // UNA sola palabra por búsqueda (multi-palabra da 0)
       .filter((t,i,a)=>a.indexOf(t)===i)
       .slice(0,4);
-    const baseKw = { category:'companies', profilesLimit:25, location:{include:geoLocOrNull}, headcount:_hcDesde(hcMin) };
+    const baseKw = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoAncla}, headcount:_hcDesde(hcMin) };
     const listas = await _mapLimit(kwAncla, CONC, async kw => {
       try{ return _parseCompanies(await callMCP('search_sales_navigator_filtered', {...baseKw, keywords: kw})); }
       catch(e){ console.warn(`[SOURCE] companies por keyword "${kw}" falló:`, e.message); return []; }
@@ -1154,23 +1776,59 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     }
     return true;
   });
+  // TECHO DE TAMAÑO sobre las CUENTAS-ANCLA (company-first, flag ON): vetamos las que superan tamano_max
+  // ANTES de buscar decisores dentro de ellas (Pasada B), así no traemos VPs de un Fortune-50 a una boutique.
+  // DEGRADACIÓN DIGNA (misma filosofía que el piso): si el techo deja menos de NUM_CUENTAS cuentas-ancla,
+  // lo relajamos (no vetamos por techo) para no quedar cortos. tamMax=0 (flag OFF o sin techo) → no actúa.
+  if(tamMax > 0 && cuentas.length){
+    const bajoTecho = cuentas.filter(c => !(c.headcount!=null && c.headcount > tamMax));
+    const sobreTecho = cuentas.filter(c => c.headcount!=null && c.headcount > tamMax);
+    if(bajoTecho.length >= NUM_CUENTAS){
+      for(const c of sobreTecho) console.warn(`[SOURCE] cuenta-ancla fuera de ICP por techo (${c.headcount}>${tamMax}): ${c.name}`);
+      cuentas = bajoTecho;
+    } else if(sobreTecho.length){
+      console.warn(`[TAM] techo relajado en cuentas-ancla: ${bajoTecho.length}/${NUM_CUENTAS} bajo techo ${tamMax} → no veto cuentas para no quedar corto.`);
+    }
+  }
   const anclaIds     = cuentas.map(c=>c.id).filter(Boolean).slice(0, 20);
   const anclaNombres = new Set(cuentas.map(c=>_empKey(c.name)).filter(Boolean));
   const anclaHC      = new Map(cuentas.map(c=>[_empKey(c.name), c.headcount]));
+  // Señales de empresa indexadas por NOMBRE normalizado (las cards conocen la empresa por headline, no por id):
+  // así propagamos {funding,hiring,leadership,growth} desde la cuenta-ancla a cada decisor de esa empresa.
+  const anclaSenales = new Map(cuentas.map(c=>[_empKey(c.name), coSenales.get(c.id) || null]).filter(([,s])=>s));
   console.log(`[SOURCE] cuentas-ancla: ${cuentas.length}${cuentas.length?` (${cuentas.slice(0,8).map(c=>c.name).join(', ')}${cuentas.length>8?'…':''})`:''}.`);
 
   // ===== PASADA B — DECISORES dentro de las cuentas-ancla (fit alto, empresa controlada) =====
   let enCuentas = [];
+  const idsEnCuenta = new Set();   // ids que vinieron de company:{include:anclaIds} → ancla por CONSTRUCCIÓN (no por match de nombre)
   if(anclaIds.length){
-    const f={ category:'people', profilesLimit:50, company:{include: anclaIds} };
+    const f={ category:'people', profilesLimit:SOURCE_PROFILES_LIMIT, company:{include: anclaIds} };
     if(geoLocOrNull) f.location={include:geoLocOrNull};
     if(terminos.length) f.jobPosition={ include: terminos };   // acota a los cargos objetivo dentro de la cuenta
     try{ enCuentas = _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{}
+    for(const p of enCuentas) if(p.id) idsEnCuenta.add(p.id);
   }
 
   // ===== PASADA C — BARRIDO people-first amplio (captura el 2do grado DISPERSO de la red) =====
   let barrido = await buscar(geoLocOrNull, true);
   if(_validosHome(barrido) < HOME_MIN) barrido = barrido.concat(await buscar(geoLocOrNull, false));
+  // COMPANY-FIRST (flag ON): el barrido amplio es la FUENTE DE RUIDO (mete gente de CUALQUIER empresa, incl.
+  // gigantes off-ICP). Con company-first priorizamos las cuentas-ancla VETADAS (Pasada A/B, ya filtradas por
+  // techo) y usamos el barrido SOLO como FALLBACK de relleno si las cuentas-ancla no alcanzan para llenar el
+  // pool a la IA. DEGRADACIÓN DIGNA: no romper "nunca menos de N" → si enCuentas no llena el pool, el barrido
+  // entra a completar (manteniendo recall). Flag OFF → barridoParaPool = barrido (comportamiento ACTUAL).
+  const N_IA_TARGET = parseInt(process.env.SOURCE_TO_IA || '18', 10);
+  // COMPANY-FIRST (siempre): ¿cuántos decisores on-fit aportan ya las cuentas-ancla? Si llenan el pool, el
+  // barrido amplio NO se mergea (queda disponible solo para la cuota de 2do grado / repoblado, que reusan `out`,
+  // no `pool`). Si NO alcanzan, el barrido entra como FALLBACK de relleno (recall preservado).
+  let barridoParaPool = barrido;
+  const anclaFit = enCuentas.filter(p => _rankSenioridad(p.head) >= 1).length;
+  if(anclaFit >= N_IA_TARGET){
+    barridoParaPool = [];
+    console.log(`[SOURCE] company-first: ${anclaFit} decisores en cuentas-ancla ≥ ${N_IA_TARGET} → barrido amplio NO se mergea (cuentas-ancla mandan).`);
+  } else {
+    console.log(`[SOURCE] company-first: ${anclaFit} decisores en cuentas-ancla < ${N_IA_TARGET} → barrido amplio entra como FALLBACK de relleno.`);
+  }
 
   // ===== PASADA D — SEÑAL DE COMPRA (ADITIVA): recién-cambiaron de trabajo (changedJobsLast90Days) =====
   // Misma búsqueda people que el barrido (mismos keywords/location/industria) pero filtrada a los que
@@ -1196,8 +1854,10 @@ async function sourceCandidates(plan, cliente, conSenal = true){
 
   // Unimos: cuentas-ancla primero (fit), después el barrido (warm disperso), después los recién-cambiados
   // (señal). Dedupe en el loop por id; la señal se MERGEA (OR) para no perderla si el id ya venía sin ella.
-  const pool = [...enCuentas, ...barrido, ...recienCambio];
-  console.log(`[SOURCE] pool bruto: ${enCuentas.length} en cuentas-ancla + ${barrido.length} barrido + ${recienCambio.length} señal = ${pool.length}.`);
+  // company-first (flag ON): `barridoParaPool` puede ser [] cuando las cuentas-ancla ya llenan el pool; OFF
+  // es siempre === `barrido` (comportamiento ACTUAL idéntico).
+  const pool = [...enCuentas, ...barridoParaPool, ...recienCambio];
+  console.log(`[SOURCE] pool bruto: ${enCuentas.length} en cuentas-ancla + ${barridoParaPool.length} barrido + ${recienCambio.length} señal = ${pool.length}.`);
 
   // dedupe + descartes (decisor real, no la propia empresa del cliente, no competidores) + marca ancla
   const vistos=new Map(); const out=[]; const empCliente=_norm((cliente&&cliente.empresa)||'');
@@ -1220,26 +1880,57 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       continue;
     }
     const cerca = _esCerca(p.loc);
-    const ancla = (emp && anclaNombres.has(_empKey(emp))) ? 1 : 0;
+    const ancla = (idsEnCuenta.has(p.id) || (emp && anclaNombres.has(_empKey(emp)))) ? 1 : 0;
     const hcPre = ancla ? (anclaHC.get(_empKey(emp)) ?? null) : null;   // headcount ya conocido de la cuenta-ancla
+    // SEÑALES DE EMPRESA (datos reales del MCP): si la empresa del candidato es una cuenta-ancla marcada,
+    // la card hereda {funding,hiring,leadership,growth}. Es ADITIVO (realce + marca), nunca filtro.
+    let senalesCo = (emp && anclaSenales.get(_empKey(emp))) || null;
+    // SEÑALES PRE-SELECT por NOMBRE EXACTO (funding/hiring/leadership/growth): si la empresa del candidato (del
+    // headline) está en el set de empresas-con-esa-señal del nicho (búsquedas amplias de pasada 1), marcamos la
+    // señal aunque NO sea cuenta-ancla (id desconocido). Match por _empKey EXACTO, NO token-share. Cada flag solo
+    // se setea si la empresa apareció REALMENTE en la búsqueda del MCP de ESE filtro (anti-invención). Sirve de
+    // boost de ranking Y de display: enriquecerSenalesEmpresa SALTA el re-chequeo MCP de las empresas ya marcadas.
+    if(emp){
+      const ek = _empKey(emp);
+      const marcadas = {};
+      if(senalNombres.funding.has(ek))    marcadas.funding = true;
+      if(senalNombres.hiring.has(ek))     marcadas.hiring = true;
+      if(senalNombres.leadership.has(ek)) marcadas.leadership = true;
+      if(senalNombres.growth.has(ek))     marcadas.growth = true;
+      if(Object.keys(marcadas).length) senalesCo = { ...(senalesCo||{}), ...marcadas };
+    }
     // SEÑALES DE COMPRA (datos reales del MCP): se propagan tal cual al pool y llegan a SELECT.
-    const cand = { id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, ancla, headcount:hcPre, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos), recienAsumio:!!p.recienAsumio, posts:Number(p.posts)||0 };
+    const cand = { id:p.id, name:p.name, head:p.head, empresa:emp, dist:p.dist, loc:p.loc, cerca, ancla, headcount:hcPre, rank:_rankSenioridad(p.head), fit:_rankFit(p.head, titulos), recienAsumio:!!p.recienAsumio, posts:Number(p.posts)||0, senales:senalesCo };
     out.push(cand); vistos.set(p.id, cand);   // el Map apunta al objeto pusheado → el merge de señal lo muta in situ
   }
   // log de cobertura de la señal: cuántos candidatos del pool deduplicado quedaron con recienAsumio:true
   // (Pasada D forzada + parseo de recentlyHired en A/B/C, mergeados por OR). Si esto es >0 la señal llega.
   console.log(`[SIGNALS] recienAsumio:true en ${out.filter(c=>c.recienAsumio).length}/${out.length} candidatos del pool (Pasada D + parseo).`);
+  // FUNDING PRE-SELECT (búsqueda amplia + cruce por nombre): 1 sola llamada MCP (la search funding de pasada 1)
+  // marcó este set; acá reportamos cuántos candidatos del pool quedaron con funding por NOMBRE EXACTO.
+  if(conSenal && fundingNombres.size){
+    console.log(`[FUNDING] pre-SELECT (amplio): ${fundingNombres.size} empresas-con-funding del nicho (1 llamada) → ${out.filter(c=>c.senales&&c.senales.funding).length}/${out.length} candidatos del pool marcados por nombre exacto.`);
+  } else if(conSenal){
+    console.log('[FUNDING] pre-SELECT (amplio): la búsqueda de funding del nicho no trajo empresas (sin marcas por nombre).');
+  }
   // orden inicial: país y cuenta-ancla mandan; después fit; el grado ya cuenta (warmth) antes que la seniority
   out.sort((a,b)=> (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.rank-a.rank));
 
-  // enriquecer el top por cargo y tamaño (solo los que no tienen headcount ya de la cuenta-ancla)
-  const K = parseInt(process.env.SOURCE_ENRICH_TOP || '12', 10);
+  // enriquecer el top por cargo y tamaño (solo los que no tienen headcount ya de la cuenta-ancla).
+  // K bajado de 12 a 8 (rate-limit MCP 60 req/min): SELECT solo elige NUM_CUENTAS (3) y las cuentas-ancla ya
+  // heredaron headcount del search de companies (anclaHC, NO necesitan scrape). Enriquecer el top 8 alcanza para
+  // que SELECT tenga decisores con tamaño conocido sin quemar get_contact_profile (la llamada CARA, scrape vivo).
+  const K = parseInt(process.env.SOURCE_ENRICH_TOP || '8', 10);
   const noCache = String(process.env.SOURCE_ENRICH_NOCACHE||'').toLowerCase()==='true';
   const PISO   = tamMin > 0 ? tamMin : parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
   const top = out.slice(0, K);
+  let _skipTop = 0;
   await _mapLimit(top, CONC, async (c) => {
     if(c.headcount==null){
-      try{
+      // DEADLINE DE FASE (best-effort, acumulado por job): si el MCP está lento y ya gastamos el presupuesto
+      // de enriquecimiento, NO lanzamos más get_contact_profile; el candidato queda con headcount=null (tolerado).
+      if(!_enrichTienePresupuesto()){ _skipTop++; }
+      else try{
         const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
         if(prof.headcount!=null) c.headcount=prof.headcount;
         if(prof.headRich && prof.headRich.length>=3){
@@ -1256,12 +1947,24 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     c.icSuelto = pideDecisores && _esICsuelto(c.head);
     c.score = _scoreCand(c);
   });
+  if(_skipTop) console.warn(`[ENRICH] deadline alcanzado (>${ENRICH_DEADLINE_MS}ms acumulado/job) en enriquecimiento del top: ${_skipTop} candidato(s) sin enriquecer (headcount null), sigo best-effort.`);
   // piso de tamaño contra el ICP, SIN vaciar el pool
   const cumplen  = top.filter(c => !(c.headcount!=null && c.headcount < PISO));
   const fueraTam = top.filter(c => c.headcount!=null && c.headcount < PISO);
   for(const p of fueraTam) console.warn(`[SOURCE] fuera de ICP por tamaño (${p.headcount}<${PISO}): ${p.name} @ ${p.empresa||'?'}`);
-  const topICP = (cumplen.length >= NUM_CUENTAS) ? cumplen : top;
+  let topICP = (cumplen.length >= NUM_CUENTAS) ? cumplen : top;
   if(cumplen.length < NUM_CUENTAS) console.warn(`[SOURCE] piso ${PISO} dejó ${cumplen.length}/${NUM_CUENTAS} -> relajo el piso para no quedar corto.`);
+  // TECHO de tamaño (company-first, flag ON; tamMax=0 → NO actúa, comportamiento ACTUAL idéntico). Mismo patrón
+  // y filosofía de degradación digna que el piso: filtramos los candidatos por ENCIMA de tamano_max, y si el
+  // techo deja menos de NUM_CUENTAS lo relajamos para no quedar cortos (`[TAM] techo relajado`). Solo vetamos
+  // headcount CONOCIDO (los null no se tocan, igual que el piso); el sobre-techo se loguea como el piso.
+  if(tamMax > 0){
+    const bajoTecho  = topICP.filter(c => !(c.headcount!=null && c.headcount > tamMax));
+    const sobreTecho = topICP.filter(c => c.headcount!=null && c.headcount > tamMax);
+    for(const p of sobreTecho) console.warn(`[SOURCE] fuera de ICP por techo (${p.headcount}>${tamMax}): ${p.name} @ ${p.empresa||'?'}`);
+    if(bajoTecho.length >= NUM_CUENTAS){ topICP = bajoTecho; }
+    else if(sobreTecho.length){ console.warn(`[TAM] techo relajado: ${bajoTecho.length}/${NUM_CUENTAS} bajo techo ${tamMax} -> no veto por techo para no quedar corto.`); }
+  }
   topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.score-a.score) || (b.fit-a.fit));
 
   // Pasamos MÁS candidatos a la IA (18) para que tenga de dónde elegir cuenta-ancla + warm.
@@ -1283,10 +1986,20 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // ENRIQUECER TAMAÑO ANTES DE LA IA: el barrido (pasada C) y la cuota de grado meten candidatas con
   // headcount null (solo el top K se enriqueció arriba). Si llegan así a la IA, el filtro de tamaño no
   // puede juzgar lo desconocido, la IA elige una micro-empresa y recién el gate final la caza → rechazo total.
-  // Leemos el headcount real de los null de `final` (get_contact_profile es lectura, NO gasta créditos).
-  const faltaHC = final.filter(c => c.headcount==null);
+  // get_contact_profile es la llamada CARA (scrape vivo) Y cuenta para el rate-limit del MCP (60 req/min).
+  // TOPE (rate-limit): enriquecemos SOLO el top ~8 por score de los headcount-null, no los hasta 18. SELECT
+  // elige 3; el resto que quede null es caso TOLERADO (el gate de tamaño NO descarta nulls; solo el descarte
+  // EGREGIO actúa y también ignora nulls). NO bajar de ~8 o se arriesga elegir 3 cards sin headcount.
+  const HC_ENRICH_MAX = parseInt(process.env.SOURCE_ENRICH_HC_MAX || String(K), 10);
+  const faltaHC = final.filter(c => c.headcount==null)
+    .sort((a,b)=> ((b.score||0)-(a.score||0)) || (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.fit-a.fit))
+    .slice(0, HC_ENRICH_MAX);
   if(faltaHC.length){
+    let _skipHC = 0;
     await _mapLimit(faltaHC, CONC, async (c) => {
+      // Mismo deadline de fase (acumulado por job, compartido con el loop del top): si ya se agotó el
+      // presupuesto de enriquecimiento, dejamos headcount=null (tolerado) en vez de seguir pegando al MCP lento.
+      if(!_enrichTienePresupuesto()){ _skipHC++; return; }
       try{
         const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
         if(prof.headcount!=null) c.headcount=prof.headcount;
@@ -1299,6 +2012,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
         c.score = _scoreCand(c);
       }catch{}
     });
+    if(_skipHC) console.warn(`[ENRICH] deadline alcanzado (>${ENRICH_DEADLINE_MS}ms acumulado/job) en enriquecimiento de headcount: ${_skipHC} candidato(s) sin enriquecer (headcount null), sigo best-effort.`);
   }
 
   // DESCARTE EGREGIO (opción B): el tamaño es señal de VALOR, no de credibilidad. Solo sacamos del pool de la
@@ -1319,6 +2033,27 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     const ya = new Set(final.map(c=>c.id));
     const reponer = out.filter(c => !ya.has(c.id) && !(c.headcount!=null && c.headcount < EGREGIO)).slice(0, N_IA - final.length);
     if(reponer.length){ final = final.concat(reponer); }
+  }
+
+  // DESCARTE POR TECHO sobre el POOL FINAL (company-first, flag ON; tamMax=0 → no actúa). El relleno
+  // (out.slice(K)), la cuota de 2do grado y el repoblado egregio pueden re-meter un gigante con headcount
+  // CONOCIDO que el techo del top NO vio (solo el top K se filtró arriba). Mismo patrón EGREGIO: vetamos los
+  // que superan tamano_max y repoblamos desde `out` (sin reintroducir sobre-techo) para no quedar cortos.
+  if(tamMax > 0){
+    const antesTecho = final.length;
+    final = final.filter(c => {
+      if(c.headcount!=null && c.headcount > tamMax){
+        console.warn(`[SOURCE] fuera de ICP por techo (${c.headcount}>${tamMax}): ${c.name} @ ${c.empresa||'?'}`);
+        return false;
+      }
+      return true;
+    });
+    if(final.length < antesTecho && final.length < N_IA){
+      const ya = new Set(final.map(c=>c.id));
+      const reponer = out.filter(c => !ya.has(c.id) && !(c.headcount!=null && (c.headcount < EGREGIO || c.headcount > tamMax))).slice(0, N_IA - final.length);
+      if(reponer.length){ final = final.concat(reponer); }
+    }
+    if(final.length < NUM_CUENTAS) console.warn(`[TAM] techo ${tamMax} dejó el pool final en ${final.length}/${NUM_CUENTAS}; el repoblado no alcanzó (caso de cobertura pobre, no se fuerza).`);
   }
 
   // RANKING FINAL: el pool que ve la IA tiene que estar ordenado por score COMPLETO. Los que entraron por el
@@ -1387,7 +2122,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   }
 
   const n2 = final.filter(c=>c.dist===2).length, nAncla = final.filter(c=>c.ancla).length;
-  console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | a la IA ${final.length} (ancla=${nAncla}, 2do=${n2}, terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], piso<${PISO}).`);
+  console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | a la IA ${final.length} (ancla=${nAncla}, 2do=${n2}, terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], piso<${PISO}${tamMax>0?`, techo>${tamMax}`:''}).`);
 
   // ===== SEÑALES DE MERCADO (datos REALES del MCP, jamás generados por IA) =====
   // Norte: "más señales de mercado" sin reabrir el agujero de invención. Cada ítem es un dato que sale
@@ -1552,14 +2287,81 @@ async function sourceConRetry(plan, cliente){
   };
   acumulado.sort((a,b)=> (_nivel(b)-_nivel(a)) || ((b.score||0)-(a.score||0)) || (b.cerca-a.cerca) || (b.fit-a.fit));
 
+  // ===== FIX #3 — GUARDA DETERMINÍSTICA DE VERTICAL EXCLUIDA SOBRE EL POOL A LA IA ==========
+  // El _nivel ya hunde las verticales adyacentes (off → N4), pero un off-vertical igual VIAJA dentro de los 18 si
+  // el nicho está flaco (caso Aenima: PwC=consultoría, en verticales_excluir, llegó a SELECT y lo cazó el juez en
+  // una ronda de fix CARA). Acá lo SACAMOS del pool antes de SELECT, así el modelo nunca lo ve (mismo espíritu que
+  // _geoIncoherente/_tamanoIncoherente, pero pre-SELECT). DEGRADACIÓN DIGNA (igual que el techo de tamaño): si el
+  // filtro deja menos de NUM_CUENTAS candidatos, relajamos y logueamos antes que quedar cortos. Defensivo:
+  // excluir=[] (PLAN sin el campo) → no filtra nada, comportamiento idéntico al actual.
+  let pob = acumulado;
+  if(excluir.length){
+    const _offVert = (c) => _matchVerticalExcluir(c.empresa, excluir) || _matchVerticalExcluir(c.head, excluir);
+    const onVert  = acumulado.filter(c => !_offVert(c));
+    const offVert = acumulado.filter(c =>  _offVert(c));
+    for(const c of offVert) console.warn(`[VERTICAL] descartado del pool a la IA por VERTICAL EXCLUIDA: ${c.name} @ ${c.empresa||'?'} ("${String(c.head||'').slice(0,40)}")`);
+    if(onVert.length >= NUM_CUENTAS){ pob = onVert; }
+    else if(offVert.length){ console.warn(`[VERTICAL] filtro de vertical excluida dejó ${onVert.length}/${NUM_CUENTAS} candidatos -> relajo el filtro para no quedar corto (degradación digna).`); }
+    console.log(`[VERTICAL] pool tras filtro de verticales excluidas [${excluir.join(', ')}]: ${pob.length} (de ${acumulado.length}; off-vertical=${offVert.length}).`);
+  }
+
   const N_IA = parseInt(process.env.SOURCE_TO_IA || '18', 10);
-  const pool = acumulado.slice(0, N_IA);
+  const pool = pob.slice(0, N_IA);
+
+  // ===== FUNDING PRE-SELECT (re-rankeo; SIN llamadas MCP extra) ==============================
+  // NEGOCIO: una empresa que LEVANTÓ FINANCIAMIENTO es el mejor target (presupuesto fresco + mandato).
+  // OPTIMIZACIÓN (robotic-crew: ~36 llamadas, ~1 min → 0 llamadas acá): el funding ya viene MARCADO desde
+  // sourceCandidates. Una sola búsqueda amplia de empresas-con-funding del nicho (industry+geo, fundingEvents:true,
+  // la que ya corre en la pasada 1) construye el set de empresas-con-funding; cada candidato cuya empresa matchee
+  // por NOMBRE EXACTO (_empKey) hereda senales.funding. Ya NO resolvemos id + search por cada empresa de la lista
+  // corta. Acá SOLO aplicamos el BOOST al score y re-ordenamos el pool de ~18 que va a SELECT.
+  // TRADEOFF ACEPTADO: la búsqueda amplia trae solo el top-N de empresas-con-funding del nicho; si una empresa con
+  // funding NO entra en ese top-N, no recibe boost (queda sin priorizar). IGUAL puede entrar como card por fit, y
+  // sus señales se muestran post-SELECT (enriquecerSenalesEmpresa lo reconfirma). Perdemos algo de RECALL del boost
+  // a cambio de pasar de ~36 a ~1 llamada MCP (la search funding que ya hacíamos). Es el trade correcto.
+  // NUNCA inventamos: senales.funding solo se setea si la empresa apareció REALMENTE en el set del MCP.
+  // GATES DUROS: el boost se SUMA al score, pero el orden sigue gobernado por _nivel (off-vertical/frío-mal-fit AL
+  // FONDO); el funding solo reordena DENTRO del mismo nivel. (FUNDING_PRESELECT_MS ya no aplica: 0 llamadas acá.)
+  if(String(process.env.FUNDING_PRESELECT || 'on').toLowerCase() !== 'off'){
+    const BOOST = parseInt(process.env.FUNDING_BOOST || '100', 10);   // grande para ganarle al score, NO al _nivel
+    const conFunding = pool.filter(c => c.senales && c.senales.funding).length;
+    if(conFunding){
+      for(const c of pool){ if(c.senales && c.senales.funding) c.score = (c.score||0) + BOOST; }
+      pool.sort((a,b)=> (_nivel(b)-_nivel(a)) || ((b.score||0)-(a.score||0)) || (b.cerca-a.cerca) || (b.fit-a.fit));
+    }
+    console.log(`[FUNDING] pre-SELECT (re-rankeo, 0 llamadas MCP): ${conFunding}/${pool.length} candidatos del pool con funding (boost +${BOOST}); marca propagada por nombre exacto desde la búsqueda amplia de pasada 1.`);
+  }
+
+  // ===== FIX #2 — COMPANY-FIRST QUE LLEGUE A SELECT (boost de ranking a cuentas-ancla vetadas) =====
+  // Problema observado (Aenima company-first ON): el techo mató los gigantes ✓, PERO `a la IA 18 (ancla=0)` →
+  // CERO decisores de cuentas-ancla vetadas (PIMCO/Bridgewater, ya filtradas por industria+geo+techo en Pasada
+  // A/B) llegaron a SELECT. La pasada de señal (recienAsumio forzado, Pasada D) viene de empresas SIN vetar
+  // (Cricket=ONG, PwC=consultoría) y le ganaba el ranking. Con company-first las cuentas-ancla DEBEN ganar:
+  // marcamos `enAncla:true` (flag en el candidato) y le SUMAMOS un boost grande al score, MISMO patrón que el
+  // funding-boost de arriba (0 llamadas MCP, solo re-rankeo). El boost reordena DENTRO del _nivel (no salta el
+  // gate off-vertical/frío-mal-fit). RECALL/DEGRADACIÓN DIGNA: NO recortamos a los no-ancla; siguen en el pool
+  // como relleno (la señal y el barrido-fallback completan si las cuentas-ancla no alcanzan N_IA/NUM_CUENTAS).
+  // El efecto es de ORDEN: cuando HAY decisores de cuentas-ancla vetadas, van PRIMERO a la IA, no los random.
+  if(String(process.env.ANCLA_BOOST || 'on').toLowerCase() !== 'off'){
+    const BOOST = parseInt(process.env.ANCLA_PRESELECT_BOOST || '120', 10);   // > funding-boost: company-first manda
+    for(const c of pool) c.enAncla = !!c.ancla;
+    const enAnclaN = pool.filter(c => c.enAncla).length;
+    if(enAnclaN){
+      for(const c of pool){ if(c.enAncla) c.score = (c.score||0) + BOOST; }
+      pool.sort((a,b)=> (_nivel(b)-_nivel(a)) || ((b.score||0)-(a.score||0)) || (b.cerca-a.cerca) || (b.fit-a.fit));
+    }
+    console.log(`[RANK] company-first: ${enAnclaN}/${pool.length} candidatos de cuentas-ancla vetadas (boost +${BOOST}, marca enAncla) → priorizados en el pool a la IA; el resto rellena (degradación digna).`);
+  }
+
   return { pool, senales };
 }
 
 // FASE 1 — IA: research + ICP + página 1. Prompt parametrizado por N.
-function _promptPlan(N){ return `# IBT GTM — Fase PLAN (research + ICP + página 1)
-
+function _promptPlan(N){ const _id = _idiomaDoc(); return `# IBT GTM — Fase PLAN (research + ICP + página 1)
+${_id!=='es' ? `
+### ⚠️ IDIOMA DE SALIDA = ${_idiomaNombre(_id)} — REGLA #1, POR ENCIMA DE TODAS
+Este prompt está escrito en español, pero la SALIDA NO. Escribí el VALOR de CADA campo de texto del JSON en ${_idiomaNombre(_id)}: eyebrow, h1_post, lead, icp[].desc, context, apertura, prioridades, ribbon[].value, y también geografia, geografias, industrias y comprador_ideal del _plan, incluidos los NOMBRES DE PAÍS ("Estados Unidos" → su nombre en ${_idiomaNombre(_id)}). PROHIBIDO mezclar idiomas: ni entre campos ni a mitad de una oración. Cualquier frase de ejemplo que veas abajo en español es SOLO para indicarte el contenido: traducila al idioma de salida, NO la copies literal.
+` : ''}
 Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un prospecto. NO elegís personas todavía: eso lo hace el sistema. Vos investigás al cliente y definís a QUIÉN hay que buscar.
 
 ## Qué hacer
@@ -1590,10 +2392,11 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   REGLA ANTI FALSO NEGATIVO (innegociable): si el research es pobre o dudás, redactá el comprador_ideal de forma INCLUSIVA (qué empresas SÍ compran) y agregá la EXCLUSIÓN SOLO cuando el research la respalde; nunca inventes una exclusión que deje fuera compradores legítimos. Es razonamiento de negocio aproximado, no una verdad dura: marcá el anti-patrón cuando es claramente el caso, no por sospecha. Español neutro, sin guiones.
 - TÍTULO (H1): el CLIENTE va PRIMERO y resaltado. h1_pre = "" (vacío); h1_company = nombre del cliente (lo resaltado, va primero); h1_post = "${N} clientes potenciales en [País o región]" (es un SUBTÍTULO que va DEBAJO del nombre; SIN "·" ni guion al principio). PROHIBIDO "para escalar".
 - TÍTULO == GEOGRAFÍA SOURCEADA (REGLA DURA, defecto grave que contradice el reporte): el/los país(es) que nombra "h1_post" tienen que ser EXACTAMENTE los de "geografias", con "geografia" (el principal, geografias[0]) SIEMPRE incluido y nombrado PRIMERO. El título refleja DÓNDE se va a buscar de verdad, y el sistema busca en el principal: si el título promete un país y el reporte entrega otro, el reporte se contradice a sí mismo (caso real: título "clientes potenciales en España" mientras toda la página 1 y el sourcing hablaban de Argentina = principal). PROHIBIDO que h1_post nombre un país que NO esté en "geografias". PROHIBIDO omitir el país principal de h1_post. PROHIBIDO nombrar en h1_post un país suelto distinto del principal. Si el cliente opera en varios, h1_post nombra ESE SET (los de "geografias", con el principal primero), no uno solo distinto del principal. Misma regla para cualquier país que nombres en "lead" o "proof": solo países de "geografias". CIERRE OBLIGATORIO: antes de devolver, verificá que el país (o set de países) de h1_post sea IGUAL a "geografias", con el principal (geografias[0]) incluido y primero; si no coincide, corregí h1_post (no la geografia) antes de cerrar.
-- IDIOMA: TODO en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.
+- IDIOMA: TODO el contenido del reporte (página 1: lead, icp, context, apertura, prioridades, etc.) va en ${_idiomaNombre(_id)}, ${_TRATO_FORMAL[_id]}.${_id==='es'?' Sin voseo ni modismos argentinos ("vos", "tenés", "podés", "acá"). El prospecto puede ser de cualquier país de LatAm.':' Escribí de forma natural y profesional en ese idioma, no una traducción literal del español.'}
 - SIN GUIONES (importante): NUNCA uses guiones largos (—) ni guiones (-) como conectores o para incisos, en NINGÚN texto (lead, proof, context, apertura, icp, prioridades). Reemplazalos por comas, paréntesis o dos puntos. Ej: en vez de "servicios técnicos —plomería, electricidad— con cobertura", escribí "servicios técnicos (plomería, electricidad) con cobertura". El texto tiene que sonar humano, no de IA.
 - GEOGRAFÍA (CRÍTICO): "geografia" = país del cliente (prioritario). "geografias" = país del cliente PRIMERO + SOLO los demás países donde el cliente HOY ya puede prestar el servicio de verdad (sus países de operación actuales). PROHIBIDO mercados de expansión futura o donde el cliente todavía NO opera. El sistema prioriza fuerte el país del cliente; los demás solo rellenan.
 - PAÍS DEL CLIENTE, NO DE LA AGENCIA (REGLA DURA, defecto recurrente): "geografia" y "geografias" son el/los país(es) donde opera el CLIENTE de ESTE reporte, deducidos de SU propio research (web, dominio, sede, idioma del sitio, clientes, TLD). NUNCA pongas Argentina (ni ningún otro país) "por defecto" ni porque sea el país de quien encarga el reporte: este servicio lo corre una agencia argentina, pero ESO ES IRRELEVANTE para la geografía del cliente. Ej: una empresa con sede/operación en Estados Unidos (aunque tenga dominio .com) → geografia="Estados Unidos", JAMÁS "Argentina". Si el research no deja claro el país, usá el MÁS RESPALDADO por las señales (sede, idioma del sitio, clientes, TLD), nunca Argentina por descarte. NO inventes países: si solo hay evidencia de UN país, geografias = [ese país] y geografia = ese país.
+- EL PROOF NO DEFINE LA GEOGRAFÍA (CRÍTICO, mismo contrapeso que en INDUSTRIAS): los clientes/marcas que nombrás en "proof" son LOGOS-VITRINA (pueden ser marcas globales o de otro país que el cliente consiguió como caso). El país de esas marcas NO entra en "geografias". "geografias" son SOLO los países donde el CLIENTE de este reporte HOY vende/opera/presta el servicio, no los países de origen de sus clientes-vitrina. Ej. ilustrativo (NO lo hardcodees): una agencia ARGENTINA cuyo proof menciona WD-40 o John Deere (marcas de EE.UU.) NO opera en Estados Unidos por eso: geografias = ["Argentina"], NUNCA ["Argentina", "Estados Unidos"], salvo que web_search confirme en una fuente del propio cliente que vende/presta servicio a empresas EN EE.UU. (oficina, equipo, cobertura declarada). Que el cliente tenga clientes-vitrina extranjeros NO es evidencia de que opere en ese país. Ante la duda: incluí SOLO el/los país(es) con operación REAL confirmada del cliente.
 - COHERENCIA geografia ∈ geografias (INNEGOCIABLE, este bug rompió el sourcing de Robotic Crew): "geografia" (el país principal) TIENE que ser uno de los que están en "geografias"; el principal es parte de la lista, NUNCA un país que no figure en ella. PROHIBIDO devolver geografia="Argentina" con geografias=["Estados Unidos"] (eso hace que el sistema busque en el país equivocado). CIERRE OBLIGATORIO: antes de devolver, verificá que "geografia" aparezca dentro de "geografias" y que AMBOS reflejen el mercado REAL del cliente; si no, corregilo.
 - ALCANCE REGIONAL / NEARSHORE (caso del principio rector, para verticales nicho donde el país principal da pool pobre): además de los países de operación actual, PODÉS sumar a "geografias" países cercanos ADICIONALES donde el cliente PUEDE prestar/vender el servicio hoy (modelo nearshore o regional), PERO con estos guardarraíles INNEGOCIABLES: (a) solo si web_search CONFIRMA en una fuente del propio cliente que sirve/le vende a esos países (cobertura regional declarada, modelo remoto/exportable, casos en la región); que sea PLAUSIBLE para el rubro NO alcanza. (b) NUNCA agregues un país solo para "rellenar" ni porque haya más gente o pool más cálido ahí: la cantidad de leads disponibles NO es una razón válida. (c) El país principal SIGUE MANDANDO y va PRIMERO. No SUB-escopees la geografía real del cliente, pero tampoco inventes mercados. COHERENCIA OBLIGATORIA: cada país que sumes a "geografias" tiene que aparecer también en el título (h1_post) y, si lo nombrás, en la prosa del "lead"; y tiene que quedar contado en el número del stat de países. Si no lo vas a nombrar en h1_post, NO lo agregues.
 - NIVEL DE CERTEZA POR PAÍS (caso del principio rector; lo nota el cliente): no todos los países donde aparece un cliente están al mismo nivel. Clasificá CADA uno según cómo lo describen TUS fuentes de web_search y usá un lenguaje que coincida con esa evidencia:
@@ -1602,16 +2405,23 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   • SOLO PLAN (la fuente dice "planea", "quiere", "próximamente", "evalúa", sin operar todavía) → NO lo cuentes como país de operación, ni en el texto ni en el stat.
   REGLA DE ORO: no subas ni bajes el nivel respecto de lo que dice la fuente. Si DISTINTAS fuentes difieren en el nivel de un mismo país (ej. una dice "opera en" y otra "se está expandiendo a"), usá SIEMPRE el nivel MÁS BAJO/conservador (en ese caso, "expansión reciente"), nunca el más optimista. El stat de países (si lo ponés) cuenta los consolidados + los recientes reales (NO los aspiracionales), y el texto y el stat tienen que COINCIDIR: si decís que opera/se expande en 3 países, el stat dice 3, no 2. Si no estás seguro de un país, no lo cuentes en ningún lado, pero que texto y stat coincidan.
   COHERENCIA NUMÉRICA DE PAÍSES (CRÍTICO, defecto recurrente): fijá UNA SOLA lista de países (los consolidados + recientes reales) y usá EXACTAMENTE esa misma lista, con los MISMOS nombres y la MISMA cantidad, en los TRES lugares: (1) el número del stat de países, (2) los países nombrados en h1_post, y (3) cualquier país que menciones en la PROSA del "lead". REGLA INNEGOCIABLE: cada país que cuentes en el número del stat tiene que estar nombrado en h1_post; y cada país que nombres en h1_post o en el "lead" tiene que estar contado en el stat. PROHIBIDO contar un país en el número que no esté escrito en el texto, o nombrar en el texto uno que no esté en el cuenta (ej. contar 4 pero listar solo España, México y Guatemala sin Andorra es un BUG). EL LEAD NO PUEDE NOMBRAR UN PAÍS EXTRA (CRÍTICO, defecto recurrente que retiene reportes con cuentas buenas): si el cliente NO opera hoy en un país, ese país NO va en el "lead" aunque sea un mercado de expansión, una aspiración o una referencia de contexto. El "lead" solo puede nombrar países de la lista canónica (los mismos de h1_post). Si querés hablar de crecimiento o de mercado sin un país de operación confirmado, hacelo en GENÉRICO (ej. "la región", "Latinoamérica") SIN nombrar un país que no esté en la lista. CIERRE OBLIGATORIO: antes de cerrar el JSON, contá con el dedo los países que nombraste en h1_post, verificá que NINGÚN país del "lead" quede fuera de esa lista, y que ese número sea EXACTAMENTE el del stat de países; si no coinciden, corregilo antes de devolver.
-- INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar SOLO las VERTICALES de prioridad ALTA donde están los COMPRADORES del cliente (las MISMAS que marcás "Alta:" en "prioridades", ni una más). PROHIBIDO meter en "industrias" las verticales "Media:" ni ninguna secundaria/aspiracional: esas van EXCLUSIVAMENTE en "prioridades" como contexto, NUNCA en "industrias" porque "industrias" es el filtro de búsqueda y meter una Media diluye el pool con cuentas de menor fit. El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Banca", "Administración de propiedades"). NO pongas el rubro del propio cliente ni industrias genéricas. TAXONOMÍA (CRÍTICO para que el filtro NO se caiga): cada nombre de "industrias" tiene que ser una CATEGORÍA RECONOCIBLE de la taxonomía de industrias de LinkedIn/Sales Navigator (las que el sistema resuelve a un id de filtro), NO una etiqueta hiper-específica, de moda o inventada que no exista como industria. Una etiqueta que no resuelve deja la búsqueda SIN filtro de industria. Preferí siempre la categoría canónica más cercana al COMPRADOR: ej. usá "Ingeniería robótica" / "Robotic Engineering" o "Fabricación de maquinaria de automatización" en vez de "Robotics" a secas. Es válido (y recomendado ante la duda) poner el nombre en español Y/O su equivalente reconocible en inglés. EVITÁ verticales industriales/pesadas amplias (ej. "Construcción", "Manufactura", "Minería", "Cemento") salvo que sean LITERALMENTE el comprador: arrastran jefes de mantenimiento de planta que consumen el servicio puertas adentro pero NO son el canal de compra. Ante la duda, preferí las verticales donde el producto del cliente se compra o se revende.
-- TAMAÑO (el piso refleja el COMPRADOR REAL, ni subestimado ni sobreestimado): "tamano_min" tiene que ser un número real de empleados que refleje el PISO REAL del comprador del cliente. El gate de tamaño del sistema es SOLO un PISO (no hay techo): si ponés el piso demasiado alto, dejás entrar gigantes que NO compran (el piso no los frena, solo sube a los grandes); si lo ponés demasiado bajo o en 0, entra cualquiera. Reglá el piso por el tipo de comprador, en AMBAS direcciones:
+- DESAMBIGUACIÓN DE TÉRMINOS DE BÚSQUEDA (CRÍTICO — evita el DRIFT que ensucia el pool): los campos que ALIMENTAN la búsqueda ("industrias", "funcion", "titulos_objetivo") tienen que ser ESPECÍFICOS del nicho REAL del cliente y de SU comprador, NO términos genéricos o ambiguos que SANGRAN a verticales adyacentes que NO son el ICP. Una palabra puede matchear el nicho del cliente Y un negocio totalmente distinto que comparte el sustantivo: "fleet/flota" matchea flotas de robots Y flotas de vehículos/aviones/camiones; "automation/automatización" matchea robótica física Y software/RPA/consultoría de salud; "operations/operaciones" matchea cualquier cosa; "platform", "solutions", "services", "smart", "digital", "AI", "tech" son igual de porosos. REGLA MENTAL OBLIGATORIA (aplicá ANTES de fijar cada término): preguntate "¿este término, buscado solo, podría traer una empresa de una industria o un comprador que NO es mi ICP?". Si la respuesta es SÍ: (a) reemplazalo por uno más preciso del nicho, o (b) sumale un calificador que lo ancle al nicho. Ejemplo del principio (NO lo hardcodees, es ilustrativo): si el ICP son empresas que operan flotas de robots autónomos, NO uses "fleet management" ni "automation" pelados; usá los términos que desambiguan el nicho ("autonomous mobile robots", "AMR", "AGV", "warehouse robotics", "robot fleet operations"). El mismo criterio vale para CUALQUIER cliente: detoná los términos que comparte con un vecino que no compra y dejá los que SOLO describen tu nicho. COHERENCIA: "industrias", "funcion" y "titulos_objetivo" tienen que apuntar TODOS al MISMO comprador real (quien operaría/usaría/revendería lo que vende el cliente), para que el pool caiga ON-VERTICAL; un término que cae fuera de esa vertical es DRIFT, no recall. NO sobre-restrinjas: para un nicho legítimo, elegí varios términos PRECISOS del nicho (no te quedes con uno solo), pero NINGUNO genérico que abra la puerta a otra industria.
+- INDUSTRIAS — DERIVACIÓN (CRÍTICO, define todo lo demás): "industrias" tiene que ser el ESPEJO de a quién le VENDE/FACTURA HOY el cliente, NO industrias anchas elegidas por intuición. REGLA MENTAL OBLIGATORIA (aplicala antes de fijar cada vertical): preguntate "¿QUIÉN PAGA por esto?" y respondé con la evidencia del research, NO con lo que "suena lógico". El comprador se DEDUCE del PRODUCTO y de QUIÉN LO MONETIZA: leé los CASOS, los LOGOS de clientes en la web del cliente, los clientes mencionados en notas/fuentes, y el TIPO de producto, y derivá de AHÍ las verticales reales de su clientela. Ejemplo ILUSTRATIVO (NO lo hardcodees): una agencia que trabaja con marcas de consumo (logos/casos de bienes de consumo, retail de marca, industrial de marca) tiene "industrias" = bienes de consumo / retail de marca / industrial de marca; NUNCA "servicios financieros" ni otra vertical ancha salvo que el research muestre clientes financieros REALES de ese cliente. Una vertical que no aparece entre sus clientes reales y que solo sale de adivinar el rubro es DRIFT: deriva el sourcing a cuentas equivocadas (rubros que el cliente NO factura). ANTI-INVENCIÓN: si el research NO muestra a quién le vende (sin casos ni logos), elegí el fit MÁS RESPALDADO por el PRODUCTO (qué empresa lo necesitaría y lo pagaría) y sé CONSERVADOR; PROHIBIDO inventar clientes o casos para justificar una vertical. Esta regla de DERIVACIÓN gobierna; todo lo que sigue (formato, taxonomía, prioridad, desambiguación) es CÓMO escribir las verticales que ya derivaste de los compradores reales. CONTRAPESO (el proof NO maneja el target): los clientes que nombrás en "proof" son LOGOS-VITRINA (pueden ser marcas globales gigantes que el cliente consiguió como caso). NO uses el proof para ELEGIR ni ACOTAR las industrias ni el tamaño del target. Lo que IMPORTA es el COMPRADOR REALISTA: una empresa que invierte en lo que el cliente vende (ej. para una agencia: empresas con presupuesto de marca/marketing) y que está en el rango de tamaño y país donde el cliente PUEDE venderle. Que el rubro de un lead no matchee el rubro de un logo-vitrina NO es un problema (a un decisor le impresiona MÁS ver que trabajaste con marcas grandes y exigentes de cualquier rubro). El gate duro NO es "mismo rubro que el proof" sino "decisor real de la función compradora en una empresa que realmente contrataría esto".
+- INDUSTRIAS — FORMATO (CRÍTICO — es un FILTRO DURO de búsqueda): "industrias" tiene que listar SOLO las VERTICALES de MÁXIMA prioridad donde están los COMPRADORES del cliente (las MISMAS que marcás "Primero:" en "prioridades", ni una más). PROHIBIDO meter en "industrias" las verticales "Después:" o "También:" ni ninguna secundaria/aspiracional: esas van EXCLUSIVAMENTE en "prioridades" como contexto, NUNCA en "industrias" porque "industrias" es el filtro de búsqueda y meter una de menor prioridad diluye el pool con cuentas de menor fit. El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Banca", "Administración de propiedades"). NO pongas el rubro del propio cliente ni industrias genéricas. TAXONOMÍA (CRÍTICO para que el filtro NO se caiga): el sistema BUSCA usando "industrias_search" (los nombres canónicos EN INGLÉS de la taxonomía oficial de LinkedIn), NO "industrias". Por eso CADA entrada de "industrias_search" tiene que ser el NOMBRE EXACTO EN INGLÉS de una industria que EXISTE en LinkedIn (ej. "Consumer Goods", "Retail", "Food and Beverage Services", "Banking", "Automotive", "Software Development"), NO una etiqueta inventada/de moda ni una traducción libre: un nombre que no existe en la taxonomía NO mapea y esa vertical se PIERDE de la búsqueda (fue el bug que sourceó "maquinaria industrial" sola). Ante la duda, elegí la categoría canónica MADRE más cercana al comprador (ej. "Consumer Goods" o "Retail", no una subcategoría rara como "Consumer Goods Rental"). "industrias" (español) es SOLO el texto que se MUESTRA en el PDF; "industrias_search" (inglés canónico) es lo que MANDA en la búsqueda: ambas listan las MISMAS verticales, una por una. EVITÁ verticales industriales/pesadas amplias (ej. "Construcción", "Manufactura", "Minería", "Cemento") salvo que sean LITERALMENTE el comprador: arrastran jefes de mantenimiento de planta que consumen el servicio puertas adentro pero NO son el canal de compra. Ante la duda, preferí las verticales donde el producto del cliente se compra o se revende.
+- TAMAÑO (el piso refleja el COMPRADOR REAL, ni subestimado ni sobreestimado): "tamano_min" tiene que ser un número real de empleados que refleje el PISO REAL del comprador del cliente. El gate de tamaño tiene un PISO ("tamano_min") y un TECHO ("tamano_max", ver regla siguiente): si ponés el piso demasiado alto, dejás entrar gigantes que NO compran (el piso no los frena, solo sube a los grandes); si lo ponés demasiado bajo o en 0, entra cualquiera. Reglá el piso por el tipo de comprador, en AMBAS direcciones:
   • COMPRADOR PyME / SMB (producto SaaS o herramienta que se vende a agencias, comercios o estudios chicos): el piso tiene que ser BAJO y ACORDE al rango real, NO alto ni 0. Ej. un CRM para agencias inmobiliarias de 5 a 100 asesores → tamano_min ~5 a 10 (NUNCA 200): un piso de 200 deja colar desarrolladoras o cadenas de 300+ que no son comprador del producto SMB. El piso bajo es CORRECTO acá, no un error.
   • COMPRADOR MEDIANO-GRANDE / MARCA ANCLA (plataforma o solución que se vende a cadenas, operadores grandes o marcas establecidas): el piso alto SIGUE siendo correcto (ej. 200 o más). NO conviertas todo en SMB: si el ICP legítimamente apunta a empresas grandes, un piso alto filtra micro-empresas que no son el comprador.
   REGLA DE ORO: el piso es CHICO cuando el comprador es chico y GRANDE cuando el comprador es grande; deducilo del research del comprador real, no por defecto. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva. COHERENCIA: el piso tiene que ser consistente con la celda (4) "Tamaño de empresa" del ICP y con el comprador_ideal (si el comprador_ideal marca el anti-patrón "(b) gigante fuera de rango realista", el piso NO puede ser tan alto que ese mismo gigante igual entre).
+- TAMAÑO MÁXIMO / TECHO ("tamano_max", anti-gigante — defecto MÁS GRAVE del producto): además del piso, razoná un TECHO realista de empleados del comprador. El techo evita el anti-patrón "(b) gigante fuera de rango realista" del comprador_ideal: una BOUTIQUE / AGENCIA / startup chica (ej. 30 a 50 personas) NO le vende a un Fortune-50 de 50.000 empleados (JPMorgan, PepsiCo, Lockheed NO compran a una agencia de 37 personas); meter esos gigantes como cuentas-ancla quema el reporte. Derivá el techo del TAMAÑO Y TIPO del cliente y de su ciclo de venta REAL:
+  • CLIENTE BOUTIQUE / PyME / startup chica (agencia, estudio, SaaS temprano, consultora chica): el comprador realista es PyME y mediano, NO el conglomerado global. Poné un techo HOLGADO pero acotado (ej. ~2000 a ~5000), suficiente para incluir mid-market sin dejar pasar Fortune-50. Coherente con que una empresa de 37 personas vende a empresas de decenas a pocos miles de empleados, no a cientos de miles.
+  • CLIENTE / PROVEEDOR ENTERPRISE (plataforma que SÍ vende a grandes cuentas, integrador con casos enterprise reales): el techo es ALTO o 0 (sin techo). NO apliques un techo chico a un proveedor que legítimamente cierra con gigantes.
+  ANTI-INVENCIÓN + DEGRADACIÓN DIGNA: si el research NO deja claro el techo del comprador, poné un techo HOLGADO o directamente 0 (= sin techo). NUNCA inventes un número preciso para justificar un techo; ante la duda, holgado. COHERENCIA: el techo tiene que ser consistente con la celda (4) "Tamaño de empresa" del ICP (su límite superior) y con el comprador_ideal; tamano_max, si es >0, tiene que ser MAYOR que tamano_min.
 - COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas/PRODUCTOS que compiten DIRECTAMENTE con la solución que vende el cliente (otras herramientas/soluciones DEL MISMO TIPO), porque venden/fabrican LO MISMO que el cliente. REGLA MENTAL INNEGOCIABLE: un competidor es algo que tu comprador potencial podría comprar EN VEZ del producto del cliente; NO es el comprador potencial mismo. PROHIBIDO incluir la INDUSTRIA, la FUNCIÓN, el TIPO DE EMPRESA o la VERTICAL del COMPRADOR objetivo (eso son tus clientes, no tus rivales). Ejemplo concreto: si el cliente es un CRM que se VENDE a inmobiliarias, los competidores son OTROS CRM inmobiliarios (ej. Inmovilla, Wasi, Propify), NUNCA "inmobiliaria", "agencia inmobiliaria" ni "bienes raíces" (esos son los COMPRADORES). Buscalos con web_search e incluí TRES tipos: (i) competidores directos de tamaño similar; (ii) FABRICANTES o PROVEEDORES globales del mismo producto (ej. para detonadores/voladura: Enaex, Orica, Dyno Nobel, Sandvik; para staffing de tecnología: Toptal, Turing, Andela, TEKsystems); (iii) distribuidores o integradores que revenden ese producto. Son PARES o RIVALES, no clientes. El sistema EXCLUYE a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES del research. NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque descartaría compradores legítimos. Si no identificás competidores reales claros, MEJOR dejá la lista VACÍA que meter la vertical del comprador (que rompe el sourcing).
 - COMPETIDOR_TERMINOS (filtro de respaldo, usar con cuidado): listá 0-4 términos del PRODUCTO ESPECÍFICO que el cliente fabrica/vende y que, si aparecen en el NOMBRE de otra empresa, casi seguro la delatan como proveedor o competidor (ej. "explosivos", "detonadores", "voladura", "staffing", "proptech"). MISMA REGLA MENTAL que en "competidores": un término competidor describe algo que el comprador compraría EN VEZ del producto del cliente, NUNCA describe al comprador mismo. REGLA CRÍTICA Y DURA: PROHIBIDO poner la INDUSTRIA, la FUNCIÓN, el TIPO DE EMPRESA o el VERTICAL donde el cliente VENDE. Si vende software/CRM inmobiliario NO pongas "inmobiliaria" ni "agencia inmobiliaria" ni "bienes raíces"; si le vende a minería NO pongas "minería". Eso descartaría a tus propios COMPRADORES (es exactamente el bug que quemó el sourcing de NOCNOK). Solo el nombre del producto en sí. Ante la duda, MEJOR dejá la lista VACÍA que arriesgarte a meter la vertical del comprador.
-- VERTICALES_EXCLUIR (ruido adyacente del sourcing, NO inventes nada del cliente): listá 2-5 RUBROS ADYACENTES que comparten palabras o suenan parecido al ICP pero que NO son compradores del cliente, para que el sistema los descarte del pool. Son verticales del MERCADO (no del cliente): no estás afirmando nada nuevo sobre el cliente, solo marcando rubros-ruido a EXCLUIR. Ejemplos: para una empresa de voladura minera, excluí "geotecnia", "mecánica de suelos", "militar", "consultoría"; para una marca de joyería retail, excluí "hotelería", "educación". REGLA ANTI FALSO POSITIVO: NUNCA pongas acá el vertical legítimo del comprador (si el comprador está en "Seguros", JAMÁS pongas "seguros") ni un término tan corto/genérico que pueda colarse en nombres de tus compradores. Si no hay rubros adyacentes claros que confundan, dejá la lista VACÍA ([]).
-- LARGO (para que el overview entre en 1 página): lead = MÁX 2 oraciones; proof = MÁX 2 oraciones; cada bullet de context = 1 oración corta (máx ~140 caracteres). Sé conciso.
-- _plan.titulos_objetivo es CRÍTICO: el sistema rankea y BUSCA con estas palabras (una por una) dentro del cargo. Palabras SUELTAS (no frases), ES+inglés+abreviaturas. Pensá DOS tipos de comprador y poné términos de AMBOS: (a) el que CONSUME el servicio puertas adentro (operaciones, facilities, mantenimiento, servicios generales, administrador); y (b) el que dentro de la empresa-canal OWNS la línea de producto/relación que mapea con lo que vende el cliente (el comprador de canal). Para (b), usá el NOMBRE del producto/vertical del cliente tal como aparece en cargos del comprador: ej. para una empresa de asistencia domiciliaria, los que en una aseguradora/retailer manejan "hogar", "asistencia", "vivienda", "copropiedad", "siniestros", "líneas personales", "proveedores". NO te quedes solo con los roles de facilities: el comprador de canal (ej. el jefe de línea hogar de una aseguradora) suele ser la mejor cuenta. Si el ICP apunta a empresas chicas donde compra el dueño/CEO, incluí "ceo, founder, owner, dueño, fundador". ORDEN: poné PRIMERO los términos del comprador de canal/producto (b) y después los de facilities (a); el sistema usa los primeros, así que los más valiosos van al frente.
+- VERTICALES_EXCLUIR (ruido adyacente del sourcing, NO inventes nada del cliente): listá 2-5 RUBROS ADYACENTES que comparten palabras o suenan parecido al ICP pero que NO son compradores del cliente, para que el sistema los descarte del pool. Son verticales del MERCADO (no del cliente): no estás afirmando nada nuevo sobre el cliente, solo marcando rubros-ruido a EXCLUIR. Ejemplos: para una empresa de voladura minera, excluí "geotecnia", "mecánica de suelos", "militar", "consultoría"; para una marca de joyería retail, excluí "hotelería", "educación". REGLA ANTI FALSO POSITIVO: NUNCA pongas acá el vertical legítimo del comprador (si el comprador está en "Seguros", JAMÁS pongas "seguros") ni un término tan corto/genérico que pueda colarse en nombres de tus compradores. Si no hay rubros adyacentes claros que confundan, dejá la lista VACÍA ([]). BILINGÜE (CRÍTICO, sino NO filtra): los datos de empresa en LinkedIn (industria/headline) vienen casi siempre en INGLÉS, y el filtro es por coincidencia de texto. Por eso CADA rubro a excluir ponelo en español Y su equivalente en inglés: ej. "consultoría de gestión" Y "management consulting"; "investigación de mercado" Y "market research"; "relaciones públicas" Y "public relations"; "educación" Y "education". Si solo lo ponés en español, una empresa con headline en inglés (caso real: PwC "Management Consulting") se cuela igual. Términos de ≥4 letras.
+- LARGO (CRÍTICO — la página 1 tiene que RESPIRAR, no ser un muro de texto; pero el "lead" SÍ desarrolla): el "lead" es la APERTURA del documento, 3 oraciones cortas y PLANAS (humanas, no corporativas): presenta qué hace el cliente, enmarca que armamos este diagnóstico para que sepas cuándo y cómo contactar a tus clientes potenciales, y dice que te compartimos ${N} encontrados con el mensaje listo. Trato de TÚ (cercano y directo). No es telegrama pero TAMPOCO un párrafo denso; SIN nombres de marcas, jerga ni mención de tecnología en la apertura. TODO LO DEMÁS corto: proof = 1 oración; cada desc del ICP = FRASE TELEGRÁFICA de máx ~14 palabras (frase nominal, sin subordinadas, sin relleno: ej. "VP/Director de Operaciones o RobOps Lead", NO un párrafo); "Señal de compra" y "Pain primario" = media oración cada una (máx ~14 palabras); cada bullet de context = máx ~16 palabras; cada prioridad = prefijo de orden ("Primero:"/"Después:"/"También:") + frase de máx ~16 palabras (ver regla PRIORIDADES). Fuera del lead, cortá toda palabra que no aporte y preferí frases nominales. El objetivo: el lead explica y vende; el resto se lee de un vistazo.
+- PRIORIDADES "Por dónde empezar" (CRÍTICO — lo lee alguien que NO conoce el rubro: tiene que ENTENDERSE solo): las 4 prioridades dicen por qué TIPO de empresa conviene empezar y en qué orden. REGLAS DURAS: (1) LENGUAJE PLANO, sin jerga: si usás un término técnico o de nicho, glosalo en 2-3 palabras entre paréntesis (ej. "operadores 3PL (empresas que manejan la logística de otros)"). Nada de siglas sueltas ni etiquetas internas sin explicar. (2) ORDEN POR PRIORIDAD con prefijo literal: las 2 de MAYOR prioridad empiezan con "Primero:", la siguiente con "Después:" y la última con "También:" (en ese orden exacto, NUNCA "Alta:"/"Media:"). (3) Cada ítem dice QUÉ tipo de empresa + POR QUÉ conviene, claro y corto (máx ~16 palabras incluyendo el prefijo). (4) ANTI-INVENCIÓN: no inventes segmentos, datos ni nombres; los tipos de empresa salen del comprador real que ya investigaste. (5) Las que marcás "Primero:" son las MISMAS verticales que van en "industrias" (coherencia con esa regla). Trato de TÚ, español neutro, SIN guiones.
+- _plan.titulos_objetivo es CRÍTICO: el sistema rankea y BUSCA con estas palabras (una por una) dentro del cargo. Palabras SUELTAS (no frases), ES+inglés+abreviaturas. APLICÁ acá la regla de DESAMBIGUACIÓN de arriba: evitá palabras de cargo genéricas/porosas que matchean cualquier industria ("operations", "automation", "fleet", "platform", "manager" a secas); preferí términos del cargo que anclen al nicho del comprador real, o el nombre del producto/vertical del cliente tal como aparece en el cargo del comprador. Pensá DOS tipos de comprador y poné términos de AMBOS: (a) el que CONSUME el servicio puertas adentro (operaciones, facilities, mantenimiento, servicios generales, administrador); y (b) el que dentro de la empresa-canal OWNS la línea de producto/relación que mapea con lo que vende el cliente (el comprador de canal). Para (b), usá el NOMBRE del producto/vertical del cliente tal como aparece en cargos del comprador: ej. para una empresa de asistencia domiciliaria, los que en una aseguradora/retailer manejan "hogar", "asistencia", "vivienda", "copropiedad", "siniestros", "líneas personales", "proveedores". NO te quedes solo con los roles de facilities: el comprador de canal (ej. el jefe de línea hogar de una aseguradora) suele ser la mejor cuenta. Si el ICP apunta a empresas chicas donde compra el dueño/CEO, incluí "ceo, founder, owner, dueño, fundador". ORDEN: poné PRIMERO los términos del comprador de canal/producto (b) y después los de facilities (a); el sistema usa los primeros, así que los más valiosos van al frente.
 
 ## Output — SOLO JSON (sin texto ni markdown alrededor)
 {
@@ -1620,15 +2430,15 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "h1_pre": "",
   "h1_company": "Nombre del cliente (resaltado, va primero)",
   "h1_post": "${N} clientes potenciales en [País o región]",
-  "lead": "Máx 2 oraciones anclando el proof point REAL del cliente.",
-  "proof": "El proof point / origen del cliente (máx 2 oraciones).",
+  "lead": "APERTURA del documento (lo PRIMERO que lee el cliente), 3 oraciones cortas, PLANA y HUMANA (como le hablás a un cliente real, NADA corporativo ni jerga). Estructura (escribí las 3 en el idioma de salida; lo que sigue describe el CONTENIDO, no es texto a copiar): (1) que [Cliente] es una empresa que hace [qué hace, concreto y claro, SIN nombres de marcas/clientes ni tecnicismos]; (2) que, sobre esa base, armaron este diagnóstico para que el cliente sepa cuándo y cómo contactar a sus clientes potenciales; (3) que le comparten ${N} de los que encontraron, con el mensaje listo para escribirles. SIN cambiar el número ${N} ni inventar métricas. Trato directo y cercano al cliente (en español: de TÚ, 'sepas/te compartimos/tus', sin voseo ni 'usted'). NO menciones tecnología, herramientas ni 'nuestra plataforma'.",
+  "proof": "RESPALDO/credencial del cliente en 1 oración corta: clientes o marcas REALES con las que trabaja (sacados del research: casos, logos, clientes mencionados) o un resultado/caso verificable. Es lo que da credibilidad y permite verificar las referencias que los hooks puedan citar. Ej: 'Trabaja con marcas como X e Y'. ANTI-INVENCIÓN: SOLO si el research lo respalda; si no hay casos/clientes verificables, dejá \"\" (vacío). Es el ÚNICO lugar donde se nombran clientes del cliente (la apertura no los nombra).",
   "ribbon": [ {"label":"Vertical","value":"..."}, {"label":"País","value":"..."}, {"label":"Modelo","value":"..."} ],
   "stats": [ {"num":"...","label":"..."}, {"num":"${N}","label":"Cuentas priorizadas"}, {"num":"...","label":"..."}, {"num":"...","label":"..."} ],
-  "icp": [ {"title":"Decisor ideal","desc":"..."}, {"title":"Señal de compra","desc":"..."}, {"title":"Pain primario","desc":"..."}, {"title":"Tamaño de empresa","desc":"..."} ],
-  "context": [ "bullet 1 (corto)", "bullet 2 (corto)", "bullet 3 (corto)" ],
+  "icp": [ {"title":"Decisor ideal","desc":"frase telegráfica, máx ~14 palabras (cargos del comprador, sin párrafo)"}, {"title":"Señal de compra","desc":"media oración, máx ~14 palabras"}, {"title":"Pain primario","desc":"media oración, máx ~14 palabras"}, {"title":"Tamaño de empresa","desc":"frase corta, ej. 30 a 1000 empleados con flota en producción"} ],
+  "context": [ "bullet corto (máx ~16 palabras)", "bullet corto (máx ~16 palabras)", "bullet corto (máx ~16 palabras)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
-  "prioridades": [ "Alta: ...", "Media: ...", "...", "..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras", "comprador_ideal": "1-2 oraciones: el MODELO DE COMPRADOR (quién FIRMA EL CHEQUE y podría adoptar esto de forma realista) como test de INCLUSIÓN y EXCLUSIÓN, con ANTI-PATRONES explícitos de los que apliquen: (a) marca propia que no aloja terceros, (b) gigante fuera de rango realista del cliente, (c) contratista/asesor/micro cuando el ICP pide operadores medianos-grandes, (d) mismo sustantivo distinto negocio (flota de camiones ≠ flota de robots). Ej: 'Compran multimarca y grandes almacenes que curan marcas de terceros; NO marcas propias/DTC que solo venden lo suyo'. Ante research pobre, redactalo INCLUSIVO y agregá la exclusión SOLO si el research la respalda", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA donde se COMPRA/revende el producto, ej: Seguros, Comercio al por menor, Inmobiliario, Administración de propiedades, Banca (evitá industriales amplias tipo Construcción/Manufactura)"], "competidores": ["NOMBRES de empresas/productos que el comprador compraría EN VEZ del producto del cliente (venden lo mismo), ej: Iké Asistencia, Asissprex. NUNCA la industria/vertical del comprador (ej. para un CRM inmobiliario: otros CRM como Inmovilla/Wasi, NUNCA 'inmobiliaria')"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA la industria/función/vertical donde el cliente VENDE (ej. nunca 'inmobiliaria' si vende a inmobiliarias)"], "verticales_excluir": ["2-5 rubros ADYACENTES-ruido a EXCLUIR del sourcing (comparten palabras con el ICP pero NO compran), ej. para voladura minera: geotecnia, mecanica de suelos, militar, consultoria; NUNCA el vertical del comprador; [] si no aplica"], "tamano_min": 200 }
+  "prioridades": [ "Primero: qué tipo de empresa y por qué, en lenguaje plano (máx ~16 palabras)", "Primero: ...", "Después: ...", "También: ..." ],
+  "_plan": { "funcion": "función del comprador en 1-2 palabras", "comprador_ideal": "1-2 oraciones: el MODELO DE COMPRADOR (quién FIRMA EL CHEQUE y podría adoptar esto de forma realista) como test de INCLUSIÓN y EXCLUSIÓN, con ANTI-PATRONES explícitos de los que apliquen: (a) marca propia que no aloja terceros, (b) gigante fuera de rango realista del cliente, (c) contratista/asesor/micro cuando el ICP pide operadores medianos-grandes, (d) mismo sustantivo distinto negocio (flota de camiones ≠ flota de robots). Ej: 'Compran multimarca y grandes almacenes que curan marcas de terceros; NO marcas propias/DTC que solo venden lo suyo'. Ante research pobre, redactalo INCLUSIVO y agregá la exclusión SOLO si el research la respalda", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA del comprador real, EN ESPAÑOL (esto es solo para MOSTRAR en el PDF), ej: Bienes de consumo, Comercio minorista, Seguros, Banca, Automotriz. Evitá industriales amplias tipo Construcción/Manufactura salvo que sean literalmente el comprador"], "industrias_search": ["LAS MISMAS verticales que 'industrias' pero con el NOMBRE CANÓNICO EXACTO EN INGLÉS de la taxonomía oficial de LinkedIn (ESTO es lo que el sistema usa para BUSCAR; el match es contra la lista oficial de LinkedIn, en inglés). Una entrada por cada vertical de 'industrias'. Ejemplos de nombres canónicos válidos: Consumer Goods, Retail, Apparel and Fashion, Food and Beverage Services, Food and Beverage Manufacturing, Cosmetics, Beverage Manufacturing, Banking, Insurance, Financial Services, Automotive, Software Development, IT Services and IT Consulting, Technology, Information and Internet, Hospitals and Health Care, Real Estate, Construction, Manufacturing, Telecommunications, Advertising Services, Pharmaceutical Manufacturing, Hospitality. Usá el nombre EXACTO de LinkedIn en INGLÉS, NO lo traduzcas al español acá"], "competidores": ["NOMBRES de empresas/productos que el comprador compraría EN VEZ del producto del cliente (venden lo mismo), ej: Iké Asistencia, Asissprex. NUNCA la industria/vertical del comprador (ej. para un CRM inmobiliario: otros CRM como Inmovilla/Wasi, NUNCA 'inmobiliaria')"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA la industria/función/vertical donde el cliente VENDE (ej. nunca 'inmobiliaria' si vende a inmobiliarias)"], "verticales_excluir": ["2-5 rubros ADYACENTES-ruido a EXCLUIR del sourcing (comparten palabras con el ICP pero NO compran), ej. para voladura minera: geotecnia, mecanica de suelos, militar, consultoria; NUNCA el vertical del comprador; [] si no aplica"], "tamano_min": 200, "tamano_max": 0 }
 }
 CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
@@ -1684,7 +2494,9 @@ async function runPlanConRetry(args){
 }
 
 // FASE 3 — IA: elige + escribe. Prompt parametrizado por (pedir, usar).
-function _promptSelect(pedir, usar){ return `# IBT GTM — Fase SELECT (elegir + escribir)
+function _promptSelect(pedir, usar){ const _id = _idiomaDoc(); return `# IBT GTM — Fase SELECT (elegir + escribir)
+${_id!=='es' ? `### ⚠️ IDIOMA: el "angulo" va en ${_idiomaNombre(_id)} (este prompt está en español, la salida no: traducí, no copies frases literales). El "hook" va en el idioma que marca CADA candidato al final de su línea ("HOOK EN: ..."), que puede diferir. NO mezcles idiomas dentro de un campo.
+` : ''}
 
 Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo textual, empresa, país y grado de conexión) y el contexto del cliente. Elegís los ${pedir} MEJORES decisores EN ORDEN de prioridad (el mejor primero) y escribís, para cada uno, un ángulo y un hook. El sistema usa los primeros ${usar} válidos.
 
@@ -1709,14 +2521,22 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 - CADA uno DEBE tener angulo y hook NO vacíos.
 - El ÁNGULO: MÁXIMO 2 oraciones (≤ 320 caracteres), específico de ESA persona/empresa, usando su cargo/empresa/perfil REALES + lo que ofrece el cliente. Corto y al hueso, sin relleno. 100% único por persona.
 - ÁNGULO ANCLADO Y DISTINTO POR CARD (REGLA DURA, defecto auditado: los ángulos salían genéricos y calcados entre cards). Cada ángulo tiene que anclar un DATO o un PAIN ESPECÍFICO de ESA empresa/persona (algo que no aplicaría igual a otra card), no una frase intercambiable. Los ${pedir} ángulos del reporte NO pueden girar todos sobre el MISMO pain: cada card, un pain distinto y un ángulo distinto. PROHIBIDO el cierre TEMPLATE genérico repetido entre cards, tipo "exactamente el tipo de herramienta/solución que un [rol] necesita", "es justo lo que [empresa/rol] necesita" o "eso es exactamente lo que [cliente] resuelve": esa fórmula es relleno intercambiable y delata que no anclaste nada propio de esa cuenta (caso real: los 3 ángulos giraban sobre "gestión centralizada", y uno era puro template sin nada propio de la empresa). Si un ángulo te quedó así de genérico, reescribilo anclando algo concreto y único de ESA empresa/rol.
-- SEÑAL DE COMPRA, el "por qué ahora" REAL (úsala cuando la línea del candidato la trae, JAMÁS la inventes): la lista marca, al FINAL de la línea de cada candidato, señales reales del perfil (dato del MCP, no generado por nadie). Leelas y tejelas en la prosa del ángulo, NO como lista ni campo aparte: (a) Si la línea trae "SEÑAL: asumió el rol hace poco", el ángulo DEBE incorporar ese disparador temporal como el "por qué ahora" real, hilado natural ("asumió la dirección comercial hace poco, momento ideal para evaluar herramientas nuevas", "como llegó hace poco al rol, está definiendo stack y proveedores"). Es la señal MÁS valiosa para justificar el contacto AHORA: aprovechala siempre que esté. (b) Si la línea trae "activo en LinkedIn", podés mencionarlo de forma SECUNDARIA y blanda ("y viene activo/a en LinkedIn") solo si suma; es opcional, no lo fuerces. (c) ANTI-INVENCIÓN, INNEGOCIABLE: SOLO afirmá una señal si SU marcador está presente en ESA línea de candidato. PROHIBIDO escribir "asumió el rol hace poco", "recién llegó", "nuevo en el cargo" o equivalentes si la línea NO trae "SEÑAL: asumió el rol hace poco"; sin el marcador la señal NO existe y no se menciona. El dato es CUALITATIVO ("hace poco"/"recientemente"), NUNCA inventes una fecha ni cuánto hace ("hace 2 meses") salvo que figure literal. (d) Si la línea NO trae ninguna señal, escribí el ángulo como siempre (por qué encaja ese rol con lo que ofrece el cliente), SIN forzar un "por qué ahora" temporal inventado.
+- SEÑAL DE COMPRA, el "por qué ahora" REAL (úsala cuando la línea del candidato la trae, JAMÁS la inventes): la lista marca, al FINAL de la línea de cada candidato, señales reales del perfil/empresa (dato del MCP, no generado por nadie). Un candidato puede traer VARIOS marcadores. REGLA DURA DE UNA SOLA SEÑAL POR CARD: tejé en el ángulo SOLO LA SEÑAL MÁS FUERTE disponible, NUNCA dos o más. Apilar señales se siente expediente/humo y BAJA la confianza del prospecto. ORDEN DE FUERZA (elegí la primera que aparezca en la línea): (1) "SEÑAL: asumió el rol hace poco" > (2) "SEÑAL: la empresa levantó financiamiento" > (3) "SEÑAL: cambio de liderazgo en la empresa" > (4) "SEÑAL: la empresa está contratando" > (5) "SEÑAL: la empresa está creciendo en plantilla". Tejé esa única señal en la prosa del ángulo como el "por qué ahora", NO como lista ni campo aparte, hilado natural:
+  (a) "SEÑAL: asumió el rol hace poco" → disparador temporal de la PERSONA ("asumió la dirección comercial hace poco, momento ideal para evaluar herramientas nuevas", "como llegó hace poco al rol, está definiendo stack y proveedores").
+  (b) "SEÑAL: la empresa levantó financiamiento" → ("[empresa] levantó financiamiento recientemente y suele ser cuando se evalúan nuevas herramientas"). Cualitativo: PROHIBIDO inventar monto, ronda o fecha (no los tenemos).
+  (c) "SEÑAL: cambio de liderazgo en la empresa" → ("[empresa] cambió su liderazgo hace poco, etapa donde se revisan proveedores y prioridades"). Sin nombres ni fechas inventadas.
+  (d) "SEÑAL: la empresa está contratando" → ("[empresa] viene sumando equipo, señal de que la operación se está escalando"). Cualitativo, sin números.
+  (e) "SEÑAL: la empresa está creciendo en plantilla" → ("[empresa] está creciendo y eso suele tensionar [lo que toca el rol]"). Cualitativo.
+  (f) ANTI-CREEPY, REGLA DURA: el marcador "activo en LinkedIn" es SOLO para priorización interna. NUNCA lo verbalices en ángulo ni hook (decir "vi que posteás"/"viene activo en LinkedIn" espanta al prospecto, se siente vigilado). Ignoralo al escribir. Las señales de la PERSONA ("asumió el rol") y de la EMPRESA (financiamiento, liderazgo, contratando, creciendo) SÍ se verbalizan: son públicas y no invasivas.
+  (g) ANTI-INVENCIÓN, INNEGOCIABLE: SOLO afirmá una señal si SU marcador EXACTO está presente en ESA línea de candidato. PROHIBIDO escribir "asumió el rol hace poco", "recién llegó", "levantó financiamiento", "cambió su liderazgo", "está contratando", "está creciendo" o equivalentes si la línea NO trae el marcador correspondiente; sin marcador la señal NO existe y no se menciona. Todo CUALITATIVO ("hace poco"/"recientemente"/"viene sumando"), NUNCA inventes fecha, monto, ronda ni cuánto hace ("hace 2 meses", "USD 5M") salvo que figure literal (no figura).
+  (h) Si la línea NO trae ninguna señal verbalizable, escribí el ángulo como siempre (por qué encaja ese rol con lo que ofrece el cliente), SIN forzar un "por qué ahora" temporal inventado.
 - PROHIBIDO copiar/pegar o calcar la estructura de un ángulo a otro. Antes de cerrar, revisá que el nombre y la empresa de cada ángulo sean los de ESE id.
-- El HOOK: UNA sola oración entre comillas, lista para mandar, empezando por el PRIMER NOMBRE (ej: "Clara, ...").
+- El HOOK = PRIMERA LÍNEA LISTA PARA COPIAR Y ENVIAR HOY (no un resumen): UNA sola oración entre comillas, empezando por el PRIMER NOMBRE (ej: "Clara, ...") y bien cerrada. Tiene que sonar a un mensaje que se manda tal cual. Cuando la card trae señal verbalizable, FUNDÍ esa señal (el timing, el "por qué ahora") con el contexto de la persona/empresa en ese mismo mensaje (ej: "Felicitaciones por asumir como [cargo]: con [empresa] en plena expansión de equipo, me gustaría comentarle cómo..."). UNA sola señal por hook, la misma que usaste en el ángulo, jamás apilada.
 - HOOK COMPLETO Y CERRADO (REGLA DURA, defecto recurrente que se ve descuidado): cada hook tiene que ser una oración ENTERA y bien terminada, nunca cortada a mitad de frase ni sin puntuación final. Si es una PREGUNTA, abrí con "¿" y cerrá con "?" (signos apareados): prohibido un hook que arranca a preguntar y termina sin "?". Si es una afirmación, cerrá con punto. PROHIBIDO devolver hooks como "Flor, ...¿hoy lo gestionan de forma centralizada" (sin "?" ni cierre) o "Samanta, ...quién la gestiona en el día a día" (sin "?"): quedan colgados y queman la credibilidad. Antes de cerrar, releé cada hook entero y confirmá que la oración llega hasta el final y cierra con la puntuación correcta.
 - DIVERSIDAD ESTRUCTURAL OBLIGATORIA DE HOOKS (el defecto MÁS frecuente: las cards salen con el mismo esqueleto): los hooks tienen que usar ${pedir} ABERTURAS DISTINTAS de este MENÚ, una forma diferente por card. (1) OBSERVACIÓN concreta sobre su empresa o su cargo ("Clara, vi que en [empresa] el área de [X] viene creciendo..."); (2) PREGUNTA DIRECTA sobre una decisión propia de ESE rol ("Marcos, cómo están resolviendo hoy [decisión del rol] en [empresa]"); (3) AFIRMACIÓN que conecta lo que hace el cliente con lo que esa persona maneja, SIN pregunta ("Lucía, su rol en [empresa] toca de lleno [lo que ofrece el cliente]."). PROHIBIDO que DOS hooks compartan el mismo molde sintáctico: ni los ${pedir} terminando en "¿...?", ni los ${pedir} con la plantilla "[Nombre], en [empresa] el [X] es [adj]", ni los ${pedir} arrancando con la misma palabra después del nombre. Si al releerlos dos suenan calcados, reescribí uno con otra abertura del menú.
 - PROHIBIDO EL CONDICIONAL VACÍO (en ángulo Y hook): nada de "puede ser relevante si...", "podría necesitar...", "pueden requerir...", "puede ser útil...", "quizás le interese", "tal vez le sirva". Ese hedging suena a IA y no dice nada. Si NO tenés una señal concreta de esa persona, NO te la inventes (regla de anti-invención) PERO TAMPOCO hedgees: afirmá EN PRESENTE el punto de contacto REAL entre lo que hace ese rol y lo que el cliente OFRECE (ej. no "como Head of Ops quizás necesite cobertura técnica", sí "como Head of Ops usted gestiona la red de mantenimiento que [cliente] cubre"). Cualitativo, presente, sin "si/podría/quizás".
 - NUNCA menciones el grado de conexión (1er/2do/3er grado) ni inventes datos que no estén en lo que te paso.
-- IDIOMA: ángulo y hook en ESPAÑOL NEUTRO latinoamericano, trato de "usted". Sin voseo ni modismos argentinos.
+- IDIOMA: el ÁNGULO y todo van en ${_idiomaNombre(_id)} (${_TRATO_FORMAL[_id]}). El HOOK es la EXCEPCIÓN: va en el idioma que marca su candidato al final de la línea ("HOOK EN: ..."), porque es el mensaje que se le envía a esa persona; si la línea no lo indica, va en ${_idiomaNombre(_id)}. En inglés/portugués escribí natural (no traducción literal) y las preguntas abren directo, sin "¿" (solo el español usa "¿...?"). La regla SIN GUIONES vale en todos los idiomas.
 - Texto plano: NADA de markdown (sin **negritas**, sin asteriscos). Solo el objeto JSON.
 - SIN GUIONES: NUNCA uses guiones largos (—) ni guiones (-) como conectores o incisos en el ángulo ni en el hook. Usá comas, paréntesis o dos puntos. El texto tiene que sonar a persona, no a IA. OJO con el guion PEGADO a una palabra con espacio de un solo lado (el patrón que más se escapa): "su rol -clave en operaciones" o "el área- de mantenimiento" también están PROHIBIDOS; reescribilos con coma o paréntesis ("su rol, clave en operaciones"). El guion SOLO es válido dentro de compuestos legítimos sin espacios (e-commerce, C-level, co-fundador, start-up).
 - ESTILO HUMANO (sutil): los hooks se mandan como si los escribiera una persona real, no una IA impecable. Está bien (y preferible) que ALGÚN hook corto AFIRMATIVO no termine en punto, como cuando uno escribe rápido por chat. Que sea SUTIL y OCASIONAL: a lo sumo UN detalle así, y SOLO en una afirmación. OJO, ESTO NO ES UNA EXCEPCIÓN A "HOOK COMPLETO Y CERRADO": la oración SIEMPRE va entera (nunca cortada a mitad de frase) y una PREGUNTA SIEMPRE cierra con "?" (abre "¿" y cierra "?", apareados); el único relajo permitido es omitir el punto final de una afirmación corta, jamás dejar una frase trunca ni una pregunta sin "?". PROHIBIDO errores de ortografía, palabras mal escritas o mayúsculas raras. El mensaje tiene que verse profesional y creíble, solo que humano.
@@ -1729,7 +2549,7 @@ Los campos "nombre" y "empresa" son OBLIGATORIOS y van copiados TEXTUAL del cand
 
 ## VERIFICACIÓN FINAL (OBLIGATORIA — antes de devolver el JSON)
 VERIFICÁ, elemento por elemento, que el "nombre" y la "empresa" sean los del id elegido (copiados de la lista, no de otro renglón), que el HOOK EMPIECE con el PRIMER NOMBRE de ESE id, y que el ÁNGULO NOMBRE la EMPRESA de ESE id. Si alguno no cumple, REESCRIBILO antes de cerrar: una card con el hook o el ángulo de OTRA persona/empresa (MEZCLA) quema todo el reporte.
-VERIFICÁ ADEMÁS: (a) que las ${pedir} aberturas de los hooks sean ESTRUCTURALMENTE DISTINTAS (no dos con el mismo molde ni todas terminando en "?"); (b) que ningún ángulo/hook use CONDICIONAL VACÍO ("puede/podría/quizás/si necesita"); (c) que NO le atribuyas a la persona una responsabilidad de compra/decisión/liderazgo que su cargo real NO implica (re-encuadre prohibido); (d) que NO le atribuyas al CLIENTE ningún logro, caso, métrica o implementación que no esté TEXTUAL en el contexto "Qué ofrece / proof"; (e) que NINGÚN ángulo/hook AFIRME que la empresa de la card COMPRA/ALOJA/REVENDE/INTEGRA lo del cliente sin evidencia (fit de negocio inexistente), ni que hayas elegido una empresa que es claramente NO comprador (marca propia que no aloja terceros, gigante irreal para el tamaño del cliente, contratista/micro cuando el ICP pide operadores, o mismo sustantivo distinto negocio) habiendo en el pool una alternativa comprable mejor; (f) que NINGÚN ángulo afirme una SEÑAL DE COMPRA ("asumió el rol hace poco", "recién llegó", "nuevo en el cargo", "viene activo en LinkedIn") cuyo marcador NO esté en ESA línea de candidato, ni invente una fecha/antigüedad exacta; (g) que CADA hook esté COMPLETO y CERRADO: la oración llega hasta el final (ninguno cortado a mitad de frase), las preguntas abren "¿" y cierran "?" (signos apareados) y ninguna queda sin "?"; (h) que cada ÁNGULO ancle un dato o pain ESPECÍFICO de ESA empresa/persona y que los ${pedir} ángulos NO compartan el mismo pain ni una frase intercambiable entre cards (sin cierres template tipo "exactamente el tipo de herramienta/solución que [rol] necesita"). Si algo de esto falla, REESCRIBILO o RE-ELEGÍ antes de cerrar.
+VERIFICÁ ADEMÁS: (a) que las ${pedir} aberturas de los hooks sean ESTRUCTURALMENTE DISTINTAS (no dos con el mismo molde ni todas terminando en "?"); (b) que ningún ángulo/hook use CONDICIONAL VACÍO ("puede/podría/quizás/si necesita"); (c) que NO le atribuyas a la persona una responsabilidad de compra/decisión/liderazgo que su cargo real NO implica (re-encuadre prohibido); (d) que NO le atribuyas al CLIENTE ningún logro, caso, métrica o implementación que no esté TEXTUAL en el contexto "Qué ofrece / proof"; (e) que NINGÚN ángulo/hook AFIRME que la empresa de la card COMPRA/ALOJA/REVENDE/INTEGRA lo del cliente sin evidencia (fit de negocio inexistente), ni que hayas elegido una empresa que es claramente NO comprador (marca propia que no aloja terceros, gigante irreal para el tamaño del cliente, contratista/micro cuando el ICP pide operadores, o mismo sustantivo distinto negocio) habiendo en el pool una alternativa comprable mejor; (f) SEÑALES DE COMPRA: que NINGÚN ángulo/hook afirme una señal ("asumió el rol hace poco", "recién llegó", "levantó financiamiento", "cambió su liderazgo", "está contratando", "está creciendo") cuyo marcador EXACTO NO esté en ESA línea de candidato; que NO inventes fecha, monto, ronda ni antigüedad exacta; que cada card use UNA SOLA señal (la más fuerte), NUNCA dos o más apiladas; y que NUNCA verbalices "activo en LinkedIn" (es interno, decirlo espanta al prospecto); (g) que CADA hook esté COMPLETO y CERRADO: la oración llega hasta el final (ninguno cortado a mitad de frase), las preguntas abren "¿" y cierran "?" (signos apareados) y ninguna queda sin "?"; (h) que cada ÁNGULO ancle un dato o pain ESPECÍFICO de ESA empresa/persona y que los ${pedir} ángulos NO compartan el mismo pain ni una frase intercambiable entre cards (sin cierres template tipo "exactamente el tipo de herramienta/solución que [rol] necesita"). Si algo de esto falla, REESCRIBILO o RE-ELEGÍ antes de cerrar.
 
 ## JSON VÁLIDO (CRÍTICO — si el JSON no parsea, se pierde todo el trabajo)
 - Dentro de "angulo" y "hook" NO uses comillas dobles (") sin escapar. Si necesitás encomillar una palabra o frase dentro del texto, usá comillas simples ('algo') o ninguna. Las ÚNICAS comillas dobles del hook son las dos que lo envuelven (\\"...\\").
@@ -1744,10 +2564,25 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
     const ctx = (p.headRich && p.headRich!==p.head) ? ` | perfil: ${p.headRich}` : '';
     const loc = p.loc ? ` | ${p.loc}` : '';
     const home = p.cerca ? ' ★(país del cliente)' : '';
+    // Idioma del HOOK por país de ESTE lead (el mensaje se le envía a él; va en SU idioma, no en el del documento).
+    const _hl = _idiomaHookDeLoc(p.loc);
+    const hookLang = _hl ? ` · HOOK EN: ${_HOOK_LANG_LABEL[_hl]}` : '';
     // SEÑAL DE COMPRA (dato real del MCP, NO inventado): marcador para que SELECT pueda tejerlo en el ángulo.
-    // Formato literal: " · SEÑAL: asumió el rol hace poco" (recienAsumio) y " · activo en LinkedIn" (posts>0).
-    const senal = `${p.recienAsumio?' · SEÑAL: asumió el rol hace poco':''}${p.posts>0?' · activo en LinkedIn':''}`;
-    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}${senal}`;
+    // Marcadores LITERALES (sin monto/fecha: el detalle datado llega en otra fase con web_search):
+    //   " · SEÑAL: asumió el rol hace poco"            (recienAsumio, por persona)
+    //   " · SEÑAL: la empresa levantó financiamiento"  (senales.funding)
+    //   " · SEÑAL: la empresa está contratando"        (senales.hiring)
+    //   " · SEÑAL: cambio de liderazgo en la empresa"  (senales.leadership)
+    //   " · SEÑAL: la empresa está creciendo en plantilla" (senales.growth)
+    //   " · activo en LinkedIn"                         (posts>0)
+    const s = p.senales || {};
+    const senal = `${p.recienAsumio?' · SEÑAL: asumió el rol hace poco':''}`
+      + `${s.funding?' · SEÑAL: la empresa levantó financiamiento':''}`
+      + `${s.hiring?' · SEÑAL: la empresa está contratando':''}`
+      + `${s.leadership?' · SEÑAL: cambio de liderazgo en la empresa':''}`
+      + `${s.growth?' · SEÑAL: la empresa está creciendo en plantilla':''}`
+      + `${p.posts>0?' · activo en LinkedIn':''}`;
+    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}${senal}${hookLang}`;
   }).join('\n');
   const _pisoTam = (plan._plan && parseInt(plan._plan.tamano_min||0,10)) || 0;
   const vertAlta = (plan._plan && Array.isArray(plan._plan.industrias) ? plan._plan.industrias.filter(Boolean) : []);
@@ -1757,7 +2592,9 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
   // Temperatura un poco más alta SOLO en SELECT: empuja la diversidad estructural de hooks/ángulos (las cards
   // calcadas son el defecto más frecuente). NO toca PLAN ni el juez (que quedan en el default determinístico).
   const tempSelect = (() => { const v = parseFloat(process.env.TEMP_GEN); return Number.isFinite(v) ? v : 0.7; })();
-  const data = await callClaude({ model:MODEL_GEN, system:_promptSelect(PEDIR_SELECT, NUM_CUENTAS), messages, tools:[], maxTokens:6000, temperature: tempSelect });
+  // maxTokens 8000 (no 6000): SELECT escribe PEDIR_SELECT (=NUM_CUENTAS+3) elementos completos con ángulo+hook;
+  // con 6 elementos el JSON rozaba el tope de 6000 y se truncaba (→ "JSON inválido" + reintentos caros). Headroom.
+  const data = await callClaude({ model:MODEL_GEN, system:_promptSelect(PEDIR_SELECT, NUM_CUENTAS), messages, tools:[], maxTokens:8000, temperature: tempSelect });
   try{
     const j = parseReporteJSON(_textoJSON(data.content));
     return Array.isArray(j && j.seleccion) ? j.seleccion : [];
@@ -1890,7 +2727,34 @@ function _rolRelevante(cargo, titulos, industrias){
   // genérica off-vertical -> NO relevante (que se hunda antes de llegar a la IA).
   return pistas.some(k=>c.includes(k));
 }
+// FIT RELAJADO — "última instancia". Igual que _rolRelevante PERO acepta a un DECISOR (marcador de decisión)
+// AUNQUE no tenga pista de vertical en el cargo. Resuelve el caso nicho (indIds=0): el MCP devuelve headlines
+// en inglés que no matchean las pistas de vertical del PLAN, así que _rolRelevante hunde a TODOS los decisores
+// reales y un pool de cientos sale con 0 cards. SOLO se relaja la "pista de vertical"; el resto de innegociables
+// (IC suelto, competidor/par, vertical excluida, empresa real, geo) se chequean APARTE en armarReporte.
+function _rolRelevanteLaxo(cargo, titulos, industrias){
+  const c = _norm(cargo);
+  if(!c) return false;
+  const kws = (titulos||[]).map(k=>_norm(k)).filter(k=>k.length>=3);
+  if(kws.some(k=>c.includes(k))) return true;                 // (a) fit de función directo (igual que estricto)
+  return _MARCADOR_DECISION.test(c);                          // (b laxo) decisor SIN exigir pista de vertical
+}
 
+// Etiquetas legibles de las señales REALES que un candidato del pool ya trae. Mapea los flags
+// (`recienAsumio` por persona, `senales:{funding,leadership,hiring,growth}` por empresa-ancla) a texto
+// mostrable. Orden por FUERZA de señal de compra. EXCLUYE deliberadamente "activo en LinkedIn"/posts
+// (regla anti-creepy: solo ranking interno). Devuelve [] si no hay ninguna (no rompe el render).
+function _senalesVisibles(p){
+  const out = [];
+  if(!p) return out;
+  const s = p.senales || {};
+  if(p.recienAsumio) out.push('Recién asumió el rol');
+  if(s.funding)      out.push('Levantó financiamiento');
+  if(s.leadership)   out.push('Cambio de liderazgo');
+  if(s.hiring)       out.push('Está contratando');
+  if(s.growth)       out.push('Creciendo en plantilla');
+  return out;
+}
 function armarReporte(plan, seleccion, pool, senales){
   const titulos = (plan._plan && plan._plan.titulos_objetivo) || [];
   const industrias = (plan._plan && plan._plan.industrias) || [];
@@ -1898,11 +2762,40 @@ function armarReporte(plan, seleccion, pool, senales){
   const cards=[]; const usados=new Set(); const usadasEmp=new Set();
   // ROL: solo cuando el ICP pide gerencia/dueño preferimos NO tomar IC sueltos si hay decisores disponibles.
   const pideDecisores = _icpPideDecisores(plan);
+  const MIN = parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10);
+
+  // --- INNEGOCIABLES para el FIT RELAJADO (no se relajan; ver _rolRelevanteLaxo) ---
+  // Detector de competidor/par (mismo armado que sourceConRetry): competidores explícitos + competidor_terminos
+  // (sin pisar el vertical del propio comprador), match contra el NOMBRE de empresa.
+  const _icp = (plan && plan._plan) || {};
+  const _raiz = w => w.slice(0, Math.max(5, w.length - 2));
+  const _vertTokens = _vocabVertical(_icp);
+  const competidores = (Array.isArray(_icp.competidores)?_icp.competidores:[]).map(_norm).filter(c=>c.length>=4);
+  const compTerminos = (Array.isArray(_icp.competidor_terminos)?_icp.competidor_terminos:[])
+    .map(_norm).filter(t => {
+      if(t.length < 4) return false;
+      const rt = _raiz(t);
+      return !_vertTokens.some(w => { const rw=_raiz(w); return w.includes(t)||t.includes(w)||rt.startsWith(rw)||rw.startsWith(rt); });
+    });
+  const _esComp = (emp) => { const e=_norm(emp||''); if(!e) return false; return _esCompetidor(e, competidores) || compTerminos.some(t=>e.includes(t)); };
+  const excluir = _verticalesExcluir(plan);
+  // GEO objetivo del reporte: países nombrados en el título/lead de página 1 + geografía declarada del PLAN.
+  // Sirve para el chequeo de geo INNEGOCIABLE del fit relajado (el geo a nivel reporte ya corre downstream).
+  const _paisesObjetivo = new Set([
+    ..._paisesDeTexto(plan.h1_post), ..._paisesDeTexto(plan.lead),
+    ..._paisesDeTexto((plan._plan && plan._plan.geografia) || '')
+  ]);
+  const _geoOk = (loc) => {
+    if(!_paisesObjetivo.size) return true;            // sin país objetivo reconocible -> no podemos juzgar geo
+    const pc = _paisesDeTexto(loc);
+    if(!pc.length) return true;                       // ubicación sin país reconocible -> no bloqueamos por geo
+    return pc.some(p => _paisesObjetivo.has(p));
+  };
 
   // Intenta materializar UNA card desde la selección de la IA. Devuelve la card (sin pushear) o null si no
   // pasa los guards. NO muta estado salvo cuando `commit` es true (reserva id/empresa). Así podemos correr
   // dos pasadas (decisores primero, IC sueltos como fallback) sin tocar la lógica de cada guard.
-  function intentarCard(s, { commit }){
+  function intentarCard(s, { commit, laxo }={}){
     const p = byId.get(s.id);
     if(!p){ console.warn(`[SELECT] id fuera del pool, ignorado: ${s.id}`); return null; }
     if(usados.has(s.id)){ if(commit) console.warn(`[SELECT] id DUPLICADO, ignorado: ${p.name}`); return null; }
@@ -1910,9 +2803,23 @@ function armarReporte(plan, seleccion, pool, senales){
     if(!angulo || !hook){ if(commit) console.warn(`[SELECT] card sin ángulo/hook, descartada: ${p.name}`); return null; }
     const empresa = p.empresa || _empresaDeHeadline(p.head) || '';
     if(!empresa){ if(commit) console.warn(`[SELECT] card sin empresa real, descartada: ${p.name}`); return null; }
+    const cargoBase = String(p.head||'').split('@')[0];
 
     // --- GUARDA DE FUNCIÓN: el cargo tiene que mostrar la función objetivo o ser un decisor ---
-    if(!_rolRelevante(String(p.head||'').split('@')[0], titulos, industrias)){
+    // Modo ESTRICTO: _rolRelevante (función del ICP, o decisión + pista de vertical).
+    // Modo LAXO (fallback de piso, última instancia): _rolRelevanteLaxo acepta a un DECISOR sin pista de
+    // vertical, PERO igual exige los INNEGOCIABLES que NO se relajan: no IC suelto, no competidor/par, no
+    // vertical excluida, empresa real (ya chequeada arriba) y geo correcta. Solo se relaja la pista de vertical.
+    if(laxo){
+      if(!_rolRelevanteLaxo(cargoBase, titulos, industrias)){
+        if(commit) console.warn(`[FIT-RELAJADO] descartada: no es decisor ni on-función: ${p.name} ("${cargoBase.slice(0,50)}")`);
+        return null;
+      }
+      if(_esICsuelto(cargoBase)){ if(commit) console.warn(`[FIT-RELAJADO] descartada por IC suelto: ${p.name} ("${cargoBase.slice(0,50)}")`); return null; }
+      if(_esComp(empresa) || _esComp(p.name)){ if(commit) console.warn(`[FIT-RELAJADO] descartada por COMPETIDOR/par: ${p.name} @ ${empresa}`); return null; }
+      if(excluir.length && (_matchVerticalExcluir(empresa, excluir) || _matchVerticalExcluir(p.head, excluir))){ if(commit) console.warn(`[FIT-RELAJADO] descartada por vertical EXCLUIDA: ${p.name} @ ${empresa}`); return null; }
+      if(!_geoOk(p.loc)){ if(commit) console.warn(`[FIT-RELAJADO] descartada por GEO fuera de objetivo: ${p.name} ("${p.loc||''}")`); return null; }
+    } else if(!_rolRelevante(cargoBase, titulos, industrias)){
       if(commit) console.warn(`[SELECT] card DESCARTADA por FUNCIÓN equivocada/irrelevante: ${p.name} ("${String(p.head||'').slice(0,50)}")`);
       return null;
     }
@@ -1966,6 +2873,16 @@ function armarReporte(plan, seleccion, pool, senales){
       ubicacion: _dedupUbicacion(p.loc || ((plan._plan && plan._plan.geografia) || '')),
       grado: _degOrdinal(p.dist===9?3:p.dist, '2do') + ' grado',
       headcount: (p.headcount ?? null),
+      // SEÑALES VISIBLES: etiquetas legibles SOLO de flags REALES que esta card/empresa ya tiene
+      // (de _parsePeople/_parseProfile para `recienAsumio` y de la cuenta-ancla para `senales`).
+      // NO inventa nada. EXCLUYE "activo en LinkedIn" (posts): esa señal es solo ranking interno
+      // (regla anti-creepy), NUNCA se muestra. Orden por fuerza: recién asumió, financiamiento,
+      // liderazgo, contratando, creciendo. Si no hay señales, queda []. OJO: distinto de `card.senales`,
+      // que `enriquecerSenales` PISA con [{tipo,texto,fuente,fecha}] generado por la IA.
+      senalesVisibles: _senalesVisibles(p),
+      // fit_relajado: card materializada en la SEGUNDA pasada (gate laxo). Interno: telemetría/juez. No lo
+      // toca el render. Las cards de fit ESTRICTO no llevan el flag (quedan undefined -> falsy).
+      ...(laxo ? { fit_relajado:true } : {}),
       angulo: _limpia(angulo), hook: _limpia(hook)
     };
   }
@@ -2002,11 +2919,41 @@ function armarReporte(plan, seleccion, pool, senales){
       if(card) cards.push(card);
     }
   }
+  // --- FALLBACK DE PISO (fit relajado) ----------------------------------------------------------------
+  // Si la pasada ESTRICTA no llegó a MIN cards, completamos hasta NUM_CUENTAS con una SEGUNDA pasada sobre el
+  // pool restante (los ids de la selección aún no usados) usando el gate LAXO (_rolRelevanteLaxo): aceptamos a
+  // un DECISOR aunque su cargo no traiga pista de vertical (caso nicho indIds=0, headlines en inglés del MCP).
+  // Los INNEGOCIABLES NO se relajan (IC suelto / competidor-par / vertical excluida / empresa real / geo: se
+  // chequean dentro de intentarCard en modo laxo). Las cards estrictas YA están pusheadas primero (mejor
+  // calidad), así que el fallback solo RELLENA: nunca reemplaza una buena por una relajada. El dedupe por id y
+  // por empresa lo mantiene intentarCard (usados/usadasEmp). MOTIVO: un pool de cientos de decisores reales no
+  // puede salir con 0 cards.
+  if(cards.length < MIN){
+    const estrictas = cards.length;
+    for(const s of (seleccion||[])){
+      if(cards.length >= NUM_CUENTAS) break;
+      const card = intentarCard(s, { commit:true, laxo:true });
+      if(card) cards.push(card);
+    }
+    const relajadas = cards.length - estrictas;
+    if(relajadas > 0) console.warn(`[FIT-RELAJADO] piso estricto dio ${estrictas}/${MIN}; completo ${relajadas} cards con fit relajado.`);
+  }
   if(cards.length < NUM_CUENTAS) console.warn(`[SELECT] ⚠️ solo ${cards.length}/${NUM_CUENTAS} cards válidas tras dedupe/guards.`);
   const { _plan, ...base } = plan;
   if(!base.empresa) base.empresa = base.h1_company || '';
   // Limpieza de guiones + números inventados en TODO el texto generado de página 1.
   for(const f of ['lead','proof','h1_post']) if(typeof base[f]==='string') base[f]=_limpia(base[f]);
+  // TÍTULO coherente con las cards entregadas: no prometer un país sin ni una card ahí (caso Aenima
+  // "Argentina y Estados Unidos" con todas las cards en Argentina). Cosmético, corre acá (sirve a ambos endpoints).
+  { const _rt = _reconciliarTitulo({ h1_post: base.h1_post, cards, _idioma: _idiomaDoc() });
+    if(_rt){ base.h1_post = _rt.despues; console.log(`[GEO] título reconciliado a las cards: "${_rt.antes}" -> "${_rt.despues}"`); } }
+  // La cinta "País" (ribbon[1].value) alimenta la grilla GEOGRAFÍA y el conteo "N decisores en X": la reconciliamos
+  // al MISMO set de países que las cards reales (caso Aenima: cinta "Argentina · Estados Unidos" con cards solo AR).
+  if(Array.isArray(base.ribbon) && base.ribbon[1] && typeof base.ribbon[1].value === 'string'){
+    const _cp = new Set(); for(const c of cards) for(const p of _paisesDeTexto(c.ubicacion)) _cp.add(p);
+    const _rg = _reconciliarGeoVisible(base.ribbon[1].value, _cp);
+    if(_rg){ console.log(`[GEO] cinta País reconciliada a las cards: "${base.ribbon[1].value}" -> "${_rg}"`); base.ribbon[1].value = _rg; }
+  }
   if(Array.isArray(base.context))     base.context     = base.context.map(_limpia);
   if(Array.isArray(base.apertura))    base.apertura    = base.apertura.map(_limpia);
   if(Array.isArray(base.prioridades)) base.prioridades = base.prioridades.map(_limpia);
@@ -2014,7 +2961,9 @@ function armarReporte(plan, seleccion, pool, senales){
   // SEÑALES DE MERCADO: datos REALES del MCP (sourceCandidates), no generados por IA. Se pegan tal cual.
   // Si el sourcing no logró ninguna señal real, queda [] (el template/render decide cómo mostrarlo).
   const senalesReales = Array.isArray(senales) ? senales.filter(s => s && s.label && (s.value!=null && String(s.value).trim()!=='')) : [];
-  return { ...base, cards, senales: senalesReales };
+  // _plan vuelve adjunto (no se publica en página 1 ni en cards): render.js lo usa para la hoja de
+  // diagnóstico (industrias_list + anti_icp_html). Belt en el punto donde se arma data → sirve a ambos endpoints.
+  return { ...base, cards, senales: senalesReales, _plan, _idioma: _idiomaDoc() };
 }
 
 function _cardCompleta(c){
@@ -2081,6 +3030,56 @@ function _geoIncoherente(data){
   if(!fuera.length) return null;
   // objetivo reportado = el set declarado (lo que se usa en los mensajes de fix).
   return { objetivo:[...declarado], titulo:[...titulo], fuera };
+}
+
+// RECONCILIACIÓN DETERMINÍSTICA DEL TÍTULO (cosmético, NO rechaza): el h1_post no puede PROMETER un país que
+// NINGUNA card representa. Caso real Aenima: título "...en Argentina y Estados Unidos" con las 3 cards en
+// Argentina → el reporte se contradice (promete EE.UU., entrega solo AR). `_geoIncoherente` no lo caza porque
+// AL MENOS una card cae en un país del título (AR). Acá reescribimos h1_post para nombrar SOLO los países
+// presentes en las cards, conservando "N ... en <lista>" y la capitalización original de los nombres del título.
+// Si el caso es "título huérfano" (NINGUNA card en ningún país del título), NO tocamos: eso lo maneja
+// `_geoIncoherente` (rechazo). MUTA data.h1_post in place. Devuelve {antes, despues} o null si no cambia.
+function _reconciliarTitulo(data){
+  if(!data || typeof data.h1_post !== 'string' || !data.h1_post.trim()) return null;
+  const tituloPaises = _paisesDeTexto(data.h1_post);
+  if(tituloPaises.length < 2) return null;                 // 0/1 país en el título → nada que reducir
+  const cardPaises = new Set();
+  for(const c of (data.cards||[])) for(const p of _paisesDeTexto(c.ubicacion)) cardPaises.add(p);
+  if(!cardPaises.size) return null;                        // cards sin país reconocible → no tocar
+  if(tituloPaises.every(p => cardPaises.has(p))) return null;   // el título ya coincide con las cards
+  const m = data.h1_post.match(/^(.*\b(?:en|in|em)\s+)(.+)$/i);  // "<prefijo> en/in/em <lista de países>"
+  if(!m) return null;
+  const prefijo = m[1], lista = m[2];
+  const tokens = lista.split(/\s*,\s*|\s+y\s+|\s+e\s+|\s+and\s+/i).map(t=>t.trim()).filter(Boolean);
+  const quedan = tokens.filter(t => { const ps=_paisesDeTexto(t); return ps.length && ps.some(p=>cardPaises.has(p)); });
+  if(!quedan.length) return null;                          // huérfano → lo maneja _geoIncoherente (rechazo)
+  if(quedan.length === tokens.length) return null;         // no cambió nada
+  const lang = (data._idioma==='en') ? 'en' : (data._idioma==='pt' ? 'pt' : 'es');
+  const conj = lang==='en' ? 'and' : (lang==='pt' ? 'e' : 'y');
+  const nuevaLista = quedan.length===1 ? quedan[0]
+    : quedan.slice(0,-1).join(', ') + ' ' + conj + ' ' + quedan[quedan.length-1];
+  const antes = data.h1_post;
+  data.h1_post = prefijo + nuevaLista;
+  return { antes, despues: data.h1_post };
+}
+
+// RECONCILIACIÓN DETERMINÍSTICA DE UNA LISTA DE PAÍSES VISIBLE (cosmético, NO rechaza) — gemela de
+// _reconciliarTitulo pero para la cinta "País" (ribbon[1].value). Esa cinta alimenta DOS superficies: la celda
+// "GEOGRAFÍA" de la grilla y el conteo "N decisores en X". Caso Aenima: título reconciliado a "Argentina" pero
+// la cinta seguía en "Argentina · Estados Unidos" → grilla y conteo nombraban un país que ninguna card representa.
+// Tokenizamos por separadores comunes (·, coma, y/e/and) y dejamos SOLO los tokens cuyo país aparece en las cards,
+// conservando la capitalización del PLAN. Devuelve la lista reconciliada (string) o null si no cambia / es huérfana.
+function _reconciliarGeoVisible(valor, cardPaises){
+  const v = String(valor||'').trim();
+  if(!v) return null;
+  const paises = _paisesDeTexto(v);
+  if(paises.length < 2) return null;                       // 0/1 país → nada que reducir
+  if(!cardPaises || !cardPaises.size) return null;         // sin país de cards → no tocar
+  if(paises.every(p => cardPaises.has(p))) return null;    // la cinta ya coincide con las cards
+  const tokens = v.split(/\s*·\s*|\s*,\s*|\s+y\s+|\s+e\s+|\s+and\s+/i).map(t=>t.trim()).filter(Boolean);
+  const quedan = tokens.filter(t => { const ps=_paisesDeTexto(t); return ps.length && ps.some(p=>cardPaises.has(p)); });
+  if(!quedan.length || quedan.length === tokens.length) return null;  // huérfano o sin cambio → no tocar
+  return quedan.join(' · ');                               // mismo separador que la cinta usa en la grilla
 }
 
 // --- COHERENCIA DEL CONTEO DE PAÍSES (determinística) -------------------------
@@ -2286,33 +3285,84 @@ function _nombreArchivoPDF(empresa){
 // Usa un modelo BARATO (Haiku) porque es EXTRACCIÓN, no juicio. Anti-invención DURO: si no hay señal con fuente
 // real, NO la inventa (devuelve menos o ninguna). Muta data.cards[i].senales. No rompe el pipeline: error o
 // timeout por card -> esa card queda sin señales. No-op si SIGNALS_MODE != 'on'.
-function _promptSignals(){ return `# IBT GTM — Señales de compra (extracción CON fuente)
-
+function _promptSignals(){ const _id = _idiomaDoc(); return `# IBT GTM — Señales de compra (extracción CON fuente)
+${_id!=='es' ? `IDIOMA DE SALIDA = ${_idiomaNombre(_id)}: escribí "texto" y "tipo" en ${_idiomaNombre(_id)}. Este prompt está en español pero la salida NO; traducí, no copies.
+` : ''}
 Te paso UNA empresa y el producto que un proveedor le quiere vender. Buscá en web 2 o 3 SEÑALES DE COMPRA recientes, públicas y VERIFICABLES de esa empresa: hechos que muestren que está en movimiento y podría comprar ahora (rondas de inversión, expansión o nuevas sucursales/países, cambios de ejecutivos relevantes, lanzamientos de producto, alianzas, resultados o hitos).
 
 ## Reglas (anti-invención, INNEGOCIABLE)
-- Cada señal TIENE que salir de una fuente real que encontraste con web_search. Devolvé el nombre de la fuente (medio o sitio) y la fecha (Mes Año).
-- PROHIBIDO inventar cifras, fechas, fuentes o hechos. Si no encontrás una señal con respaldo, devolvé MENOS señales o ninguna. Una señal real vale más que tres inventadas.
+- Cada señal TIENE que salir de una fuente real que encontraste con web_search. Devolvé el nombre de la fuente (medio o sitio), la fecha (Mes Año) y la URL EXACTA del resultado de web_search de donde la sacaste: copiala TAL CUAL del resultado, NO la inventes, NO la armes de memoria, NO adivines el dominio. Si no tenés la URL exacta del resultado, dejá "url" vacío.
+- PROHIBIDO inventar cifras, fechas, fuentes, URLs o hechos. Si no encontrás una señal con respaldo, devolvé MENOS señales o ninguna. Una señal real vale más que tres inventadas.
+- Preferí señales RECIENTES (últimos ~12 meses) y con fecha. Una señal vieja sin recencia NO sirve como "por qué ahora".
 - La señal tiene que ser RELEVANTE para por qué esa empresa compraría el producto del proveedor, no un dato al azar.
-- "texto": 1 oración corta y concreta (máx 140 caracteres), español neutro, trato de usted, SIN guiones (— ni -).
-- "tipo": una palabra entre inversion, expansion, ejecutivo, producto, alianza, hito.
+- "texto": 1 oración corta y concreta (máx 130 caracteres), en el IDIOMA DE SALIDA, neutro, SIN guiones (— ni -).
+- "tipo": una palabra que clasifique la señal (inversión, expansión, ejecutivo, producto, alianza, hito), EN EL IDIOMA DE SALIDA.
 - No repitas la misma señal redactada distinto.
+- ANTI-SEÑAL (CRÍTICO, lo contrario de una señal de compra): PRIMERO identificá el TIPO de proveedor que le quiere vender (mirá "Producto del proveedor": ¿es una agencia? ¿un software/SaaS de categoría X? ¿una consultora? ¿un proveedor logístico?). Luego, si el hecho que encontraste es que la empresa target YA tiene cubierta ESA MISMA necesidad con un proveedor del MISMO TIPO, eso NO es señal de compra: significa que NO está en mercado para esto y el pitch llega tarde. DESCARTALA (no la incluyas), NUNCA como alianza/hito/producto positivo. Aplica sin importar cómo esté redactada la noticia, INCLUIDAS las formas que SUENAN positivas: "contrató / designó / eligió / sumó / incorporó a [agencia/proveedor] X", "le asignó la cuenta a X", "trabaja con / se asoció con X para [el mismo servicio que vende el proveedor]", "lanzó [campaña/proyecto] con la agencia X", "renovó con su proveedor de X", "implementó / adoptó / migró a [software de la misma categoría]". Ejemplos del principio (NO los hardcodees, son ilustrativos): si el proveedor es una AGENCIA y el target acaba de designar/contratar OTRA agencia (publicidad, medios, comunicación o digital), DESCARTALA; si el proveedor vende un CRM y el target acaba de implementar otro CRM, DESCARTALA; si es una consultora y el target ya contrató otra para lo mismo, DESCARTALA. PREGUNTA DE ORO antes de incluir CUALQUIER alianza/contratación/lanzamiento-con-tercero: "¿este tercero hace lo MISMO que el proveedor que le quiere vender?". Si la respuesta es SÍ, es un MAL momento (necesidad ya resuelta y reciente), no un buen momento: fuera. Ante la duda razonable de que el tercero sea del mismo tipo que el proveedor, NO la pongas como señal.
 
 ## Salida — SOLO JSON (sin texto ni markdown alrededor)
-{ "senales": [ {"tipo":"...","texto":"...","fuente":"...","fecha":"Mes Año"} ] }
-Máximo 3 señales. Si no hay ninguna verificable, devolvé { "senales": [] }.`; }
+{ "senales": [ {"tipo":"...","texto":"...","fuente":"...","fecha":"Mes Año","url":"https://..."} ] }
+Máximo 2 señales. Si no hay ninguna verificable, devolvé { "senales": [] }.`; }
 
-async function _senalesDeCuenta(card, prodCtx){
+// Normaliza una URL para comparar (saca esquema/www/slash final, minúsculas) — para validar el link contra
+// las URLs REALES que devolvió web_search (anti-invención del link).
+function _urlKey(u){ return String(u||'').trim().replace(/^https?:\/\//i,'').replace(/^www\./i,'').replace(/[#?].*$/,'').replace(/\/+$/,'').toLowerCase(); }
+
+async function _senalesDeCuenta(card, prodCtx, opts={}){
   const empresa = String(card.empresa||'').trim();
   if(!empresa) return [];
-  const user = `Empresa target: ${empresa}\nUbicación: ${card.ubicacion||'-'}\nProducto del proveedor que le quiere vender: ${prodCtx || '(general)'}\n\nBuscá señales de compra recientes de "${empresa}" y devolvé el JSON.`;
+  // CACHE POR JOB por empresa: en una ronda de fix el SELECT re-arma las cards (objeto nuevo, sin `senales`),
+  // así que la MISMA empresa (PepsiCo/Mayo) se re-buscaba → costo de signals duplicado. Reusamos lo ya hallado
+  // (0 búsquedas web). Aislado por job en el store ALS (nunca global). Cachea también el resultado vacío.
+  // El TOP-UP (opts.broaden) saltea la cache para reintentar más amplio una card que quedó en 0 señales.
+  const st = _statsALS.getStore();
+  const ck = _empKey(empresa);
+  if(st && !st._signalsCache) st._signalsCache = new Map();
+  if(st && !opts.broaden && st._signalsCache.has(ck)){ console.log(`[SIGNALS] "${empresa}" desde cache de job (0 búsquedas).`); return st._signalsCache.get(ck); }
+  const _broaden = opts.broaden ? `\n\nIMPORTANTE (reintento, la búsqueda anterior no encontró señal): AMPLIÁ el TIPO de evento. Incluí CUALQUIER hecho público con fuente REAL: lanzamiento, campaña, premio, resultado, apertura, nombramiento, alianza, hito. PERO debe ser RECIENTE: SOLO eventos de 2025 o 2026. DESCARTÁ 2024 y anteriores (ya son viejos, no sirven como "por qué ahora"). Mejor 1 señal blanda REAL y fresca que ninguna. SIGUE PROHIBIDO inventar: si no hay nada reciente con fuente, devolvé [].` : '';
+  const user = `Empresa target: ${empresa}\nUbicación: ${card.ubicacion||'-'}\nProducto del proveedor que le quiere vender: ${prodCtx || '(general)'}\n\nBuscá señales de compra recientes de "${empresa}" y devolvé el JSON.${_broaden}`;
   try {
-    const data = await callClaude({ model: MODEL_SIGNALS, system: _promptSignals(), messages:[{ role:'user', content:user }], tools:[WEB_SEARCH_TOOL], maxTokens:1500, temperature:0 });
-    const arr = (data && Array.isArray(data.senales)) ? data.senales : [];
-    // GUARDA DURA anti-invención: solo señales con fuente real y texto; sin fuente -> se tira (no se muestra).
-    return arr.filter(s => s && String(s.texto||'').trim() && String(s.fuente||'').trim())
+    // LOOP agentic de web_search (igual que PLAN): el search es server-side y devuelve pause_turn hasta que
+    // termina; recolectamos las URLs REALES de los bloques de resultado para validar el link después.
+    const messages = [{ role:'user', content: user }];
+    const urlsReales = new Set();
+    const MAX = parseInt(process.env.SIGNALS_MAX_ITERS || '6', 10);
+    let it = 0, jsonText = '';
+    while(true){
+      const data = await callClaude({ model: MODEL_SIGNALS, system: _promptSignals(), messages, tools:[SIGNALS_WEB_SEARCH_TOOL], maxTokens:1500, temperature:0 });
+      contarYLoguearWebSearch(data, 'SIGNALS');
+      for(const b of (data.content||[])){
+        if(b.type==='web_search_tool_result' && Array.isArray(b.content)){
+          for(const r of b.content){ if(r && r.url) urlsReales.add(_urlKey(r.url)); }
+        }
+      }
+      messages.push({ role:'assistant', content: data.content });
+      if(data.stop_reason==='pause_turn'){ if(++it >= MAX){ jsonText = _textoJSON(data.content); break; } continue; }
+      jsonText = _textoJSON(data.content);   // end_turn / stop_sequence / cierre
+      break;
+    }
+    let parsed = null; try { parsed = JSON.parse(_extraerJSON(jsonText) || jsonText); } catch {}
+    const arr = (parsed && Array.isArray(parsed.senales)) ? parsed.senales : [];
+    // GUARDA DURA anti-invención: solo señales con fuente real y texto. El url se conserva SOLO si es una URL
+    // REAL que web_search devolvió en ESTA búsqueda (si el modelo la inventó o no matchea, va sin link — NUNCA
+    // una URL fabricada). El link es un extra; la señal con fuente+fecha vale aunque no haya link válido.
+    let out = arr.filter(s => s && String(s.texto||'').trim() && String(s.fuente||'').trim())
               .slice(0, SIGNALS_PER_CARD)
-              .map(s => ({ tipo:String(s.tipo||'').trim(), texto:String(s.texto||'').trim(), fuente:String(s.fuente||'').trim(), fecha:String(s.fecha||'').trim() }));
+              .map(s => {
+                const u = String(s.url||'').trim();
+                const urlOk = /^https?:\/\//i.test(u) && urlsReales.has(_urlKey(u));
+                return { tipo:String(s.tipo||'').trim(), texto:String(s.texto||'').trim(), fuente:String(s.fuente||'').trim(), fecha:String(s.fecha||'').trim(), url: urlOk ? u : '' };
+              });
+    // GUARDA DE RECENCIA (solo top-up): el broaden baja el umbral de tipo de evento, así que puede colar prensa
+    // VIEJA (caso MODO: alianza Sony 2024, que no es señal fresca). El prompt pide "2025/2026" pero no alcanza:
+    // dropeamos en código toda señal cuya fecha nombre un año anterior al pasado. Si la fecha no trae año, se
+    // conserva (no podemos juzgarla). En la pasada normal NO se filtra (esa ya exige recencia en su prompt).
+    if(opts.broaden){
+      const _yMin = new Date().getFullYear() - 1;
+      out = out.filter(s => { const m = String(s.fecha||'').match(/\b(20\d{2})\b/); return !m || parseInt(m[1],10) >= _yMin; });
+    }
+    if(st){ if(!st._signalsCache) st._signalsCache = new Map(); if(!opts.broaden || out.length) st._signalsCache.set(ck, out); }
+    return out;
   } catch(e){
     console.warn(`[SIGNALS] "${empresa}" falló: ${e.message}`);
     return [];
@@ -2325,13 +3375,127 @@ async function enriquecerSenales(data, cliente){
   const cards = (data && Array.isArray(data.cards)) ? data.cards : [];
   const pend = cards.filter(c => c && !Array.isArray(c.senales));
   if(!pend.length) return;
-  const prodCtx = String((data && (data.proof || data.lead)) || (cliente && cliente.empresa) || '').slice(0,400);
+  _setStage('signals');   // sus tokens + web_searches se atribuyen a la etapa "signals" (no a "gen")
+  // prodCtx = QUÉ ES / QUÉ VENDE el cliente (el TIPO de proveedor), NO sus clientes-vitrina. El proof lista
+  // logos-vitrina (ej. Aenima: "WD-40, John Deere"): si lo usáramos acá, la regla ANTI-SEÑAL no sabría que el
+  // proveedor ES una agencia y dejaría pasar "el target contrató OTRA agencia" como señal. Lo armamos desde la
+  // cinta (Vertical + Modelo) y el lead (qué hace), que describen al CLIENTE, no a sus clientes.
+  const _rb = (data && Array.isArray(data.ribbon)) ? data.ribbon : [];
+  const _tipoProv = [_rb[0] && _rb[0].value, _rb[2] && _rb[2].value].map(v => String(v||'').trim()).filter(Boolean).join(', ');
+  const prodCtx = String([_tipoProv, String((data && data.lead) || '').trim(), (cliente && cliente.empresa) || ''].filter(Boolean).join(' | ')).slice(0,400);
   console.log(`[SIGNALS] buscando señales de compra para ${pend.length} cuenta(s) con ${MODEL_SIGNALS}...`);
-  await Promise.all(pend.map(async c => { c.senales = await _senalesDeCuenta(c, prodCtx); }));
+  // DEADLINE DE FASE (best-effort): con el MCP/web_search lento, las 3 búsquedas no pueden comerse el cinturón.
+  // Default [] para las pendientes: si el deadline corta, esas cards quedan SIN señales (limpio), el job sigue.
+  for(const c of pend) c.senales = [];
+  const CAP = parseInt(process.env.SIGNALS_DEADLINE_MS || '120000', 10);
+  let _sigT;
+  const trabajo = Promise.all(pend.map(async c => { c.senales = await _senalesDeCuenta(c, prodCtx); }));
+  const cap = new Promise(r => { _sigT = setTimeout(() => { console.warn(`[SIGNALS] deadline de fase (${CAP}ms) alcanzado; sigo best-effort con las señales que haya.`); r(); }, CAP); });
+  await Promise.race([trabajo, cap]);
+  clearTimeout(_sigT);
+  // TOP-UP DIRIGIDO (barato): las cards que quedaron en 0 señales datadas reciben UNA búsqueda extra más amplia
+  // (opts.broaden). Solo se gasta web_search en las flacas (no en todas), así ninguna card queda sin "por qué ahora".
+  const flacas = pend.filter(c => Array.isArray(c.senales) && c.senales.length === 0);
+  if(flacas.length){
+    console.log(`[SIGNALS] top-up dirigido: ${flacas.length} card(s) sin señal datada → búsqueda extra ampliada.`);
+    let _t2; const cap2 = new Promise(r => { _t2 = setTimeout(() => { console.warn('[SIGNALS] deadline de top-up alcanzado; sigo con lo que haya.'); r(); }, parseInt(process.env.SIGNALS_TOPUP_MS || '45000', 10)); });
+    const work2 = Promise.all(flacas.map(async c => { const extra = await _senalesDeCuenta(c, prodCtx, { broaden:true }); if(extra && extra.length) c.senales = extra; }));
+    await Promise.race([work2, cap2]);
+    clearTimeout(_t2);
+  }
 }
 
-async function procesar(jobId, { email, dominio, empresa, nombre, profileId, evalMode }) {
+// SEÑALES DE EMPRESA EN LAS CARDS FINALES (id-cross, datos REALES del MCP — NUNCA inventados).
+// PROBLEMA QUE RESUELVE: las señales de empresa (funding/hiring/leadership/growth) hoy SOLO se marcan
+// en las cuentas-ancla del sourcing (coSenales en sourceCandidates). Un lead cuya empresa NO fue ancla
+// (caso robotic-crew: 0 cuentas-ancla) sale sin ninguna señal de empresa en la card. Acá, post-SELECT,
+// chequeamos las señales de CADA empresa final DIRECTAMENTE y las sumamos a card.senalesVisibles.
+//
+// APPROACH B (id-cross), elegido sobre A (structuredContent de lookup_company): el id-cross es el MISMO
+// mecanismo YA probado en prod en sourceCandidates (search companies + filtro de señal + match por id).
+// El structuredContent de lookup_company está CONFIRMADO presente, pero NO hay evidencia de que traiga
+// los flags de señal (en el código solo se le lee website/headcount); marcar señales desde un campo no
+// confirmado violaría anti-invención (podría marcar de más o de menos). Por eso usamos el filtro real.
+//
+// CÓMO: por empresa final, una búsqueda `companies` con keywords=nombre + UN filtro de señal por vez.
+// Si en el resultado aparece una empresa cuyo nombre matchea el de la card (_mismaEmpresa/_empKey),
+// la señal es REAL para esa empresa y se marca. Sin geo/industria en el filtro: la empresa puede NO
+// encajar la industria-id del ICP (es justo el caso no-ancla); el scope lo da keywords + match de nombre.
+// COSTO (rate-limit MCP 60 req/min): por empresa SIN marca de pasada 1 = 1 resolve + 4 search = ~5 llamadas.
+// OPTIMIZACIÓN: solo consultamos las empresas finales que NO recibieron NINGUNA señal-de-empresa por NOMBRE en
+// la pasada 1 de sourceCandidates (senalNombres -> senalesVisibles). Las ya marcadas reusan ese dato (mismo
+// filtro real del MCP, ya confirmado) -> 0 llamadas. Tope efectivo: ~0-6 (antes ~15) por reporte; en la ronda
+// de fix solo re-consulta las cards nuevas sin marca, no las 3 de nuevo.
+const COMPANY_SIGNALS = (process.env.COMPANY_SIGNALS || 'on').toLowerCase();
+async function enriquecerSenalesEmpresa(data){
+  if(COMPANY_SIGNALS !== 'on') return;
+  const cards = (data && Array.isArray(data.cards)) ? data.cards : [];
+  const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '4', 10);
+  // flag -> etiqueta legible (las MISMAS que _senalesVisibles, para no duplicar texto) + filtro MCP.
+  const filtros = [
+    ['funding',    'Levantó financiamiento', { fundingEvents: true }],
+    ['hiring',     'Está contratando',       { hasJobOffers: true }],
+    ['leadership', 'Cambio de liderazgo',    { seniorLeadershipChanges: true }],
+    ['growth',     'Creciendo en plantilla', { headcountGrowth:{min:8, max:1000} }]
+  ];
+  // ETIQUETAS de señal DE EMPRESA (NO incluye "Recién asumió el rol", que es señal de la persona).
+  const _labelsEmpresa = new Set(filtros.map(([, label]) => label));
+  // OPTIMIZACIÓN MCP (rate-limit 60 req/min): la pasada 1 de sourceCandidates ya marcó por NOMBRE EXACTO las
+  // señales de empresa del nicho (senalNombres -> p.senales -> senalesVisibles). Las empresas finales que YA
+  // traen al menos una señal-de-empresa NO se re-consultan acá (mismo dato, ya confirmado por el filtro real del
+  // MCP en pasada 1). Solo pegamos al MCP por las empresas finales SIN ninguna marca de empresa (las no-ancla
+  // que ningún filtro del nicho tocó). Baja estas ~15-30 llamadas a ~0-6.
+  const objetivo = cards.filter(c => {
+    if(!c || !String(c.empresa||'').trim()) return false;
+    const sv = Array.isArray(c.senalesVisibles) ? c.senalesVisibles : [];
+    return !sv.some(s => _labelsEmpresa.has(s));   // ya marcada por nombre en pasada 1 -> no re-consultar
+  });
+  const _reusadas = cards.filter(c => c && String(c.empresa||'').trim()).length - objetivo.length;
+  if(_reusadas > 0) console.log(`[SIGNALS] empresa final: ${_reusadas} card(s) ya con señal-de-empresa marcada por nombre en pasada 1 (0 llamadas MCP); consulto el MCP solo por ${objetivo.length} sin marca.`);
+  if(!objetivo.length) return;
+  await _mapLimit(objetivo, CONC, async (card) => {
+    const nombre = String(card.empresa||'').trim();
+    if(!nombre) return;
+    // 1) ID EXACTO de la empresa del lead (NO match difuso por palabra compartida): una vez que tenemos al
+    // potencial lead, resolvemos SU empresa a su id de Sales Navigator y confirmamos las señales por
+    // IGUALDAD DE ID. Así "Acme Logistics" (id 555) nunca se marca por culpa de "Global Logistics" (id 999)
+    // que comparte el token "logistics". Si resolve no devuelve id, caemos a NOMBRE NORMALIZADO EXACTO
+    // (_empKey), nunca al token-share. resolve(type:COMPANY) es un lookup vivo de LinkedIn.
+    let coId = null, coName = nombre;
+    try{
+      const txt = String(await callMCP('resolve_sales_navigator_id', { type:'COMPANY', keywords:nombre, limit:5 }));
+      const ms = [...txt.matchAll(/id="?([0-9]+)"?\s+"([^"]+)"/g)].map(m=>({ id:m[1], name:m[2] }));
+      const elegido = ms.find(x => _empKey(x.name) === _empKey(nombre)) || ms[0];   // exacto > top
+      if(elegido){ coId = elegido.id; coName = elegido.name; }
+    }catch(e){ /* sin id: el match cae a nombre normalizado exacto abajo (no difuso) */ }
+    // confirma que la empresa devuelta por una búsqueda de señal ES la del lead: por ID si lo tenemos,
+    // si no por igualdad de nombre normalizado (sin el branch de token compartido de _mismaEmpresa).
+    const _esLaMisma = (co) => coId ? String(co.id) === String(coId) : _empKey(co.name) === _empKey(nombre);
+    const encontradas = new Set();   // flags que el MCP confirmó REALES para ESTA empresa (por id exacto)
+    // las 4 búsquedas de señal de ESTA empresa en paralelo (independientes entre sí).
+    await Promise.all(filtros.map(async ([flag, , extra]) => {
+      try{
+        const lista = _parseCompanies(await callMCP('search_sales_navigator_filtered', {
+          category:'companies', profilesLimit:10, keywords:coName, ...extra
+        }));
+        if(lista.some(_esLaMisma)) encontradas.add(flag);
+      }catch(e){ /* una señal que falla no rompe las demás ni la card; queda sin marcar */ }
+    }));
+    if(!encontradas.size){ console.log(`[SIGNALS] empresa final "${nombre}"${coId?` (id=${coId})`:' (sin id)'}: (ninguna señal de empresa)`); return; }
+    // SUMAR a senalesVisibles SIN duplicar las que ya trae la card (recién asumió, o señales de ancla).
+    const ya = new Set(Array.isArray(card.senalesVisibles) ? card.senalesVisibles : []);
+    const nuevas = [];
+    for(const [flag, label] of filtros){ if(encontradas.has(flag) && !ya.has(label)){ nuevas.push(label); ya.add(label); } }
+    if(nuevas.length){
+      card.senalesVisibles = [...(Array.isArray(card.senalesVisibles)?card.senalesVisibles:[]), ...nuevas];
+    }
+    console.log(`[SIGNALS] empresa final "${nombre}"${coId?` (id=${coId})`:' (sin id)'}: ${[...encontradas].join('/')}${nuevas.length?` (agrega: ${nuevas.join(', ')})`:' (ya estaban)'}`);
+  });
+}
+
+async function procesar(jobId, { email, dominio, empresa, nombre, profileId, evalMode, idioma }) {
   return _statsALS.run(_nuevoStats(), async () => {
+  const _st0 = _statsALS.getStore(); if (_st0) _st0.idiomaDoc = _idiomaCode(idioma);   // idioma del DOCUMENTO (manual desde la landing)
   try {
     console.log(`\n========== Job ${jobId} - Inicio (${NUM_CUENTAS} cuentas) ==========`);
     console.log(`Empresa: ${empresa} | Email: ${email} | Dominio: ${dominio} | profileId: ${profileId ?? '-'}`);
@@ -2345,6 +3509,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
     if (!pool.length) throw new Error(`Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.`);
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
     await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
+    await enriquecerSenalesEmpresa(data);     // señales REALES de EMPRESA en las 3 cards finales (id-cross MCP)
 
     let cleanHtml = limpiarHtml(renderReport(data));
     if (!cleanHtml) throw new Error('No se pudo renderizar el reporte');
@@ -2371,6 +3536,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
         }
         data = fixedData;
         await enriquecerSenales(data, cliente);   // re-busca señales para las cuentas nuevas del fix
+        await enriquecerSenalesEmpresa(data);     // re-chequea señales de EMPRESA para las cuentas del fix
         cleanHtml = limpiarHtml(renderReport(data));
         console.log(`[Job ${jobId}] Re-validando con el juez (re-render incluye normalización de países)...`);
         judgeResult = await runJudge(cleanHtml, null);
@@ -2534,7 +3700,13 @@ setInterval(() => {
 }, 30 * 60 * 1000);
 
 app.post('/generar', (req, res) => {
-  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug } = req.body || {};
+  // GATE DE LA LANDING (uso privado): si LANDING_KEY está seteada (solo en el servicio de la landing,
+  // NO en el de producción que usa n8n), exigimos la clave en el header. Si no está seteada, no gatea
+  // (producción/n8n sigue igual). Así la misma /generar sirve para n8n (sin gate) y para la landing (con gate).
+  if (process.env.LANDING_KEY && req.header('x-landing-key') !== process.env.LANDING_KEY) {
+    return res.status(401).json({ error: 'Clave invalida' });
+  }
+  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug, idioma } = req.body || {};
   if (!empresa && !dominio && !profileId) {
     return res.status(400).json({ error: 'Falta empresa, dominio o profileId' });
   }
@@ -2558,10 +3730,13 @@ app.post('/generar', (req, res) => {
 
   // CINTURÓN GLOBAL: cualquier await sin timeout (presente o futuro) podía dejar el job en "processing"
   // para siempre; el TTL del Map limpia el registro a 1h pero NO mata el promise de fondo, e infla
-  // jobs_activos. Promise.race contra JOB_TIMEOUT_MS (default 8 min) garantiza que el job SIEMPRE cierra.
+  // jobs_activos. Promise.race contra JOB_TIMEOUT_MS garantiza que el job SIEMPRE cierra.
   // No rompe el flujo normal: los jobs que terminan antes resuelven primero y este timeout queda inerte.
   // procesar() maneja sus propios errores internamente (status:'error'); este race solo cubre el cuelgue total.
-  const JOB_TIMEOUT_MS = parseInt(process.env.JOB_TIMEOUT_MS || '480000', 10);
+  // 12 min (no 8): con la fase de señales web (~1-2 min) + MCP lento, el job legítimamente tarda más y el
+  // belt lo marcaba error ANTES de terminar (el PDF salía en background pero la landing ya mostraba timeout).
+  // El async NO está atado a los 300s de Railway (eso es para requests sync), así que 12 min es seguro.
+  const JOB_TIMEOUT_MS = parseInt(process.env.JOB_TIMEOUT_MS || '720000', 10);
   let jobTimer;
   const timeoutGlobal = new Promise((resolve) => {
     jobTimer = setTimeout(() => {
@@ -2572,7 +3747,7 @@ app.post('/generar', (req, res) => {
   });
 
   Promise.race([
-    procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug }),
+    procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug, idioma }),
     timeoutGlobal
   ])
   // CATCH DEFENSIVO: procesar() maneja sus errores internamente (try/catch -> status:'error'),
@@ -2597,11 +3772,30 @@ app.get('/resultado/:jobId', (req, res) => {
   res.json(job);
 });
 
+// Descarga del PDF por jobId (para la landing). Sin gate: el jobId es un UUID no adivinable y expira a 1h.
+// Sirve el pdf_base64 que ya guardó el job como un PDF nativo descargable (Content-Disposition).
+app.get('/pdf/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'jobId no encontrado o expirado' });
+  if (job.status === 'processing') return res.status(409).json({ error: 'el reporte todavia se esta generando' });
+  if (!job.pdf_base64) return res.status(422).json({ error: 'el reporte no generó PDF (no apto o sin cuentas)' });
+  const buf = Buffer.from(job.pdf_base64, 'base64');
+  const nombre = String(job.pdf_filename || 'Analisis de Mercado.pdf').replace(/[\\/:*?"<>|]/g, '');
+  // Los headers HTTP viajan en Latin-1, así que un filename con acentos ("Análisis") se corrompe
+  // ("Anýlisis"). RFC 5987: filename* en UTF-8 percent-encoded para navegadores modernos + un filename
+  // ASCII (sin acentos) de fallback para clientes viejos.
+  const nombreAscii = nombre.normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7E]/g, '_');
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${nombreAscii}"; filename*=UTF-8''${encodeURIComponent(nombre)}`);
+  res.send(buf);
+});
+
 app.post('/generar-reporte', async (req, res) => {
-  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug } = req.body || {};
+  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug, idioma } = req.body || {};
   if (!email || !dominio) return res.status(400).json({ error: 'email y dominio son obligatorios' });
 
   await _statsALS.run(_nuevoStats(), async () => {
+  const _st0 = _statsALS.getStore(); if (_st0) _st0.idiomaDoc = _idiomaCode(idioma);   // idioma del DOCUMENTO (manual desde la landing)
   try {
     const cliente = await resolverCliente({ profileId, dominio, empresa: empresa || dominio });
     const empresaFinal = cliente.empresa || empresa || dominio;
@@ -2611,6 +3805,7 @@ app.post('/generar-reporte', async (req, res) => {
     if (!pool.length) return res.status(422).json({ error: `Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.` });
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
     await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
+    await enriquecerSenalesEmpresa(data);     // señales REALES de EMPRESA en las 3 cards finales (id-cross MCP)
 
     let cleanHtml = limpiarHtml(renderReport(data));
     if (!cleanHtml) return res.status(500).json({ error: 'No se pudo renderizar el reporte' });
@@ -2633,6 +3828,7 @@ app.post('/generar-reporte', async (req, res) => {
         }
         data = fixedData;
         await enriquecerSenales(data, cliente);   // re-busca señales para las cuentas nuevas del fix
+        await enriquecerSenalesEmpresa(data);     // re-chequea señales de EMPRESA para las cuentas del fix
         cleanHtml = limpiarHtml(renderReport(data));
         judgeResult = await runJudge(cleanHtml, null);
       } catch (e) {
@@ -2797,7 +3993,11 @@ module.exports = {
   _norm, _empresaDeHeadline, _empKey, _slugCos, _degOrdinal, _headlineLimpio, _fechaHoy,
   _esICsuelto, _icpPideDecisores, _matchFuncion, _warmth, _geoAliasSet,
   _geoIncoherente, _paisesIncoherente, _reescribirPaisesPagina1, _calidezInsuficiente, _paisesDeTexto,
-  _rolRelevante, _verticalesExcluir, _matchVerticalExcluir, _candBueno, _candViable,
+  _rolRelevante, _rolRelevanteLaxo, _verticalesExcluir, _matchVerticalExcluir, _candBueno, _candViable,
   _cardsFitBueno, _resolverGateCalidez, sourceConRetry, runPlanConRetry,
-  _saneaCargo, _dedupUbicacion
+  _saneaCargo, _dedupUbicacion, enriquecerSenales, _senalesDeCuenta,
+  callREST, _parsePeople, _parseCompanies,
+  _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS,
+  _reconciliarTitulo, _reconciliarGeoVisible, _geoIncoherente, callMCP, resolverCliente, _nuevoStats,
+  _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN
 };

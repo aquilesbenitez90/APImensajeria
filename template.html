@@ -27,7 +27,7 @@ html,body{background:var(--bg);font-family:var(--font);color:var(--ink);-webkit-
 /* ---------- HEADER ---------- */
 .page-header{display:flex; align-items:center; justify-content:space-between; padding-bottom:12px; border-bottom:1px solid var(--line); margin-bottom:12px}
 .logo-pill{display:inline-flex; align-items:center}
-.logo-pill img{height:96px; display:block}
+.logo-pill img{height:34px; display:block; opacity:.85}
 .doc-date{font-family:var(--mono); font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-4); white-space:nowrap}
 
 /* ---------- FOOTER ---------- */
@@ -35,7 +35,7 @@ html,body{background:var(--bg);font-family:var(--font);color:var(--ink);-webkit-
 
 /* ---------- IDENTIDAD DE EMPRESA (compacta, secundaria) ---------- */
 .eyebrow{font-family:var(--mono); font-size:9px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-3); margin-bottom:10px}
-h1{font-size:31px; font-weight:700; letter-spacing:-.03em; line-height:1.06; margin-bottom:4px}
+h1{font-size:42px; font-weight:700; letter-spacing:-.035em; line-height:1.02; margin-bottom:5px}
 h1 .ac{color:var(--accent)}
 h1.ac{color:var(--accent)}
 .h1-sub{font-size:16px; font-weight:600; letter-spacing:-.01em; line-height:1.2; color:var(--ink); margin-bottom:10px}
@@ -43,30 +43,38 @@ h1.ac{color:var(--accent)}
 .co-line b{color:var(--ink-2); font-weight:600}
 .lead{font-size:11px; line-height:1.55; color:var(--ink-2); margin-bottom:6px; max-width:172mm}
 .lead b{color:var(--ink); font-weight:600}
-.respaldo{font-size:10px; line-height:1.5; color:var(--ink-3); margin-bottom:20px; max-width:172mm}
+/* Apertura del documento (lo primero que se lee): un toque más grande y oscuro, es el gancho. */
+.lead.intro{font-size:12.5px; line-height:1.6; color:var(--ink); margin-bottom:0; max-width:none}
+.lead.intro b{color:var(--accent)}
+.respaldo{font-size:10px; line-height:1.5; color:var(--ink-3); margin-bottom:12px; max-width:172mm}
+.val-intro{font-size:10.5px; line-height:1.5; color:var(--ink-3); font-style:italic; margin-bottom:14px; max-width:172mm}
+.guia{font-size:11.5px; line-height:1.55; color:var(--ink-2); margin-bottom:18px; max-width:172mm}
+.anti{font-size:11px; line-height:1.5; color:var(--ink-2); margin-bottom:13px; max-width:172mm}
+.puente{font-size:12px; line-height:1.5; color:var(--ink); margin-top:14px; padding-top:12px; border-top:1px solid var(--line); max-width:172mm}
+.puente b{color:var(--accent); font-weight:700}
 .respaldo b{color:var(--accent); font-weight:600; font-family:var(--mono); font-size:7.5px; letter-spacing:.12em; text-transform:uppercase}
 
 /* ---------- STATS (sin cajas, fila con reglas) ---------- */
-.stats{display:flex; gap:32px; margin-bottom:20px; padding:13px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line)}
+.stats{display:flex; gap:32px; margin-bottom:13px; padding:10px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line)}
 .stat .num{font-size:22px; font-weight:700; letter-spacing:-.02em; line-height:1; color:var(--ink)}
 .stat .num .ac{color:var(--accent)}
 .stat .lbl{font-family:var(--mono); font-size:8px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3); margin-top:6px}
 
 /* ---------- SECTION LABEL ---------- */
-.sec-label{font-family:var(--mono); font-size:8.5px; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--accent); margin-bottom:11px}
+.sec-label{font-family:var(--mono); font-size:8.5px; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--accent); margin-bottom:8px}
 
 /* ---------- SEÑALES DE MERCADO (protagonista, sin caja) ---------- */
 /* Números reales del MCP (mercado): el dato pop, en acento, sin caja. */
-.mkt-signals{display:flex; flex-wrap:wrap; gap:30px; margin-bottom:16px}
+.mkt-signals{display:flex; flex-wrap:wrap; gap:28px; margin-bottom:10px}
 .ms-v{font-size:21px; font-weight:700; color:var(--accent); letter-spacing:-.02em; line-height:1}
 .ms-l{font-family:var(--mono); font-size:8px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-3); margin-top:6px; max-width:130px; line-height:1.4}
-.signals{list-style:none; display:flex; flex-direction:column; gap:11px; margin-bottom:20px}
-.signals li{font-size:12.5px; line-height:1.55; color:var(--ink); padding-left:20px; position:relative}
+.signals{list-style:none; display:flex; flex-direction:column; gap:7px; margin-bottom:13px}
+.signals li{font-size:11px; line-height:1.5; color:var(--ink); padding-left:20px; position:relative}
 .signals li::before{content:"→"; position:absolute; left:0; color:var(--accent); font-weight:700}
 .signals b{color:var(--ink); font-weight:600}
 
 /* ---------- ICP (sin cajas ni iconos) ---------- */
-.icp{display:grid; grid-template-columns:1fr 1fr; gap:13px 30px; margin-bottom:20px}
+.icp{display:grid; grid-template-columns:1fr 1fr; gap:10px 28px; margin-bottom:12px}
 .icp h3{font-family:var(--mono); font-size:8.5px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3); margin-bottom:4px}
 .icp p{font-size:11px; line-height:1.5; color:var(--ink-2)}
 
@@ -84,7 +92,7 @@ h1.ac{color:var(--accent)}
 /* ---------- ACCOUNT CARDS (señal protagonista · sin recuadros) ---------- */
 .cards-head{font-family:var(--mono); font-size:8.5px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-3); margin-bottom:14px}
 .cards-wrap{flex:1; display:flex; flex-direction:column; justify-content:flex-start; gap:22px}
-.acct{padding-top:22px; border-top:1px solid var(--line)}
+.acct{padding-top:22px; border-top:1px solid var(--line); break-inside:avoid; page-break-inside:avoid}
 .acct:first-of-type{border-top:none; padding-top:4px}
 /* Cabecera de la card: la persona/empresa son METADATO (chico, apagado). La señal manda. */
 .acct-head{display:flex; gap:11px; align-items:baseline; margin-bottom:11px}
@@ -96,13 +104,35 @@ h1.ac{color:var(--accent)}
 .acct-id .lk{color:var(--accent); text-decoration:none}
 /* La SEÑAL: el protagonista visual de la card. */
 .angle-label{font-family:var(--mono); font-size:8px; font-weight:600; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); margin-bottom:6px}
-.angle{font-size:13px; line-height:1.6; color:var(--ink); font-weight:500; margin-bottom:10px}
+.angle{font-size:13px; line-height:1.6; color:var(--ink); font-weight:400; margin-bottom:10px}
 .acct-hook{font-size:11px; line-height:1.5; color:var(--ink-2); font-style:italic; margin:0}
 .acct-sigs{list-style:none; margin:8px 0 11px; padding:0}
 .acct-sigs .sig{font-size:9.5px; line-height:1.45; color:var(--ink-2); margin-bottom:4px; padding-left:12px; position:relative}
 .acct-sigs .sig::before{content:"▸"; position:absolute; left:0; top:1px; color:var(--accent); font-size:8px}
 .acct-sigs .sig-tag{font-family:var(--mono); font-size:7px; font-weight:600; letter-spacing:.07em; text-transform:uppercase; color:var(--accent); margin-right:5px}
 .acct-sigs .sig-src{font-family:var(--mono); font-size:8px; color:var(--ink-3)}
+.acct-sigs .sig-src a, .acct-sigs .sig-link{color:var(--accent); text-decoration:none}
+/* SEÑAL DE OPORTUNIDAD (disparador real del MCP) — NO es un tag: lee como evento reciente. Sin rótulo.
+   La primera (la de más peso comercial) manda con ↑ en acento y negrita; la secundaria baja con ● tenue. */
+.sig-flags{margin:9px 0 11px; display:flex; flex-direction:column; gap:5px}
+.sig-flag{font-size:11.5px; line-height:1.35; color:var(--ink); font-weight:600; letter-spacing:-.01em; padding-left:18px; position:relative}
+.sig-flag::before{content:"↑"; position:absolute; left:0; top:0; color:var(--accent); font-weight:700; font-size:12px; line-height:1.35}
+.sig-flag + .sig-flag{font-weight:500; color:var(--ink-2)}
+.sig-flag + .sig-flag::before{content:"●"; font-size:7px; top:4px}
+
+/* ---------- LAYOUT EDITORIAL DOS COLUMNAS (página 1) ---------- */
+/* El cuerpo crece para llenar la hoja y reparte sus bloques (no deja hueco abajo). */
+.p1-body{flex:1; display:flex; flex-direction:column; justify-content:space-between; gap:6px}
+/* Dos columnas con filete fino al medio, sin cajas. */
+.diag-grid{display:grid; grid-template-columns:1fr 1fr; align-items:start}
+.diag-grid .col{padding-right:36px; min-width:0}
+.diag-grid .col + .col{padding-right:0; padding-left:36px; border-left:1px solid var(--line)}
+/* ICP como lista etiqueta/valor (definición), no cajas. */
+.kv{display:grid; grid-template-columns:max-content 1fr; gap:9px 16px; margin-bottom:11px}
+.kv dt{font-family:var(--mono); font-size:8px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3); padding-top:2px; white-space:nowrap}
+.kv dd{font-size:11px; line-height:1.45; color:var(--ink-2)}
+/* En el cuerpo de 2 columnas, las listas no necesitan margen inferior grande. */
+.p1-body .signals, .p1-body .prio{margin-bottom:0}
 
 @page{size:A4; margin:0}
 @media print{
@@ -121,57 +151,58 @@ h1.ac{color:var(--accent)}
   <div class="eyebrow">{{eyebrow}}</div>
   <h1 class="ac">{{h1_company}}</h1>
   <p class="h1-sub">{{h1_post}}</p>
-  <p class="co-line">{{ribbon1_label}} · <b>{{ribbon1_value}}</b>&nbsp;&nbsp;·&nbsp;&nbsp;{{ribbon2_label}} · <b>{{ribbon2_value}}</b>&nbsp;&nbsp;·&nbsp;&nbsp;{{ribbon3_label}} · <b>{{ribbon3_value}}</b></p>
-  <p class="lead">{{lead}}</p>
-  <p class="respaldo"><b>Respaldo</b> {{proof}}</p>
+  <div class="p1-body">
+    <p class="lead intro">{{lead}}</p>
+    {{proof_html}}
+    <p class="guia">{{lbl_guia}}</p>
 
-  <div class="stats">
-    <div class="stat"><div class="num">{{stat1_num}}</div><div class="lbl">{{stat1_label}}</div></div>
-    <div class="stat"><div class="num"><span class="ac">{{stat2_num}}</span></div><div class="lbl">{{stat2_label}}</div></div>
-    <div class="stat"><div class="num">{{stat3_num}}</div><div class="lbl">{{stat3_label}}</div></div>
-    <div class="stat"><div class="num">{{stat4_num}}</div><div class="lbl">{{stat4_label}}</div></div>
+    <div class="diag-grid">
+      <div class="col">
+        <div class="sec-label">{{lbl_icp}}</div>
+        <dl class="kv">
+          <dt>{{lbl_decisor}}</dt><dd>{{icp1_desc}}</dd>
+          <dt>{{lbl_industrias}}</dt><dd>{{industrias_list}}</dd>
+          <dt>{{lbl_geografia}}</dt><dd>{{ribbon2_value}}</dd>
+          <dt>{{lbl_tamano}}</dt><dd>{{icp4_desc}}</dd>
+        </dl>
+        <p class="co-line">{{lbl_modelo}} · <b>{{ribbon3_value}}</b>&nbsp;&nbsp;·&nbsp;&nbsp;{{lbl_vertical}} · <b>{{ribbon1_value}}</b></p>
+      </div>
+      <div class="col">
+        <div class="sec-label">{{lbl_senales_col}}</div>
+        <ul class="signals">
+          <li><b>{{lbl_senal}}</b> {{icp2_desc}}</li>
+          <li><b>{{lbl_pain}}</b> {{icp3_desc}}</li>
+        </ul>
+        {{anti_icp_html}}
+      </div>
+    </div>
+
+    <div class="diag-grid">
+      <div class="col">
+        <div class="sec-label">{{lbl_contexto}}</div>
+        <ul class="signals">
+          <li>{{context1}}</li>
+          <li>{{context2}}</li>
+        </ul>
+      </div>
+      <div class="col">
+        <div class="sec-label">{{lbl_empezar}}</div>
+        <ul class="prio">
+          <li>{{prio1}}</li>
+          <li>{{prio2}}</li>
+          <li>{{prio3}}</li>
+          <li>{{prio4}}</li>
+        </ul>
+      </div>
+    </div>
+
+    {{universo_html}}
   </div>
 
-  <div class="sec-label">Señales de mercado</div>
-  {{senales_html}}
-  <ul class="signals">
-    <li>{{context1}}</li>
-    <li>{{context2}}</li>
-    <li>{{context3}}</li>
-  </ul>
-
-  <div class="sec-label">Perfil del cliente ideal</div>
-  <div class="icp">
-    <div class="card"><h3>{{icp1_title}}</h3><p>{{icp1_desc}}</p></div>
-    <div class="card"><h3>{{icp2_title}}</h3><p>{{icp2_desc}}</p></div>
-    <div class="card"><h3>{{icp3_title}}</h3><p>{{icp3_desc}}</p></div>
-    <div class="card"><h3>{{icp4_title}}</h3><p>{{icp4_desc}}</p></div>
-  </div>
-
-  <div class="sec-label">Por dónde empezar</div>
-  <ul class="prio">
-    <li>{{prio1}}</li>
-    <li>{{prio2}}</li>
-    <li>{{prio3}}</li>
-    <li>{{prio4}}</li>
-  </ul>
-
-  <footer class="page-footer"><span>Inbound-Tools.com ● Análisis de Mercado · {{empresa}}</span><span>Página 1 / 2</span></footer>
+  <footer class="page-footer"><span>Inbound-Tools.com ● {{lbl_analisis}} · {{empresa}}</span><span>{{lbl_pagina}} 1 / {{total_pages}}</span></footer>
 </section>
 
-<section class="page">
-  <header class="page-header">
-    <div class="logo-pill"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" alt="IBT"></div>
-    <span class="doc-date">{{fecha}}</span>
-  </header>
-  <div class="cards-head">{{cards_head}}</div>
-
-  <div class="cards-wrap">
-{{cards_html}}
-  </div>
-
-  <footer class="page-footer"><span>Inbound-Tools.com ● Análisis de Mercado · {{empresa}}</span><span>Página 2 / 2</span></footer>
-</section>
+{{cards_pages}}
 
 </body>
 </html>
