@@ -3205,16 +3205,19 @@ Máximo 2 señales. Si no hay ninguna verificable, devolvé { "senales": [] }.`;
 // las URLs REALES que devolvió web_search (anti-invención del link).
 function _urlKey(u){ return String(u||'').trim().replace(/^https?:\/\//i,'').replace(/^www\./i,'').replace(/[#?].*$/,'').replace(/\/+$/,'').toLowerCase(); }
 
-async function _senalesDeCuenta(card, prodCtx){
+async function _senalesDeCuenta(card, prodCtx, opts={}){
   const empresa = String(card.empresa||'').trim();
   if(!empresa) return [];
   // CACHE POR JOB por empresa: en una ronda de fix el SELECT re-arma las cards (objeto nuevo, sin `senales`),
   // así que la MISMA empresa (PepsiCo/Mayo) se re-buscaba → costo de signals duplicado. Reusamos lo ya hallado
   // (0 búsquedas web). Aislado por job en el store ALS (nunca global). Cachea también el resultado vacío.
+  // El TOP-UP (opts.broaden) saltea la cache para reintentar más amplio una card que quedó en 0 señales.
   const st = _statsALS.getStore();
   const ck = _empKey(empresa);
-  if(st){ if(!st._signalsCache) st._signalsCache = new Map(); if(st._signalsCache.has(ck)){ console.log(`[SIGNALS] "${empresa}" desde cache de job (0 búsquedas).`); return st._signalsCache.get(ck); } }
-  const user = `Empresa target: ${empresa}\nUbicación: ${card.ubicacion||'-'}\nProducto del proveedor que le quiere vender: ${prodCtx || '(general)'}\n\nBuscá señales de compra recientes de "${empresa}" y devolvé el JSON.`;
+  if(st && !st._signalsCache) st._signalsCache = new Map();
+  if(st && !opts.broaden && st._signalsCache.has(ck)){ console.log(`[SIGNALS] "${empresa}" desde cache de job (0 búsquedas).`); return st._signalsCache.get(ck); }
+  const _broaden = opts.broaden ? `\n\nIMPORTANTE (reintento, la búsqueda anterior no encontró señal): AMPLIÁ el criterio. Incluí CUALQUIER hecho público reciente y datado (últimos ~18 meses) con fuente REAL: lanzamiento, campaña, premio, resultado, apertura, nombramiento, alianza, hito relevante. Mejor 1 señal blanda REAL con fuente que ninguna. SIGUE PROHIBIDO inventar: si de verdad no hay nada con fuente, devolvé [].` : '';
+  const user = `Empresa target: ${empresa}\nUbicación: ${card.ubicacion||'-'}\nProducto del proveedor que le quiere vender: ${prodCtx || '(general)'}\n\nBuscá señales de compra recientes de "${empresa}" y devolvé el JSON.${_broaden}`;
   try {
     // LOOP agentic de web_search (igual que PLAN): el search es server-side y devuelve pause_turn hasta que
     // termina; recolectamos las URLs REALES de los bloques de resultado para validar el link después.
@@ -3247,7 +3250,7 @@ async function _senalesDeCuenta(card, prodCtx){
                 const urlOk = /^https?:\/\//i.test(u) && urlsReales.has(_urlKey(u));
                 return { tipo:String(s.tipo||'').trim(), texto:String(s.texto||'').trim(), fuente:String(s.fuente||'').trim(), fecha:String(s.fecha||'').trim(), url: urlOk ? u : '' };
               });
-    if(st){ if(!st._signalsCache) st._signalsCache = new Map(); st._signalsCache.set(ck, out); }
+    if(st){ if(!st._signalsCache) st._signalsCache = new Map(); if(!opts.broaden || out.length) st._signalsCache.set(ck, out); }
     return out;
   } catch(e){
     console.warn(`[SIGNALS] "${empresa}" falló: ${e.message}`);
@@ -3273,6 +3276,16 @@ async function enriquecerSenales(data, cliente){
   const cap = new Promise(r => { _sigT = setTimeout(() => { console.warn(`[SIGNALS] deadline de fase (${CAP}ms) alcanzado; sigo best-effort con las señales que haya.`); r(); }, CAP); });
   await Promise.race([trabajo, cap]);
   clearTimeout(_sigT);
+  // TOP-UP DIRIGIDO (barato): las cards que quedaron en 0 señales datadas reciben UNA búsqueda extra más amplia
+  // (opts.broaden). Solo se gasta web_search en las flacas (no en todas), así ninguna card queda sin "por qué ahora".
+  const flacas = pend.filter(c => Array.isArray(c.senales) && c.senales.length === 0);
+  if(flacas.length){
+    console.log(`[SIGNALS] top-up dirigido: ${flacas.length} card(s) sin señal datada → búsqueda extra ampliada.`);
+    let _t2; const cap2 = new Promise(r => { _t2 = setTimeout(() => { console.warn('[SIGNALS] deadline de top-up alcanzado; sigo con lo que haya.'); r(); }, parseInt(process.env.SIGNALS_TOPUP_MS || '45000', 10)); });
+    const work2 = Promise.all(flacas.map(async c => { const extra = await _senalesDeCuenta(c, prodCtx, { broaden:true }); if(extra && extra.length) c.senales = extra; }));
+    await Promise.race([work2, cap2]);
+    clearTimeout(_t2);
+  }
 }
 
 // SEÑALES DE EMPRESA EN LAS CARDS FINALES (id-cross, datos REALES del MCP — NUNCA inventados).
@@ -3868,5 +3881,5 @@ module.exports = {
   _saneaCargo, _dedupUbicacion, enriquecerSenales, _senalesDeCuenta,
   callREST, _parsePeople, _parseCompanies,
   _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS,
-  _reconciliarTitulo, _geoIncoherente
+  _reconciliarTitulo, _geoIncoherente, callMCP, resolverCliente, _nuevoStats
 };
