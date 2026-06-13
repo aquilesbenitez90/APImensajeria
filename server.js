@@ -3216,7 +3216,7 @@ async function _senalesDeCuenta(card, prodCtx, opts={}){
   const ck = _empKey(empresa);
   if(st && !st._signalsCache) st._signalsCache = new Map();
   if(st && !opts.broaden && st._signalsCache.has(ck)){ console.log(`[SIGNALS] "${empresa}" desde cache de job (0 búsquedas).`); return st._signalsCache.get(ck); }
-  const _broaden = opts.broaden ? `\n\nIMPORTANTE (reintento, la búsqueda anterior no encontró señal): AMPLIÁ el criterio. Incluí CUALQUIER hecho público reciente y datado (últimos ~18 meses) con fuente REAL: lanzamiento, campaña, premio, resultado, apertura, nombramiento, alianza, hito relevante. Mejor 1 señal blanda REAL con fuente que ninguna. SIGUE PROHIBIDO inventar: si de verdad no hay nada con fuente, devolvé [].` : '';
+  const _broaden = opts.broaden ? `\n\nIMPORTANTE (reintento, la búsqueda anterior no encontró señal): AMPLIÁ el TIPO de evento. Incluí CUALQUIER hecho público con fuente REAL: lanzamiento, campaña, premio, resultado, apertura, nombramiento, alianza, hito. PERO debe ser RECIENTE: SOLO eventos de 2025 o 2026. DESCARTÁ 2024 y anteriores (ya son viejos, no sirven como "por qué ahora"). Mejor 1 señal blanda REAL y fresca que ninguna. SIGUE PROHIBIDO inventar: si no hay nada reciente con fuente, devolvé [].` : '';
   const user = `Empresa target: ${empresa}\nUbicación: ${card.ubicacion||'-'}\nProducto del proveedor que le quiere vender: ${prodCtx || '(general)'}\n\nBuscá señales de compra recientes de "${empresa}" y devolvé el JSON.${_broaden}`;
   try {
     // LOOP agentic de web_search (igual que PLAN): el search es server-side y devuelve pause_turn hasta que
@@ -3243,13 +3243,21 @@ async function _senalesDeCuenta(card, prodCtx, opts={}){
     // GUARDA DURA anti-invención: solo señales con fuente real y texto. El url se conserva SOLO si es una URL
     // REAL que web_search devolvió en ESTA búsqueda (si el modelo la inventó o no matchea, va sin link — NUNCA
     // una URL fabricada). El link es un extra; la señal con fuente+fecha vale aunque no haya link válido.
-    const out = arr.filter(s => s && String(s.texto||'').trim() && String(s.fuente||'').trim())
+    let out = arr.filter(s => s && String(s.texto||'').trim() && String(s.fuente||'').trim())
               .slice(0, SIGNALS_PER_CARD)
               .map(s => {
                 const u = String(s.url||'').trim();
                 const urlOk = /^https?:\/\//i.test(u) && urlsReales.has(_urlKey(u));
                 return { tipo:String(s.tipo||'').trim(), texto:String(s.texto||'').trim(), fuente:String(s.fuente||'').trim(), fecha:String(s.fecha||'').trim(), url: urlOk ? u : '' };
               });
+    // GUARDA DE RECENCIA (solo top-up): el broaden baja el umbral de tipo de evento, así que puede colar prensa
+    // VIEJA (caso MODO: alianza Sony 2024, que no es señal fresca). El prompt pide "2025/2026" pero no alcanza:
+    // dropeamos en código toda señal cuya fecha nombre un año anterior al pasado. Si la fecha no trae año, se
+    // conserva (no podemos juzgarla). En la pasada normal NO se filtra (esa ya exige recencia en su prompt).
+    if(opts.broaden){
+      const _yMin = new Date().getFullYear() - 1;
+      out = out.filter(s => { const m = String(s.fecha||'').match(/\b(20\d{2})\b/); return !m || parseInt(m[1],10) >= _yMin; });
+    }
     if(st){ if(!st._signalsCache) st._signalsCache = new Map(); if(!opts.broaden || out.length) st._signalsCache.set(ck, out); }
     return out;
   } catch(e){
