@@ -69,6 +69,12 @@ const SIGNALS_PER_CARD = parseInt(process.env.SIGNALS_PER_CARD || '2', 10);
 const SOURCE_PROFILES_LIMIT = parseInt(process.env.SOURCE_PROFILES_LIMIT || '100', 10);
 const SOURCE_CO_LIMIT = parseInt(process.env.SOURCE_CO_LIMIT || '50', 10);
 
+// COMPANY-FIRST (anti-gigante): flag para activar el TECHO de tamaño (tamano_max) + priorizar cuentas-ancla
+// vetadas (Pasada A/B) sobre el barrido people-first (Pasada C, fuente de ruido), usando el barrido SOLO como
+// fallback de relleno. Default OFF -> comportamiento ACTUAL idéntico (producción/español no cambia). Lo
+// prendemos para testear el fix de "boutique de 37 personas recibe Fortune-50 como target" (Aenima/Robotic Crew).
+const SOURCE_COMPANY_FIRST = String(process.env.SOURCE_COMPANY_FIRST || 'off').toLowerCase() === 'on';
+
 // Temperatura del JUEZ: baja = veredicto consistente (mismo reporte → mismo veredicto).
 // El juez corría a la temperatura por defecto (1.0), lo que disparaba la varianza
 // APROBADO↔RECHAZADO entre corridas idénticas. 0 = lo más determinístico. Configurable por env.
@@ -416,7 +422,7 @@ function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnv
     total_cards: cards.length,
     warm,                       // cards en 1er/2do grado (calidez): mejor predictor de conversión
     paginas: pageCount ?? null,
-    icp: { funcion: icp.funcion || '', geografia: icp.geografia || '', geografias: icp.geografias || [], industrias: icp.industrias || [], tamano_min: icp.tamano_min || 0 },
+    icp: { funcion: icp.funcion || '', geografia: icp.geografia || '', geografias: icp.geografias || [], industrias: icp.industrias || [], tamano_min: icp.tamano_min || 0, tamano_max: icp.tamano_max || 0 },
     juez_fixes: (judgeResult && judgeResult.fixes) || [],
     cards,
     costo: +_costoTotal(_stats()).toFixed(4),
@@ -1557,6 +1563,10 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const _offVert = (c) => _matchVerticalExcluir(c.empresa, excluir) || _matchVerticalExcluir(c.head, excluir);
 
   const tamMin = parseInt(icp.tamano_min || 0, 10) || 0;
+  // TECHO DE TAMAÑO (anti-gigante, SOLO con SOURCE_COMPANY_FIRST=on): el comprador de una boutique chica NO es
+  // un Fortune-50 (caso Aenima 37 empl. → JPMorgan/Lockheed). El PLAN razona `tamano_max` (0 = sin techo).
+  // Con el flag OFF, tamMax=0 y NADA de la lógica de techo actúa → comportamiento ACTUAL idéntico.
+  const tamMax = SOURCE_COMPANY_FIRST ? (parseInt(icp.tamano_max || 0, 10) || 0) : 0;
 
   // SCORING del candidato (UNA sola definición → las 3 llamadas quedan idénticas, sin drift posible).
   // Principio (auditoría GTM, casos reales Brandtrack/NOCNOK): DECISIÓN y FIT-DE-VERTICAL son los DRIVERS;
@@ -1692,6 +1702,20 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     }
     return true;
   });
+  // TECHO DE TAMAÑO sobre las CUENTAS-ANCLA (company-first, flag ON): vetamos las que superan tamano_max
+  // ANTES de buscar decisores dentro de ellas (Pasada B), así no traemos VPs de un Fortune-50 a una boutique.
+  // DEGRADACIÓN DIGNA (misma filosofía que el piso): si el techo deja menos de NUM_CUENTAS cuentas-ancla,
+  // lo relajamos (no vetamos por techo) para no quedar cortos. tamMax=0 (flag OFF o sin techo) → no actúa.
+  if(tamMax > 0 && cuentas.length){
+    const bajoTecho = cuentas.filter(c => !(c.headcount!=null && c.headcount > tamMax));
+    const sobreTecho = cuentas.filter(c => c.headcount!=null && c.headcount > tamMax);
+    if(bajoTecho.length >= NUM_CUENTAS){
+      for(const c of sobreTecho) console.warn(`[SOURCE] cuenta-ancla fuera de ICP por techo (${c.headcount}>${tamMax}): ${c.name}`);
+      cuentas = bajoTecho;
+    } else if(sobreTecho.length){
+      console.warn(`[TAM] techo relajado en cuentas-ancla: ${bajoTecho.length}/${NUM_CUENTAS} bajo techo ${tamMax} → no veto cuentas para no quedar corto.`);
+    }
+  }
   const anclaIds     = cuentas.map(c=>c.id).filter(Boolean).slice(0, 20);
   const anclaNombres = new Set(cuentas.map(c=>_empKey(c.name)).filter(Boolean));
   const anclaHC      = new Map(cuentas.map(c=>[_empKey(c.name), c.headcount]));
@@ -1712,6 +1736,24 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // ===== PASADA C — BARRIDO people-first amplio (captura el 2do grado DISPERSO de la red) =====
   let barrido = await buscar(geoLocOrNull, true);
   if(_validosHome(barrido) < HOME_MIN) barrido = barrido.concat(await buscar(geoLocOrNull, false));
+  // COMPANY-FIRST (flag ON): el barrido amplio es la FUENTE DE RUIDO (mete gente de CUALQUIER empresa, incl.
+  // gigantes off-ICP). Con company-first priorizamos las cuentas-ancla VETADAS (Pasada A/B, ya filtradas por
+  // techo) y usamos el barrido SOLO como FALLBACK de relleno si las cuentas-ancla no alcanzan para llenar el
+  // pool a la IA. DEGRADACIÓN DIGNA: no romper "nunca menos de N" → si enCuentas no llena el pool, el barrido
+  // entra a completar (manteniendo recall). Flag OFF → barridoParaPool = barrido (comportamiento ACTUAL).
+  const N_IA_TARGET = parseInt(process.env.SOURCE_TO_IA || '18', 10);
+  let barridoParaPool = barrido;
+  if(SOURCE_COMPANY_FIRST){
+    // ¿Cuántos decisores on-fit aportan ya las cuentas-ancla? Si llenan el pool, el barrido NO se mergea
+    // (queda disponible solo para la cuota de 2do grado / repoblado, que reusan `out`, no `pool`).
+    const anclaFit = enCuentas.filter(p => _rankSenioridad(p.head) >= 1).length;
+    if(anclaFit >= N_IA_TARGET){
+      barridoParaPool = [];
+      console.log(`[SOURCE] company-first: ${anclaFit} decisores en cuentas-ancla ≥ ${N_IA_TARGET} → barrido amplio NO se mergea (cuentas-ancla mandan).`);
+    } else {
+      console.log(`[SOURCE] company-first: ${anclaFit} decisores en cuentas-ancla < ${N_IA_TARGET} → barrido amplio entra como FALLBACK de relleno.`);
+    }
+  }
 
   // ===== PASADA D — SEÑAL DE COMPRA (ADITIVA): recién-cambiaron de trabajo (changedJobsLast90Days) =====
   // Misma búsqueda people que el barrido (mismos keywords/location/industria) pero filtrada a los que
@@ -1737,8 +1779,10 @@ async function sourceCandidates(plan, cliente, conSenal = true){
 
   // Unimos: cuentas-ancla primero (fit), después el barrido (warm disperso), después los recién-cambiados
   // (señal). Dedupe en el loop por id; la señal se MERGEA (OR) para no perderla si el id ya venía sin ella.
-  const pool = [...enCuentas, ...barrido, ...recienCambio];
-  console.log(`[SOURCE] pool bruto: ${enCuentas.length} en cuentas-ancla + ${barrido.length} barrido + ${recienCambio.length} señal = ${pool.length}.`);
+  // company-first (flag ON): `barridoParaPool` puede ser [] cuando las cuentas-ancla ya llenan el pool; OFF
+  // es siempre === `barrido` (comportamiento ACTUAL idéntico).
+  const pool = [...enCuentas, ...barridoParaPool, ...recienCambio];
+  console.log(`[SOURCE] pool bruto: ${enCuentas.length} en cuentas-ancla + ${barridoParaPool.length} barrido + ${recienCambio.length} señal = ${pool.length}.`);
 
   // dedupe + descartes (decisor real, no la propia empresa del cliente, no competidores) + marca ancla
   const vistos=new Map(); const out=[]; const empCliente=_norm((cliente&&cliente.empresa)||'');
@@ -1833,8 +1877,19 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const cumplen  = top.filter(c => !(c.headcount!=null && c.headcount < PISO));
   const fueraTam = top.filter(c => c.headcount!=null && c.headcount < PISO);
   for(const p of fueraTam) console.warn(`[SOURCE] fuera de ICP por tamaño (${p.headcount}<${PISO}): ${p.name} @ ${p.empresa||'?'}`);
-  const topICP = (cumplen.length >= NUM_CUENTAS) ? cumplen : top;
+  let topICP = (cumplen.length >= NUM_CUENTAS) ? cumplen : top;
   if(cumplen.length < NUM_CUENTAS) console.warn(`[SOURCE] piso ${PISO} dejó ${cumplen.length}/${NUM_CUENTAS} -> relajo el piso para no quedar corto.`);
+  // TECHO de tamaño (company-first, flag ON; tamMax=0 → NO actúa, comportamiento ACTUAL idéntico). Mismo patrón
+  // y filosofía de degradación digna que el piso: filtramos los candidatos por ENCIMA de tamano_max, y si el
+  // techo deja menos de NUM_CUENTAS lo relajamos para no quedar cortos (`[TAM] techo relajado`). Solo vetamos
+  // headcount CONOCIDO (los null no se tocan, igual que el piso); el sobre-techo se loguea como el piso.
+  if(tamMax > 0){
+    const bajoTecho  = topICP.filter(c => !(c.headcount!=null && c.headcount > tamMax));
+    const sobreTecho = topICP.filter(c => c.headcount!=null && c.headcount > tamMax);
+    for(const p of sobreTecho) console.warn(`[SOURCE] fuera de ICP por techo (${p.headcount}>${tamMax}): ${p.name} @ ${p.empresa||'?'}`);
+    if(bajoTecho.length >= NUM_CUENTAS){ topICP = bajoTecho; }
+    else if(sobreTecho.length){ console.warn(`[TAM] techo relajado: ${bajoTecho.length}/${NUM_CUENTAS} bajo techo ${tamMax} -> no veto por techo para no quedar corto.`); }
+  }
   topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.score-a.score) || (b.fit-a.fit));
 
   // Pasamos MÁS candidatos a la IA (18) para que tenga de dónde elegir cuenta-ancla + warm.
@@ -1905,6 +1960,27 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     if(reponer.length){ final = final.concat(reponer); }
   }
 
+  // DESCARTE POR TECHO sobre el POOL FINAL (company-first, flag ON; tamMax=0 → no actúa). El relleno
+  // (out.slice(K)), la cuota de 2do grado y el repoblado egregio pueden re-meter un gigante con headcount
+  // CONOCIDO que el techo del top NO vio (solo el top K se filtró arriba). Mismo patrón EGREGIO: vetamos los
+  // que superan tamano_max y repoblamos desde `out` (sin reintroducir sobre-techo) para no quedar cortos.
+  if(tamMax > 0){
+    const antesTecho = final.length;
+    final = final.filter(c => {
+      if(c.headcount!=null && c.headcount > tamMax){
+        console.warn(`[SOURCE] fuera de ICP por techo (${c.headcount}>${tamMax}): ${c.name} @ ${c.empresa||'?'}`);
+        return false;
+      }
+      return true;
+    });
+    if(final.length < antesTecho && final.length < N_IA){
+      const ya = new Set(final.map(c=>c.id));
+      const reponer = out.filter(c => !ya.has(c.id) && !(c.headcount!=null && (c.headcount < EGREGIO || c.headcount > tamMax))).slice(0, N_IA - final.length);
+      if(reponer.length){ final = final.concat(reponer); }
+    }
+    if(final.length < NUM_CUENTAS) console.warn(`[TAM] techo ${tamMax} dejó el pool final en ${final.length}/${NUM_CUENTAS}; el repoblado no alcanzó (caso de cobertura pobre, no se fuerza).`);
+  }
+
   // RANKING FINAL: el pool que ve la IA tiene que estar ordenado por score COMPLETO. Los que entraron por el
   // relleno (out.slice(K)), la cuota de 2do grado o el repoblado egregio y ya traían headcount NUNCA pasaron
   // por el scoring de arriba (score/icSuelto quedaban undefined) → viajaban con su orden de inserción. Acá
@@ -1971,7 +2047,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   }
 
   const n2 = final.filter(c=>c.dist===2).length, nAncla = final.filter(c=>c.ancla).length;
-  console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | a la IA ${final.length} (ancla=${nAncla}, 2do=${n2}, terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], piso<${PISO}).`);
+  console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | a la IA ${final.length} (ancla=${nAncla}, 2do=${n2}, terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], piso<${PISO}${tamMax>0?`, techo>${tamMax}, company-first=ON`:''}).`);
 
   // ===== SEÑALES DE MERCADO (datos REALES del MCP, jamás generados por IA) =====
   // Norte: "más señales de mercado" sin reabrir el agujero de invención. Cada ítem es un dato que sale
@@ -2216,10 +2292,14 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   COHERENCIA NUMÉRICA DE PAÍSES (CRÍTICO, defecto recurrente): fijá UNA SOLA lista de países (los consolidados + recientes reales) y usá EXACTAMENTE esa misma lista, con los MISMOS nombres y la MISMA cantidad, en los TRES lugares: (1) el número del stat de países, (2) los países nombrados en h1_post, y (3) cualquier país que menciones en la PROSA del "lead". REGLA INNEGOCIABLE: cada país que cuentes en el número del stat tiene que estar nombrado en h1_post; y cada país que nombres en h1_post o en el "lead" tiene que estar contado en el stat. PROHIBIDO contar un país en el número que no esté escrito en el texto, o nombrar en el texto uno que no esté en el cuenta (ej. contar 4 pero listar solo España, México y Guatemala sin Andorra es un BUG). EL LEAD NO PUEDE NOMBRAR UN PAÍS EXTRA (CRÍTICO, defecto recurrente que retiene reportes con cuentas buenas): si el cliente NO opera hoy en un país, ese país NO va en el "lead" aunque sea un mercado de expansión, una aspiración o una referencia de contexto. El "lead" solo puede nombrar países de la lista canónica (los mismos de h1_post). Si querés hablar de crecimiento o de mercado sin un país de operación confirmado, hacelo en GENÉRICO (ej. "la región", "Latinoamérica") SIN nombrar un país que no esté en la lista. CIERRE OBLIGATORIO: antes de cerrar el JSON, contá con el dedo los países que nombraste en h1_post, verificá que NINGÚN país del "lead" quede fuera de esa lista, y que ese número sea EXACTAMENTE el del stat de países; si no coinciden, corregilo antes de devolver.
 - DESAMBIGUACIÓN DE TÉRMINOS DE BÚSQUEDA (CRÍTICO — evita el DRIFT que ensucia el pool): los campos que ALIMENTAN la búsqueda ("industrias", "funcion", "titulos_objetivo") tienen que ser ESPECÍFICOS del nicho REAL del cliente y de SU comprador, NO términos genéricos o ambiguos que SANGRAN a verticales adyacentes que NO son el ICP. Una palabra puede matchear el nicho del cliente Y un negocio totalmente distinto que comparte el sustantivo: "fleet/flota" matchea flotas de robots Y flotas de vehículos/aviones/camiones; "automation/automatización" matchea robótica física Y software/RPA/consultoría de salud; "operations/operaciones" matchea cualquier cosa; "platform", "solutions", "services", "smart", "digital", "AI", "tech" son igual de porosos. REGLA MENTAL OBLIGATORIA (aplicá ANTES de fijar cada término): preguntate "¿este término, buscado solo, podría traer una empresa de una industria o un comprador que NO es mi ICP?". Si la respuesta es SÍ: (a) reemplazalo por uno más preciso del nicho, o (b) sumale un calificador que lo ancle al nicho. Ejemplo del principio (NO lo hardcodees, es ilustrativo): si el ICP son empresas que operan flotas de robots autónomos, NO uses "fleet management" ni "automation" pelados; usá los términos que desambiguan el nicho ("autonomous mobile robots", "AMR", "AGV", "warehouse robotics", "robot fleet operations"). El mismo criterio vale para CUALQUIER cliente: detoná los términos que comparte con un vecino que no compra y dejá los que SOLO describen tu nicho. COHERENCIA: "industrias", "funcion" y "titulos_objetivo" tienen que apuntar TODOS al MISMO comprador real (quien operaría/usaría/revendería lo que vende el cliente), para que el pool caiga ON-VERTICAL; un término que cae fuera de esa vertical es DRIFT, no recall. NO sobre-restrinjas: para un nicho legítimo, elegí varios términos PRECISOS del nicho (no te quedes con uno solo), pero NINGUNO genérico que abra la puerta a otra industria.
 - INDUSTRIAS (CRÍTICO — ahora es un FILTRO DURO de búsqueda): "industrias" tiene que listar SOLO las VERTICALES de MÁXIMA prioridad donde están los COMPRADORES del cliente (las MISMAS que marcás "Primero:" en "prioridades", ni una más). PROHIBIDO meter en "industrias" las verticales "Después:" o "También:" ni ninguna secundaria/aspiracional: esas van EXCLUSIVAMENTE en "prioridades" como contexto, NUNCA en "industrias" porque "industrias" es el filtro de búsqueda y meter una de menor prioridad diluye el pool con cuentas de menor fit. El sistema busca decisores SOLO en estas industrias, así que tienen que ser categorías reales y reconocibles (ej: "Seguros", "Comercio al por menor", "Inmobiliario", "Banca", "Administración de propiedades"). NO pongas el rubro del propio cliente ni industrias genéricas. TAXONOMÍA (CRÍTICO para que el filtro NO se caiga): cada nombre de "industrias" tiene que ser una CATEGORÍA RECONOCIBLE de la taxonomía de industrias de LinkedIn/Sales Navigator (las que el sistema resuelve a un id de filtro), NO una etiqueta hiper-específica, de moda o inventada que no exista como industria. Una etiqueta que no resuelve deja la búsqueda SIN filtro de industria. Preferí siempre la categoría canónica más cercana al COMPRADOR: ej. usá "Ingeniería robótica" / "Robotic Engineering" o "Fabricación de maquinaria de automatización" en vez de "Robotics" a secas. Es válido (y recomendado ante la duda) poner el nombre en español Y/O su equivalente reconocible en inglés. EVITÁ verticales industriales/pesadas amplias (ej. "Construcción", "Manufactura", "Minería", "Cemento") salvo que sean LITERALMENTE el comprador: arrastran jefes de mantenimiento de planta que consumen el servicio puertas adentro pero NO son el canal de compra. Ante la duda, preferí las verticales donde el producto del cliente se compra o se revende.
-- TAMAÑO (el piso refleja el COMPRADOR REAL, ni subestimado ni sobreestimado): "tamano_min" tiene que ser un número real de empleados que refleje el PISO REAL del comprador del cliente. El gate de tamaño del sistema es SOLO un PISO (no hay techo): si ponés el piso demasiado alto, dejás entrar gigantes que NO compran (el piso no los frena, solo sube a los grandes); si lo ponés demasiado bajo o en 0, entra cualquiera. Reglá el piso por el tipo de comprador, en AMBAS direcciones:
+- TAMAÑO (el piso refleja el COMPRADOR REAL, ni subestimado ni sobreestimado): "tamano_min" tiene que ser un número real de empleados que refleje el PISO REAL del comprador del cliente. El gate de tamaño tiene un PISO ("tamano_min") y un TECHO ("tamano_max", ver regla siguiente): si ponés el piso demasiado alto, dejás entrar gigantes que NO compran (el piso no los frena, solo sube a los grandes); si lo ponés demasiado bajo o en 0, entra cualquiera. Reglá el piso por el tipo de comprador, en AMBAS direcciones:
   • COMPRADOR PyME / SMB (producto SaaS o herramienta que se vende a agencias, comercios o estudios chicos): el piso tiene que ser BAJO y ACORDE al rango real, NO alto ni 0. Ej. un CRM para agencias inmobiliarias de 5 a 100 asesores → tamano_min ~5 a 10 (NUNCA 200): un piso de 200 deja colar desarrolladoras o cadenas de 300+ que no son comprador del producto SMB. El piso bajo es CORRECTO acá, no un error.
   • COMPRADOR MEDIANO-GRANDE / MARCA ANCLA (plataforma o solución que se vende a cadenas, operadores grandes o marcas establecidas): el piso alto SIGUE siendo correcto (ej. 200 o más). NO conviertas todo en SMB: si el ICP legítimamente apunta a empresas grandes, un piso alto filtra micro-empresas que no son el comprador.
   REGLA DE ORO: el piso es CHICO cuando el comprador es chico y GRANDE cuando el comprador es grande; deducilo del research del comprador real, no por defecto. NO lo dejes en 0 salvo que de verdad cualquier tamaño sirva. COHERENCIA: el piso tiene que ser consistente con la celda (4) "Tamaño de empresa" del ICP y con el comprador_ideal (si el comprador_ideal marca el anti-patrón "(b) gigante fuera de rango realista", el piso NO puede ser tan alto que ese mismo gigante igual entre).
+- TAMAÑO MÁXIMO / TECHO ("tamano_max", anti-gigante — defecto MÁS GRAVE del producto): además del piso, razoná un TECHO realista de empleados del comprador. El techo evita el anti-patrón "(b) gigante fuera de rango realista" del comprador_ideal: una BOUTIQUE / AGENCIA / startup chica (ej. 30 a 50 personas) NO le vende a un Fortune-50 de 50.000 empleados (JPMorgan, PepsiCo, Lockheed NO compran a una agencia de 37 personas); meter esos gigantes como cuentas-ancla quema el reporte. Derivá el techo del TAMAÑO Y TIPO del cliente y de su ciclo de venta REAL:
+  • CLIENTE BOUTIQUE / PyME / startup chica (agencia, estudio, SaaS temprano, consultora chica): el comprador realista es PyME y mediano, NO el conglomerado global. Poné un techo HOLGADO pero acotado (ej. ~2000 a ~5000), suficiente para incluir mid-market sin dejar pasar Fortune-50. Coherente con que una empresa de 37 personas vende a empresas de decenas a pocos miles de empleados, no a cientos de miles.
+  • CLIENTE / PROVEEDOR ENTERPRISE (plataforma que SÍ vende a grandes cuentas, integrador con casos enterprise reales): el techo es ALTO o 0 (sin techo). NO apliques un techo chico a un proveedor que legítimamente cierra con gigantes.
+  ANTI-INVENCIÓN + DEGRADACIÓN DIGNA: si el research NO deja claro el techo del comprador, poné un techo HOLGADO o directamente 0 (= sin techo). NUNCA inventes un número preciso para justificar un techo; ante la duda, holgado. COHERENCIA: el techo tiene que ser consistente con la celda (4) "Tamaño de empresa" del ICP (su límite superior) y con el comprador_ideal; tamano_max, si es >0, tiene que ser MAYOR que tamano_min.
 - COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas/PRODUCTOS que compiten DIRECTAMENTE con la solución que vende el cliente (otras herramientas/soluciones DEL MISMO TIPO), porque venden/fabrican LO MISMO que el cliente. REGLA MENTAL INNEGOCIABLE: un competidor es algo que tu comprador potencial podría comprar EN VEZ del producto del cliente; NO es el comprador potencial mismo. PROHIBIDO incluir la INDUSTRIA, la FUNCIÓN, el TIPO DE EMPRESA o la VERTICAL del COMPRADOR objetivo (eso son tus clientes, no tus rivales). Ejemplo concreto: si el cliente es un CRM que se VENDE a inmobiliarias, los competidores son OTROS CRM inmobiliarios (ej. Inmovilla, Wasi, Propify), NUNCA "inmobiliaria", "agencia inmobiliaria" ni "bienes raíces" (esos son los COMPRADORES). Buscalos con web_search e incluí TRES tipos: (i) competidores directos de tamaño similar; (ii) FABRICANTES o PROVEEDORES globales del mismo producto (ej. para detonadores/voladura: Enaex, Orica, Dyno Nobel, Sandvik; para staffing de tecnología: Toptal, Turing, Andela, TEKsystems); (iii) distribuidores o integradores que revenden ese producto. Son PARES o RIVALES, no clientes. El sistema EXCLUYE a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES del research. NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque descartaría compradores legítimos. Si no identificás competidores reales claros, MEJOR dejá la lista VACÍA que meter la vertical del comprador (que rompe el sourcing).
 - COMPETIDOR_TERMINOS (filtro de respaldo, usar con cuidado): listá 0-4 términos del PRODUCTO ESPECÍFICO que el cliente fabrica/vende y que, si aparecen en el NOMBRE de otra empresa, casi seguro la delatan como proveedor o competidor (ej. "explosivos", "detonadores", "voladura", "staffing", "proptech"). MISMA REGLA MENTAL que en "competidores": un término competidor describe algo que el comprador compraría EN VEZ del producto del cliente, NUNCA describe al comprador mismo. REGLA CRÍTICA Y DURA: PROHIBIDO poner la INDUSTRIA, la FUNCIÓN, el TIPO DE EMPRESA o el VERTICAL donde el cliente VENDE. Si vende software/CRM inmobiliario NO pongas "inmobiliaria" ni "agencia inmobiliaria" ni "bienes raíces"; si le vende a minería NO pongas "minería". Eso descartaría a tus propios COMPRADORES (es exactamente el bug que quemó el sourcing de NOCNOK). Solo el nombre del producto en sí. Ante la duda, MEJOR dejá la lista VACÍA que arriesgarte a meter la vertical del comprador.
 - VERTICALES_EXCLUIR (ruido adyacente del sourcing, NO inventes nada del cliente): listá 2-5 RUBROS ADYACENTES que comparten palabras o suenan parecido al ICP pero que NO son compradores del cliente, para que el sistema los descarte del pool. Son verticales del MERCADO (no del cliente): no estás afirmando nada nuevo sobre el cliente, solo marcando rubros-ruido a EXCLUIR. Ejemplos: para una empresa de voladura minera, excluí "geotecnia", "mecánica de suelos", "militar", "consultoría"; para una marca de joyería retail, excluí "hotelería", "educación". REGLA ANTI FALSO POSITIVO: NUNCA pongas acá el vertical legítimo del comprador (si el comprador está en "Seguros", JAMÁS pongas "seguros") ni un término tan corto/genérico que pueda colarse en nombres de tus compradores. Si no hay rubros adyacentes claros que confundan, dejá la lista VACÍA ([]).
@@ -2242,7 +2322,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "context": [ "bullet corto (máx ~16 palabras)", "bullet corto (máx ~16 palabras)", "bullet corto (máx ~16 palabras)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
   "prioridades": [ "Primero: qué tipo de empresa y por qué, en lenguaje plano (máx ~16 palabras)", "Primero: ...", "Después: ...", "También: ..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras", "comprador_ideal": "1-2 oraciones: el MODELO DE COMPRADOR (quién FIRMA EL CHEQUE y podría adoptar esto de forma realista) como test de INCLUSIÓN y EXCLUSIÓN, con ANTI-PATRONES explícitos de los que apliquen: (a) marca propia que no aloja terceros, (b) gigante fuera de rango realista del cliente, (c) contratista/asesor/micro cuando el ICP pide operadores medianos-grandes, (d) mismo sustantivo distinto negocio (flota de camiones ≠ flota de robots). Ej: 'Compran multimarca y grandes almacenes que curan marcas de terceros; NO marcas propias/DTC que solo venden lo suyo'. Ante research pobre, redactalo INCLUSIVO y agregá la exclusión SOLO si el research la respalda", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA ESPECÍFICAS del comprador real donde se COMPRA/revende el producto, ej: Seguros, Comercio al por menor, Inmobiliario, Administración de propiedades, Banca (evitá industriales amplias tipo Construcción/Manufactura Y términos porosos tipo 'automation'/'fleet'/'operations' que sangran a otra industria; desambiguá al nicho)"], "competidores": ["NOMBRES de empresas/productos que el comprador compraría EN VEZ del producto del cliente (venden lo mismo), ej: Iké Asistencia, Asissprex. NUNCA la industria/vertical del comprador (ej. para un CRM inmobiliario: otros CRM como Inmovilla/Wasi, NUNCA 'inmobiliaria')"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA la industria/función/vertical donde el cliente VENDE (ej. nunca 'inmobiliaria' si vende a inmobiliarias)"], "verticales_excluir": ["2-5 rubros ADYACENTES-ruido a EXCLUIR del sourcing (comparten palabras con el ICP pero NO compran), ej. para voladura minera: geotecnia, mecanica de suelos, militar, consultoria; NUNCA el vertical del comprador; [] si no aplica"], "tamano_min": 200 }
+  "_plan": { "funcion": "función del comprador en 1-2 palabras", "comprador_ideal": "1-2 oraciones: el MODELO DE COMPRADOR (quién FIRMA EL CHEQUE y podría adoptar esto de forma realista) como test de INCLUSIÓN y EXCLUSIÓN, con ANTI-PATRONES explícitos de los que apliquen: (a) marca propia que no aloja terceros, (b) gigante fuera de rango realista del cliente, (c) contratista/asesor/micro cuando el ICP pide operadores medianos-grandes, (d) mismo sustantivo distinto negocio (flota de camiones ≠ flota de robots). Ej: 'Compran multimarca y grandes almacenes que curan marcas de terceros; NO marcas propias/DTC que solo venden lo suyo'. Ante research pobre, redactalo INCLUSIVO y agregá la exclusión SOLO si el research la respalda", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA ESPECÍFICAS del comprador real donde se COMPRA/revende el producto, ej: Seguros, Comercio al por menor, Inmobiliario, Administración de propiedades, Banca (evitá industriales amplias tipo Construcción/Manufactura Y términos porosos tipo 'automation'/'fleet'/'operations' que sangran a otra industria; desambiguá al nicho)"], "competidores": ["NOMBRES de empresas/productos que el comprador compraría EN VEZ del producto del cliente (venden lo mismo), ej: Iké Asistencia, Asissprex. NUNCA la industria/vertical del comprador (ej. para un CRM inmobiliario: otros CRM como Inmovilla/Wasi, NUNCA 'inmobiliaria')"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA la industria/función/vertical donde el cliente VENDE (ej. nunca 'inmobiliaria' si vende a inmobiliarias)"], "verticales_excluir": ["2-5 rubros ADYACENTES-ruido a EXCLUIR del sourcing (comparten palabras con el ICP pero NO compran), ej. para voladura minera: geotecnia, mecanica de suelos, militar, consultoria; NUNCA el vertical del comprador; [] si no aplica"], "tamano_min": 200, "tamano_max": 0 }
 }
 CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
