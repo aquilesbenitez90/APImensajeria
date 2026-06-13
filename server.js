@@ -1695,8 +1695,21 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const senalNombres = { funding:new Set(), hiring:new Set(), leadership:new Set(), growth:new Set() };  // _empKey(name) -> flag
   const fundingNombres = senalNombres.funding;   // alias para no tocar los usos posteriores de funding
   const _addNombres = (lista, flag) => { for(const c of (lista||[])){ const k=_empKey(c.name||''); if(k) senalNombres[flag].add(k); } };
+  // ANCLAS SOLO EN EL PAÍS PRINCIPAL para clientes chicos / techo bajo: una búsqueda de EMPRESAS multi-país
+  // (AR+US) ordena por relevancia/tamaño y trae gigantes globales de EE.UU. (Ford, Walmart, PepsiCo…) que el
+  // techo después veta ~100, dejando 0 anclas reales del país del cliente (caso Aenima, 37 empl.). Para un
+  // comprador de boutique las cuentas objetivo están en SU país. Las PERSONAS siguen multi-país (geoLocOrNull)
+  // para no perder 2do grado disperso. Enterprise (headcount alto y sin techo bajo) NO se toca.
+  const ANCLA_SOLO_HOME_HC  = parseInt(process.env.SOURCE_ANCLA_SOLO_HOME_HC  || '150',  10);
+  const ANCLA_SOLO_HOME_TAM = parseInt(process.env.SOURCE_ANCLA_SOLO_HOME_TAM || '5000', 10);
+  const _clienteChico = (cliente && cliente.headcount != null && cliente.headcount < ANCLA_SOLO_HOME_HC)
+                     || (tamMax > 0 && tamMax <= ANCLA_SOLO_HOME_TAM);
+  const geoAncla = (_clienteChico && homeLoc.length) ? homeLoc : geoLocOrNull;
+  if(_clienteChico && homeLoc.length && (geoAncla||[]).length < (geoLocOrNull||[]).length){
+    console.log(`[SOURCE] cliente chico (hc=${cliente&&cliente.headcount!=null?cliente.headcount:'?'}, techo=${tamMax||'-'}) → cuentas-ancla SOLO en país principal homeLoc=[${homeLoc.join(',')}] (personas siguen multi-país).`);
+  }
   if(indIds.length && geoLocOrNull){
-    const baseCo = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoLocOrNull}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
+    const baseCo = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoAncla}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
     try{ txtCoSenal = String(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); cuentas = _parseCompanies(txtCoSenal); nConSenal = cuentas.length; _marcarCo(cuentas, 'growth'); _addNombres(cuentas, 'growth'); }
     catch(e){ console.warn('[SOURCE] companies (con señal) falló:', e.message); }
     if(cuentas.length < NUM_CUENTAS*2){   // la señal recortó demasiado para este vertical: recall sin señal
@@ -1745,7 +1758,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       .filter(t=>t && t.split(' ').length===1 && t.length>=3)   // UNA sola palabra por búsqueda (multi-palabra da 0)
       .filter((t,i,a)=>a.indexOf(t)===i)
       .slice(0,4);
-    const baseKw = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoLocOrNull}, headcount:_hcDesde(hcMin) };
+    const baseKw = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoAncla}, headcount:_hcDesde(hcMin) };
     const listas = await _mapLimit(kwAncla, CONC, async kw => {
       try{ return _parseCompanies(await callMCP('search_sales_navigator_filtered', {...baseKw, keywords: kw})); }
       catch(e){ console.warn(`[SOURCE] companies por keyword "${kw}" falló:`, e.message); return []; }
@@ -1787,11 +1800,13 @@ async function sourceCandidates(plan, cliente, conSenal = true){
 
   // ===== PASADA B — DECISORES dentro de las cuentas-ancla (fit alto, empresa controlada) =====
   let enCuentas = [];
+  const idsEnCuenta = new Set();   // ids que vinieron de company:{include:anclaIds} → ancla por CONSTRUCCIÓN (no por match de nombre)
   if(anclaIds.length){
     const f={ category:'people', profilesLimit:SOURCE_PROFILES_LIMIT, company:{include: anclaIds} };
     if(geoLocOrNull) f.location={include:geoLocOrNull};
     if(terminos.length) f.jobPosition={ include: terminos };   // acota a los cargos objetivo dentro de la cuenta
     try{ enCuentas = _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{}
+    for(const p of enCuentas) if(p.id) idsEnCuenta.add(p.id);
   }
 
   // ===== PASADA C — BARRIDO people-first amplio (captura el 2do grado DISPERSO de la red) =====
@@ -1865,7 +1880,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       continue;
     }
     const cerca = _esCerca(p.loc);
-    const ancla = (emp && anclaNombres.has(_empKey(emp))) ? 1 : 0;
+    const ancla = (idsEnCuenta.has(p.id) || (emp && anclaNombres.has(_empKey(emp)))) ? 1 : 0;
     const hcPre = ancla ? (anclaHC.get(_empKey(emp)) ?? null) : null;   // headcount ya conocido de la cuenta-ancla
     // SEÑALES DE EMPRESA (datos reales del MCP): si la empresa del candidato es una cuenta-ancla marcada,
     // la card hereda {funding,hiring,leadership,growth}. Es ADITIVO (realce + marca), nunca filtro.
@@ -2381,6 +2396,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - SIN GUIONES (importante): NUNCA uses guiones largos (—) ni guiones (-) como conectores o para incisos, en NINGÚN texto (lead, proof, context, apertura, icp, prioridades). Reemplazalos por comas, paréntesis o dos puntos. Ej: en vez de "servicios técnicos —plomería, electricidad— con cobertura", escribí "servicios técnicos (plomería, electricidad) con cobertura". El texto tiene que sonar humano, no de IA.
 - GEOGRAFÍA (CRÍTICO): "geografia" = país del cliente (prioritario). "geografias" = país del cliente PRIMERO + SOLO los demás países donde el cliente HOY ya puede prestar el servicio de verdad (sus países de operación actuales). PROHIBIDO mercados de expansión futura o donde el cliente todavía NO opera. El sistema prioriza fuerte el país del cliente; los demás solo rellenan.
 - PAÍS DEL CLIENTE, NO DE LA AGENCIA (REGLA DURA, defecto recurrente): "geografia" y "geografias" son el/los país(es) donde opera el CLIENTE de ESTE reporte, deducidos de SU propio research (web, dominio, sede, idioma del sitio, clientes, TLD). NUNCA pongas Argentina (ni ningún otro país) "por defecto" ni porque sea el país de quien encarga el reporte: este servicio lo corre una agencia argentina, pero ESO ES IRRELEVANTE para la geografía del cliente. Ej: una empresa con sede/operación en Estados Unidos (aunque tenga dominio .com) → geografia="Estados Unidos", JAMÁS "Argentina". Si el research no deja claro el país, usá el MÁS RESPALDADO por las señales (sede, idioma del sitio, clientes, TLD), nunca Argentina por descarte. NO inventes países: si solo hay evidencia de UN país, geografias = [ese país] y geografia = ese país.
+- EL PROOF NO DEFINE LA GEOGRAFÍA (CRÍTICO, mismo contrapeso que en INDUSTRIAS): los clientes/marcas que nombrás en "proof" son LOGOS-VITRINA (pueden ser marcas globales o de otro país que el cliente consiguió como caso). El país de esas marcas NO entra en "geografias". "geografias" son SOLO los países donde el CLIENTE de este reporte HOY vende/opera/presta el servicio, no los países de origen de sus clientes-vitrina. Ej. ilustrativo (NO lo hardcodees): una agencia ARGENTINA cuyo proof menciona WD-40 o John Deere (marcas de EE.UU.) NO opera en Estados Unidos por eso: geografias = ["Argentina"], NUNCA ["Argentina", "Estados Unidos"], salvo que web_search confirme en una fuente del propio cliente que vende/presta servicio a empresas EN EE.UU. (oficina, equipo, cobertura declarada). Que el cliente tenga clientes-vitrina extranjeros NO es evidencia de que opere en ese país. Ante la duda: incluí SOLO el/los país(es) con operación REAL confirmada del cliente.
 - COHERENCIA geografia ∈ geografias (INNEGOCIABLE, este bug rompió el sourcing de Robotic Crew): "geografia" (el país principal) TIENE que ser uno de los que están en "geografias"; el principal es parte de la lista, NUNCA un país que no figure en ella. PROHIBIDO devolver geografia="Argentina" con geografias=["Estados Unidos"] (eso hace que el sistema busque en el país equivocado). CIERRE OBLIGATORIO: antes de devolver, verificá que "geografia" aparezca dentro de "geografias" y que AMBOS reflejen el mercado REAL del cliente; si no, corregilo.
 - ALCANCE REGIONAL / NEARSHORE (caso del principio rector, para verticales nicho donde el país principal da pool pobre): además de los países de operación actual, PODÉS sumar a "geografias" países cercanos ADICIONALES donde el cliente PUEDE prestar/vender el servicio hoy (modelo nearshore o regional), PERO con estos guardarraíles INNEGOCIABLES: (a) solo si web_search CONFIRMA en una fuente del propio cliente que sirve/le vende a esos países (cobertura regional declarada, modelo remoto/exportable, casos en la región); que sea PLAUSIBLE para el rubro NO alcanza. (b) NUNCA agregues un país solo para "rellenar" ni porque haya más gente o pool más cálido ahí: la cantidad de leads disponibles NO es una razón válida. (c) El país principal SIGUE MANDANDO y va PRIMERO. No SUB-escopees la geografía real del cliente, pero tampoco inventes mercados. COHERENCIA OBLIGATORIA: cada país que sumes a "geografias" tiene que aparecer también en el título (h1_post) y, si lo nombrás, en la prosa del "lead"; y tiene que quedar contado en el número del stat de países. Si no lo vas a nombrar en h1_post, NO lo agregues.
 - NIVEL DE CERTEZA POR PAÍS (caso del principio rector; lo nota el cliente): no todos los países donde aparece un cliente están al mismo nivel. Clasificá CADA uno según cómo lo describen TUS fuentes de web_search y usá un lenguaje que coincida con esa evidencia:
@@ -2931,6 +2947,13 @@ function armarReporte(plan, seleccion, pool, senales){
   // "Argentina y Estados Unidos" con todas las cards en Argentina). Cosmético, corre acá (sirve a ambos endpoints).
   { const _rt = _reconciliarTitulo({ h1_post: base.h1_post, cards, _idioma: _idiomaDoc() });
     if(_rt){ base.h1_post = _rt.despues; console.log(`[GEO] título reconciliado a las cards: "${_rt.antes}" -> "${_rt.despues}"`); } }
+  // La cinta "País" (ribbon[1].value) alimenta la grilla GEOGRAFÍA y el conteo "N decisores en X": la reconciliamos
+  // al MISMO set de países que las cards reales (caso Aenima: cinta "Argentina · Estados Unidos" con cards solo AR).
+  if(Array.isArray(base.ribbon) && base.ribbon[1] && typeof base.ribbon[1].value === 'string'){
+    const _cp = new Set(); for(const c of cards) for(const p of _paisesDeTexto(c.ubicacion)) _cp.add(p);
+    const _rg = _reconciliarGeoVisible(base.ribbon[1].value, _cp);
+    if(_rg){ console.log(`[GEO] cinta País reconciliada a las cards: "${base.ribbon[1].value}" -> "${_rg}"`); base.ribbon[1].value = _rg; }
+  }
   if(Array.isArray(base.context))     base.context     = base.context.map(_limpia);
   if(Array.isArray(base.apertura))    base.apertura    = base.apertura.map(_limpia);
   if(Array.isArray(base.prioridades)) base.prioridades = base.prioridades.map(_limpia);
@@ -3038,6 +3061,25 @@ function _reconciliarTitulo(data){
   const antes = data.h1_post;
   data.h1_post = prefijo + nuevaLista;
   return { antes, despues: data.h1_post };
+}
+
+// RECONCILIACIÓN DETERMINÍSTICA DE UNA LISTA DE PAÍSES VISIBLE (cosmético, NO rechaza) — gemela de
+// _reconciliarTitulo pero para la cinta "País" (ribbon[1].value). Esa cinta alimenta DOS superficies: la celda
+// "GEOGRAFÍA" de la grilla y el conteo "N decisores en X". Caso Aenima: título reconciliado a "Argentina" pero
+// la cinta seguía en "Argentina · Estados Unidos" → grilla y conteo nombraban un país que ninguna card representa.
+// Tokenizamos por separadores comunes (·, coma, y/e/and) y dejamos SOLO los tokens cuyo país aparece en las cards,
+// conservando la capitalización del PLAN. Devuelve la lista reconciliada (string) o null si no cambia / es huérfana.
+function _reconciliarGeoVisible(valor, cardPaises){
+  const v = String(valor||'').trim();
+  if(!v) return null;
+  const paises = _paisesDeTexto(v);
+  if(paises.length < 2) return null;                       // 0/1 país → nada que reducir
+  if(!cardPaises || !cardPaises.size) return null;         // sin país de cards → no tocar
+  if(paises.every(p => cardPaises.has(p))) return null;    // la cinta ya coincide con las cards
+  const tokens = v.split(/\s*·\s*|\s*,\s*|\s+y\s+|\s+e\s+|\s+and\s+/i).map(t=>t.trim()).filter(Boolean);
+  const quedan = tokens.filter(t => { const ps=_paisesDeTexto(t); return ps.length && ps.some(p=>cardPaises.has(p)); });
+  if(!quedan.length || quedan.length === tokens.length) return null;  // huérfano o sin cambio → no tocar
+  return quedan.join(' · ');                               // mismo separador que la cinta usa en la grilla
 }
 
 // --- COHERENCIA DEL CONTEO DE PAÍSES (determinística) -------------------------
@@ -3256,7 +3298,7 @@ Te paso UNA empresa y el producto que un proveedor le quiere vender. Buscá en w
 - "texto": 1 oración corta y concreta (máx 130 caracteres), en el IDIOMA DE SALIDA, neutro, SIN guiones (— ni -).
 - "tipo": una palabra que clasifique la señal (inversión, expansión, ejecutivo, producto, alianza, hito), EN EL IDIOMA DE SALIDA.
 - No repitas la misma señal redactada distinto.
-- ANTI-SEÑAL (CRÍTICO, lo contrario de una señal de compra): si el hecho es que la empresa acaba de CONTRATAR, ELEGIR o firmar con un PROVEEDOR DEL MISMO TIPO que el proveedor que le quiere vender (mirá "Producto del proveedor": si el proveedor es una agencia y la empresa eligió OTRA agencia; si es un software X y eligió otro software X; si es una consultora y contrató otra consultora), eso NO es señal de compra: significa que YA resolvió esa necesidad y NO está en mercado. NO la incluyas, NUNCA como alianza/hito positivo. Una empresa que acaba de elegir a un competidor del proveedor es un MAL momento, no un buen momento.
+- ANTI-SEÑAL (CRÍTICO, lo contrario de una señal de compra): PRIMERO identificá el TIPO de proveedor que le quiere vender (mirá "Producto del proveedor": ¿es una agencia? ¿un software/SaaS de categoría X? ¿una consultora? ¿un proveedor logístico?). Luego, si el hecho que encontraste es que la empresa target YA tiene cubierta ESA MISMA necesidad con un proveedor del MISMO TIPO, eso NO es señal de compra: significa que NO está en mercado para esto y el pitch llega tarde. DESCARTALA (no la incluyas), NUNCA como alianza/hito/producto positivo. Aplica sin importar cómo esté redactada la noticia, INCLUIDAS las formas que SUENAN positivas: "contrató / designó / eligió / sumó / incorporó a [agencia/proveedor] X", "le asignó la cuenta a X", "trabaja con / se asoció con X para [el mismo servicio que vende el proveedor]", "lanzó [campaña/proyecto] con la agencia X", "renovó con su proveedor de X", "implementó / adoptó / migró a [software de la misma categoría]". Ejemplos del principio (NO los hardcodees, son ilustrativos): si el proveedor es una AGENCIA y el target acaba de designar/contratar OTRA agencia (publicidad, medios, comunicación o digital), DESCARTALA; si el proveedor vende un CRM y el target acaba de implementar otro CRM, DESCARTALA; si es una consultora y el target ya contrató otra para lo mismo, DESCARTALA. PREGUNTA DE ORO antes de incluir CUALQUIER alianza/contratación/lanzamiento-con-tercero: "¿este tercero hace lo MISMO que el proveedor que le quiere vender?". Si la respuesta es SÍ, es un MAL momento (necesidad ya resuelta y reciente), no un buen momento: fuera. Ante la duda razonable de que el tercero sea del mismo tipo que el proveedor, NO la pongas como señal.
 
 ## Salida — SOLO JSON (sin texto ni markdown alrededor)
 { "senales": [ {"tipo":"...","texto":"...","fuente":"...","fecha":"Mes Año","url":"https://..."} ] }
@@ -3334,7 +3376,13 @@ async function enriquecerSenales(data, cliente){
   const pend = cards.filter(c => c && !Array.isArray(c.senales));
   if(!pend.length) return;
   _setStage('signals');   // sus tokens + web_searches se atribuyen a la etapa "signals" (no a "gen")
-  const prodCtx = String((data && (data.proof || data.lead)) || (cliente && cliente.empresa) || '').slice(0,400);
+  // prodCtx = QUÉ ES / QUÉ VENDE el cliente (el TIPO de proveedor), NO sus clientes-vitrina. El proof lista
+  // logos-vitrina (ej. Aenima: "WD-40, John Deere"): si lo usáramos acá, la regla ANTI-SEÑAL no sabría que el
+  // proveedor ES una agencia y dejaría pasar "el target contrató OTRA agencia" como señal. Lo armamos desde la
+  // cinta (Vertical + Modelo) y el lead (qué hace), que describen al CLIENTE, no a sus clientes.
+  const _rb = (data && Array.isArray(data.ribbon)) ? data.ribbon : [];
+  const _tipoProv = [_rb[0] && _rb[0].value, _rb[2] && _rb[2].value].map(v => String(v||'').trim()).filter(Boolean).join(', ');
+  const prodCtx = String([_tipoProv, String((data && data.lead) || '').trim(), (cliente && cliente.empresa) || ''].filter(Boolean).join(' | ')).slice(0,400);
   console.log(`[SIGNALS] buscando señales de compra para ${pend.length} cuenta(s) con ${MODEL_SIGNALS}...`);
   // DEADLINE DE FASE (best-effort): con el MCP/web_search lento, las 3 búsquedas no pueden comerse el cinturón.
   // Default [] para las pendientes: si el deadline corta, esas cards quedan SIN señales (limpio), el job sigue.
@@ -3950,6 +3998,6 @@ module.exports = {
   _saneaCargo, _dedupUbicacion, enriquecerSenales, _senalesDeCuenta,
   callREST, _parsePeople, _parseCompanies,
   _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS,
-  _reconciliarTitulo, _geoIncoherente, callMCP, resolverCliente, _nuevoStats,
+  _reconciliarTitulo, _reconciliarGeoVisible, _geoIncoherente, callMCP, resolverCliente, _nuevoStats,
   _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN
 };
