@@ -1,0 +1,2437 @@
+[
+ {
+  "id": "2190",
+  "label": "Accommodation Services",
+  "hierarchy": "Accommodation Services"
+ },
+ {
+  "id": "34",
+  "label": "Food and Beverage Services",
+  "hierarchy": "Accommodation Services > Food and Beverage Services"
+ },
+ {
+  "id": "2217",
+  "label": "Bars, Taverns, and Nightclubs",
+  "hierarchy": "Accommodation Services > Food and Beverage Services > Bars, Taverns, and Nightclubs"
+ },
+ {
+  "id": "2212",
+  "label": "Caterers",
+  "hierarchy": "Accommodation Services > Food and Beverage Services > Caterers"
+ },
+ {
+  "id": "2214",
+  "label": "Mobile Food Services",
+  "hierarchy": "Accommodation Services > Food and Beverage Services > Mobile Food Services"
+ },
+ {
+  "id": "32",
+  "label": "Restaurants",
+  "hierarchy": "Accommodation Services > Food and Beverage Services > Restaurants"
+ },
+ {
+  "id": "31",
+  "label": "Hospitality",
+  "hierarchy": "Accommodation Services > Hospitality"
+ },
+ {
+  "id": "2197",
+  "label": "Bed-and-Breakfasts, Hostels, Homestays",
+  "hierarchy": "Accommodation Services > Hospitality > Bed-and-Breakfasts, Hostels, Homestays"
+ },
+ {
+  "id": "2194",
+  "label": "Hotels and Motels",
+  "hierarchy": "Accommodation Services > Hospitality > Hotels and Motels"
+ },
+ {
+  "id": "1912",
+  "label": "Administrative and Support Services",
+  "hierarchy": "Administrative and Support Services"
+ },
+ {
+  "id": "1938",
+  "label": "Collection Agencies",
+  "hierarchy": "Administrative and Support Services > Collection Agencies"
+ },
+ {
+  "id": "110",
+  "label": "Events Services",
+  "hierarchy": "Administrative and Support Services > Events Services"
+ },
+ {
+  "id": "122",
+  "label": "Facilities Services",
+  "hierarchy": "Administrative and Support Services > Facilities Services"
+ },
+ {
+  "id": "1965",
+  "label": "Janitorial Services",
+  "hierarchy": "Administrative and Support Services > Facilities Services > Janitorial Services"
+ },
+ {
+  "id": "2934",
+  "label": "Landscaping Services",
+  "hierarchy": "Administrative and Support Services > Facilities Services > Landscaping Services"
+ },
+ {
+  "id": "101",
+  "label": "Fundraising",
+  "hierarchy": "Administrative and Support Services > Fundraising"
+ },
+ {
+  "id": "1916",
+  "label": "Office Administration",
+  "hierarchy": "Administrative and Support Services > Office Administration"
+ },
+ {
+  "id": "121",
+  "label": "Security and Investigations",
+  "hierarchy": "Administrative and Support Services > Security and Investigations"
+ },
+ {
+  "id": "1956",
+  "label": "Security Guards and Patrol Services",
+  "hierarchy": "Administrative and Support Services > Security and Investigations > Security Guards and Patrol Services"
+ },
+ {
+  "id": "1958",
+  "label": "Security Systems Services",
+  "hierarchy": "Administrative and Support Services > Security and Investigations > Security Systems Services"
+ },
+ {
+  "id": "104",
+  "label": "Staffing and Recruiting",
+  "hierarchy": "Administrative and Support Services > Staffing and Recruiting"
+ },
+ {
+  "id": "1923",
+  "label": "Executive Search Services",
+  "hierarchy": "Administrative and Support Services > Staffing and Recruiting > Executive Search Services"
+ },
+ {
+  "id": "1925",
+  "label": "Temporary Help Services",
+  "hierarchy": "Administrative and Support Services > Staffing and Recruiting > Temporary Help Services"
+ },
+ {
+  "id": "1931",
+  "label": "Telephone Call Centers",
+  "hierarchy": "Administrative and Support Services > Telephone Call Centers"
+ },
+ {
+  "id": "108",
+  "label": "Translation and Localization",
+  "hierarchy": "Administrative and Support Services > Translation and Localization"
+ },
+ {
+  "id": "30",
+  "label": "Travel Arrangements",
+  "hierarchy": "Administrative and Support Services > Travel Arrangements"
+ },
+ {
+  "id": "103",
+  "label": "Writing and Editing",
+  "hierarchy": "Administrative and Support Services > Writing and Editing"
+ },
+ {
+  "id": "48",
+  "label": "Construction",
+  "hierarchy": "Construction"
+ },
+ {
+  "id": "406",
+  "label": "Building Construction",
+  "hierarchy": "Construction > Building Construction"
+ },
+ {
+  "id": "413",
+  "label": "Nonresidential Building Construction",
+  "hierarchy": "Construction > Building Construction > Nonresidential Building Construction"
+ },
+ {
+  "id": "408",
+  "label": "Residential Building Construction",
+  "hierarchy": "Construction > Building Construction > Residential Building Construction"
+ },
+ {
+  "id": "51",
+  "label": "Civil Engineering",
+  "hierarchy": "Construction > Civil Engineering"
+ },
+ {
+  "id": "431",
+  "label": "Highway, Street, and Bridge Construction",
+  "hierarchy": "Construction > Civil Engineering > Highway, Street, and Bridge Construction"
+ },
+ {
+  "id": "428",
+  "label": "Subdivision of Land",
+  "hierarchy": "Construction > Civil Engineering > Subdivision of Land"
+ },
+ {
+  "id": "419",
+  "label": "Utility System Construction",
+  "hierarchy": "Construction > Civil Engineering > Utility System Construction"
+ },
+ {
+  "id": "435",
+  "label": "Specialty Trade Contractors",
+  "hierarchy": "Construction > Specialty Trade Contractors"
+ },
+ {
+  "id": "453",
+  "label": "Building Equipment Contractors",
+  "hierarchy": "Construction > Specialty Trade Contractors > Building Equipment Contractors"
+ },
+ {
+  "id": "460",
+  "label": "Building Finishing Contractors",
+  "hierarchy": "Construction > Specialty Trade Contractors > Building Finishing Contractors"
+ },
+ {
+  "id": "436",
+  "label": "Building Structure and Exterior Contractors",
+  "hierarchy": "Construction > Specialty Trade Contractors > Building Structure and Exterior Contractors"
+ },
+ {
+  "id": "91",
+  "label": "Consumer Services",
+  "hierarchy": "Consumer Services"
+ },
+ {
+  "id": "90",
+  "label": "Civic and Social Organizations",
+  "hierarchy": "Consumer Services > Civic and Social Organizations"
+ },
+ {
+  "id": "1909",
+  "label": "Industry Associations",
+  "hierarchy": "Consumer Services > Civic and Social Organizations > Industry Associations"
+ },
+ {
+  "id": "107",
+  "label": "Political Organizations",
+  "hierarchy": "Consumer Services > Civic and Social Organizations > Political Organizations"
+ },
+ {
+  "id": "1911",
+  "label": "Professional Organizations",
+  "hierarchy": "Consumer Services > Civic and Social Organizations > Professional Organizations"
+ },
+ {
+  "id": "2318",
+  "label": "Household Services",
+  "hierarchy": "Consumer Services > Household Services"
+ },
+ {
+  "id": "100",
+  "label": "Non-profit Organizations",
+  "hierarchy": "Consumer Services > Non-profit Organizations"
+ },
+ {
+  "id": "2258",
+  "label": "Personal and Laundry Services",
+  "hierarchy": "Consumer Services > Personal and Laundry Services"
+ },
+ {
+  "id": "2272",
+  "label": "Laundry and Drycleaning Services",
+  "hierarchy": "Consumer Services > Personal and Laundry Services > Laundry and Drycleaning Services"
+ },
+ {
+  "id": "2259",
+  "label": "Personal Care Services",
+  "hierarchy": "Consumer Services > Personal and Laundry Services > Personal Care Services"
+ },
+ {
+  "id": "2282",
+  "label": "Pet Services",
+  "hierarchy": "Consumer Services > Personal and Laundry Services > Pet Services"
+ },
+ {
+  "id": "131",
+  "label": "Philanthropic Fundraising Services",
+  "hierarchy": "Consumer Services > Philanthropic Fundraising Services"
+ },
+ {
+  "id": "89",
+  "label": "Religious Institutions",
+  "hierarchy": "Consumer Services > Religious Institutions"
+ },
+ {
+  "id": "2225",
+  "label": "Repair and Maintenance",
+  "hierarchy": "Consumer Services > Repair and Maintenance"
+ },
+ {
+  "id": "2247",
+  "label": "Commercial and Industrial Machinery Maintenance",
+  "hierarchy": "Consumer Services > Repair and Maintenance > Commercial and Industrial Machinery Maintenance"
+ },
+ {
+  "id": "2240",
+  "label": "Electronic and Precision Equipment Maintenance",
+  "hierarchy": "Consumer Services > Repair and Maintenance > Electronic and Precision Equipment Maintenance"
+ },
+ {
+  "id": "2255",
+  "label": "Footwear and Leather Goods Repair",
+  "hierarchy": "Consumer Services > Repair and Maintenance > Footwear and Leather Goods Repair"
+ },
+ {
+  "id": "2253",
+  "label": "Reupholstery and Furniture Repair",
+  "hierarchy": "Consumer Services > Repair and Maintenance > Reupholstery and Furniture Repair"
+ },
+ {
+  "id": "2226",
+  "label": "Vehicle Repair and Maintenance",
+  "hierarchy": "Consumer Services > Repair and Maintenance > Vehicle Repair and Maintenance"
+ },
+ {
+  "id": "1999",
+  "label": "Education",
+  "hierarchy": "Education"
+ },
+ {
+  "id": "132",
+  "label": "E-Learning Providers",
+  "hierarchy": "Education > E-Learning Providers"
+ },
+ {
+  "id": "68",
+  "label": "Higher Education",
+  "hierarchy": "Education > Higher Education"
+ },
+ {
+  "id": "67",
+  "label": "Primary and Secondary Education",
+  "hierarchy": "Education > Primary and Secondary Education"
+ },
+ {
+  "id": "105",
+  "label": "Professional Training and Coaching",
+  "hierarchy": "Education > Professional Training and Coaching"
+ },
+ {
+  "id": "2018",
+  "label": "Technical and Vocational Training",
+  "hierarchy": "Education > Technical and Vocational Training"
+ },
+ {
+  "id": "2019",
+  "label": "Cosmetology and Barber Schools",
+  "hierarchy": "Education > Technical and Vocational Training > Cosmetology and Barber Schools"
+ },
+ {
+  "id": "2025",
+  "label": "Fine Arts Schools",
+  "hierarchy": "Education > Technical and Vocational Training > Fine Arts Schools"
+ },
+ {
+  "id": "2020",
+  "label": "Flight Training",
+  "hierarchy": "Education > Technical and Vocational Training > Flight Training"
+ },
+ {
+  "id": "2029",
+  "label": "Language Schools",
+  "hierarchy": "Education > Technical and Vocational Training > Language Schools"
+ },
+ {
+  "id": "2012",
+  "label": "Secretarial Schools",
+  "hierarchy": "Education > Technical and Vocational Training > Secretarial Schools"
+ },
+ {
+  "id": "2027",
+  "label": "Sports and Recreation Instruction",
+  "hierarchy": "Education > Technical and Vocational Training > Sports and Recreation Instruction"
+ },
+ {
+  "id": "28",
+  "label": "Entertainment Providers",
+  "hierarchy": "Entertainment Providers"
+ },
+ {
+  "id": "38",
+  "label": "Artists and Writers",
+  "hierarchy": "Entertainment Providers > Artists and Writers"
+ },
+ {
+  "id": "37",
+  "label": "Museums, Historical Sites, and Zoos",
+  "hierarchy": "Entertainment Providers > Museums, Historical Sites, and Zoos"
+ },
+ {
+  "id": "2161",
+  "label": "Historical Sites",
+  "hierarchy": "Entertainment Providers > Museums, Historical Sites, and Zoos > Historical Sites"
+ },
+ {
+  "id": "2159",
+  "label": "Museums",
+  "hierarchy": "Entertainment Providers > Museums, Historical Sites, and Zoos > Museums"
+ },
+ {
+  "id": "2163",
+  "label": "Zoos and Botanical Gardens",
+  "hierarchy": "Entertainment Providers > Museums, Historical Sites, and Zoos > Zoos and Botanical Gardens"
+ },
+ {
+  "id": "115",
+  "label": "Musicians",
+  "hierarchy": "Entertainment Providers > Musicians"
+ },
+ {
+  "id": "2130",
+  "label": "Performing Arts and Spectator Sports",
+  "hierarchy": "Entertainment Providers > Performing Arts and Spectator Sports"
+ },
+ {
+  "id": "2139",
+  "label": "Circuses and Magic Shows",
+  "hierarchy": "Entertainment Providers > Performing Arts and Spectator Sports > Circuses and Magic Shows"
+ },
+ {
+  "id": "2135",
+  "label": "Dance Companies",
+  "hierarchy": "Entertainment Providers > Performing Arts and Spectator Sports > Dance Companies"
+ },
+ {
+  "id": "39",
+  "label": "Performing Arts",
+  "hierarchy": "Entertainment Providers > Performing Arts and Spectator Sports > Performing Arts"
+ },
+ {
+  "id": "33",
+  "label": "Spectator Sports",
+  "hierarchy": "Entertainment Providers > Performing Arts and Spectator Sports > Spectator Sports"
+ },
+ {
+  "id": "2143",
+  "label": "Racetracks",
+  "hierarchy": "Entertainment Providers > Performing Arts and Spectator Sports > Spectator Sports > Racetracks"
+ },
+ {
+  "id": "2142",
+  "label": "Sports Teams and Clubs",
+  "hierarchy": "Entertainment Providers > Performing Arts and Spectator Sports > Spectator Sports > Sports Teams and Clubs"
+ },
+ {
+  "id": "2133",
+  "label": "Theater Companies",
+  "hierarchy": "Entertainment Providers > Performing Arts and Spectator Sports > Theater Companies"
+ },
+ {
+  "id": "40",
+  "label": "Recreational Facilities",
+  "hierarchy": "Entertainment Providers > Recreational Facilities"
+ },
+ {
+  "id": "2167",
+  "label": "Amusement Parks and Arcades",
+  "hierarchy": "Entertainment Providers > Recreational Facilities > Amusement Parks and Arcades"
+ },
+ {
+  "id": "29",
+  "label": "Gambling Facilities and Casinos",
+  "hierarchy": "Entertainment Providers > Recreational Facilities > Gambling Facilities and Casinos"
+ },
+ {
+  "id": "2179",
+  "label": "Golf Courses and Country Clubs",
+  "hierarchy": "Entertainment Providers > Recreational Facilities > Golf Courses and Country Clubs"
+ },
+ {
+  "id": "2181",
+  "label": "Skiing Facilities",
+  "hierarchy": "Entertainment Providers > Recreational Facilities > Skiing Facilities"
+ },
+ {
+  "id": "124",
+  "label": "Wellness and Fitness Services",
+  "hierarchy": "Entertainment Providers > Recreational Facilities > Wellness and Fitness Services"
+ },
+ {
+  "id": "201",
+  "label": "Farming, Ranching, Forestry",
+  "hierarchy": "Farming, Ranching, Forestry"
+ },
+ {
+  "id": "63",
+  "label": "Farming",
+  "hierarchy": "Farming, Ranching, Forestry > Farming"
+ },
+ {
+  "id": "150",
+  "label": "Horticulture",
+  "hierarchy": "Farming, Ranching, Forestry > Farming > Horticulture"
+ },
+ {
+  "id": "298",
+  "label": "Forestry and Logging",
+  "hierarchy": "Farming, Ranching, Forestry > Forestry and Logging"
+ },
+ {
+  "id": "256",
+  "label": "Ranching and Fisheries",
+  "hierarchy": "Farming, Ranching, Forestry > Ranching and Fisheries"
+ },
+ {
+  "id": "66",
+  "label": "Fisheries",
+  "hierarchy": "Farming, Ranching, Forestry > Ranching and Fisheries > Fisheries"
+ },
+ {
+  "id": "64",
+  "label": "Ranching",
+  "hierarchy": "Farming, Ranching, Forestry > Ranching and Fisheries > Ranching"
+ },
+ {
+  "id": "43",
+  "label": "Financial Services",
+  "hierarchy": "Financial Services"
+ },
+ {
+  "id": "129",
+  "label": "Capital Markets",
+  "hierarchy": "Financial Services > Capital Markets"
+ },
+ {
+  "id": "1720",
+  "label": "Investment Advice",
+  "hierarchy": "Financial Services > Capital Markets > Investment Advice"
+ },
+ {
+  "id": "45",
+  "label": "Investment Banking",
+  "hierarchy": "Financial Services > Capital Markets > Investment Banking"
+ },
+ {
+  "id": "46",
+  "label": "Investment Management",
+  "hierarchy": "Financial Services > Capital Markets > Investment Management"
+ },
+ {
+  "id": "1713",
+  "label": "Securities and Commodity Exchanges",
+  "hierarchy": "Financial Services > Capital Markets > Securities and Commodity Exchanges"
+ },
+ {
+  "id": "106",
+  "label": "Venture Capital and Private Equity Principals",
+  "hierarchy": "Financial Services > Capital Markets > Venture Capital and Private Equity Principals"
+ },
+ {
+  "id": "1673",
+  "label": "Credit Intermediation",
+  "hierarchy": "Financial Services > Credit Intermediation"
+ },
+ {
+  "id": "41",
+  "label": "Banking",
+  "hierarchy": "Financial Services > Credit Intermediation > Banking"
+ },
+ {
+  "id": "141",
+  "label": "International Trade and Development",
+  "hierarchy": "Financial Services > Credit Intermediation > International Trade and Development"
+ },
+ {
+  "id": "1696",
+  "label": "Loan Brokers",
+  "hierarchy": "Financial Services > Credit Intermediation > Loan Brokers"
+ },
+ {
+  "id": "1678",
+  "label": "Savings Institutions",
+  "hierarchy": "Financial Services > Credit Intermediation > Savings Institutions"
+ },
+ {
+  "id": "1742",
+  "label": "Funds and Trusts",
+  "hierarchy": "Financial Services > Funds and Trusts"
+ },
+ {
+  "id": "1743",
+  "label": "Insurance and Employee Benefit Funds",
+  "hierarchy": "Financial Services > Funds and Trusts > Insurance and Employee Benefit Funds"
+ },
+ {
+  "id": "1745",
+  "label": "Pension Funds",
+  "hierarchy": "Financial Services > Funds and Trusts > Pension Funds"
+ },
+ {
+  "id": "1750",
+  "label": "Trusts and Estates",
+  "hierarchy": "Financial Services > Funds and Trusts > Trusts and Estates"
+ },
+ {
+  "id": "42",
+  "label": "Insurance",
+  "hierarchy": "Financial Services > Insurance"
+ },
+ {
+  "id": "1738",
+  "label": "Claims Adjusting, Actuarial Services",
+  "hierarchy": "Financial Services > Insurance > Claims Adjusting, Actuarial Services"
+ },
+ {
+  "id": "1737",
+  "label": "Insurance Agencies and Brokerages",
+  "hierarchy": "Financial Services > Insurance > Insurance Agencies and Brokerages"
+ },
+ {
+  "id": "1725",
+  "label": "Insurance Carriers",
+  "hierarchy": "Financial Services > Insurance > Insurance Carriers"
+ },
+ {
+  "id": "75",
+  "label": "Government Administration",
+  "hierarchy": "Government Administration"
+ },
+ {
+  "id": "73",
+  "label": "Administration of Justice",
+  "hierarchy": "Government Administration > Administration of Justice"
+ },
+ {
+  "id": "3068",
+  "label": "Correctional Institutions",
+  "hierarchy": "Government Administration > Administration of Justice > Correctional Institutions"
+ },
+ {
+  "id": "3065",
+  "label": "Courts of Law",
+  "hierarchy": "Government Administration > Administration of Justice > Courts of Law"
+ },
+ {
+  "id": "3070",
+  "label": "Fire Protection",
+  "hierarchy": "Government Administration > Administration of Justice > Fire Protection"
+ },
+ {
+  "id": "77",
+  "label": "Law Enforcement",
+  "hierarchy": "Government Administration > Administration of Justice > Law Enforcement"
+ },
+ {
+  "id": "78",
+  "label": "Public Safety",
+  "hierarchy": "Government Administration > Administration of Justice > Public Safety"
+ },
+ {
+  "id": "2375",
+  "label": "Economic Programs",
+  "hierarchy": "Government Administration > Economic Programs"
+ },
+ {
+  "id": "3085",
+  "label": "Transportation Programs",
+  "hierarchy": "Government Administration > Economic Programs > Transportation Programs"
+ },
+ {
+  "id": "3086",
+  "label": "Utilities Administration",
+  "hierarchy": "Government Administration > Economic Programs > Utilities Administration"
+ },
+ {
+  "id": "388",
+  "label": "Environmental Quality Programs",
+  "hierarchy": "Government Administration > Environmental Quality Programs"
+ },
+ {
+  "id": "2366",
+  "label": "Air, Water, and Waste Program Management",
+  "hierarchy": "Government Administration > Environmental Quality Programs > Air, Water, and Waste Program Management"
+ },
+ {
+  "id": "2368",
+  "label": "Conservation Programs",
+  "hierarchy": "Government Administration > Environmental Quality Programs > Conservation Programs"
+ },
+ {
+  "id": "2353",
+  "label": "Health and Human Services",
+  "hierarchy": "Government Administration > Health and Human Services"
+ },
+ {
+  "id": "69",
+  "label": "Education Administration Programs",
+  "hierarchy": "Government Administration > Health and Human Services > Education Administration Programs"
+ },
+ {
+  "id": "2360",
+  "label": "Public Assistance Programs",
+  "hierarchy": "Government Administration > Health and Human Services > Public Assistance Programs"
+ },
+ {
+  "id": "2358",
+  "label": "Public Health",
+  "hierarchy": "Government Administration > Health and Human Services > Public Health"
+ },
+ {
+  "id": "2369",
+  "label": "Housing and Community Development",
+  "hierarchy": "Government Administration > Housing and Community Development"
+ },
+ {
+  "id": "2374",
+  "label": "Community Development and Urban Planning",
+  "hierarchy": "Government Administration > Housing and Community Development > Community Development and Urban Planning"
+ },
+ {
+  "id": "3081",
+  "label": "Housing Programs",
+  "hierarchy": "Government Administration > Housing and Community Development > Housing Programs"
+ },
+ {
+  "id": "2391",
+  "label": "Military and International Affairs",
+  "hierarchy": "Government Administration > Military and International Affairs"
+ },
+ {
+  "id": "71",
+  "label": "Armed Forces",
+  "hierarchy": "Government Administration > Military and International Affairs > Armed Forces"
+ },
+ {
+  "id": "74",
+  "label": "International Affairs",
+  "hierarchy": "Government Administration > Military and International Affairs > International Affairs"
+ },
+ {
+  "id": "79",
+  "label": "Public Policy Offices",
+  "hierarchy": "Government Administration > Public Policy Offices"
+ },
+ {
+  "id": "76",
+  "label": "Executive Offices",
+  "hierarchy": "Government Administration > Public Policy Offices > Executive Offices"
+ },
+ {
+  "id": "72",
+  "label": "Legislative Offices",
+  "hierarchy": "Government Administration > Public Policy Offices > Legislative Offices"
+ },
+ {
+  "id": "3089",
+  "label": "Space Research and Technology",
+  "hierarchy": "Government Administration > Space Research and Technology"
+ },
+ {
+  "id": "1905",
+  "label": "Holding Companies",
+  "hierarchy": "Holding Companies"
+ },
+ {
+  "id": "14",
+  "label": "Hospitals and Health Care",
+  "hierarchy": "Hospitals and Health Care"
+ },
+ {
+  "id": "2115",
+  "label": "Community Services",
+  "hierarchy": "Hospitals and Health Care > Community Services"
+ },
+ {
+  "id": "2112",
+  "label": "Services for the Elderly and Disabled",
+  "hierarchy": "Hospitals and Health Care > Community Services > Services for the Elderly and Disabled"
+ },
+ {
+  "id": "2081",
+  "label": "Hospitals",
+  "hierarchy": "Hospitals and Health Care > Hospitals"
+ },
+ {
+  "id": "88",
+  "label": "Individual and Family Services",
+  "hierarchy": "Hospitals and Health Care > Individual and Family Services"
+ },
+ {
+  "id": "2128",
+  "label": "Child Day Care Services",
+  "hierarchy": "Hospitals and Health Care > Individual and Family Services > Child Day Care Services"
+ },
+ {
+  "id": "2122",
+  "label": "Emergency and Relief Services",
+  "hierarchy": "Hospitals and Health Care > Individual and Family Services > Emergency and Relief Services"
+ },
+ {
+  "id": "2125",
+  "label": "Vocational Rehabilitation Services",
+  "hierarchy": "Hospitals and Health Care > Individual and Family Services > Vocational Rehabilitation Services"
+ },
+ {
+  "id": "13",
+  "label": "Medical Practices",
+  "hierarchy": "Hospitals and Health Care > Medical Practices"
+ },
+ {
+  "id": "125",
+  "label": "Alternative Medicine",
+  "hierarchy": "Hospitals and Health Care > Medical Practices > Alternative Medicine"
+ },
+ {
+  "id": "2077",
+  "label": "Ambulance Services",
+  "hierarchy": "Hospitals and Health Care > Medical Practices > Ambulance Services"
+ },
+ {
+  "id": "2048",
+  "label": "Chiropractors",
+  "hierarchy": "Hospitals and Health Care > Medical Practices > Chiropractors"
+ },
+ {
+  "id": "2045",
+  "label": "Dentists",
+  "hierarchy": "Hospitals and Health Care > Medical Practices > Dentists"
+ },
+ {
+  "id": "2060",
+  "label": "Family Planning Centers",
+  "hierarchy": "Hospitals and Health Care > Medical Practices > Family Planning Centers"
+ },
+ {
+  "id": "2074",
+  "label": "Home Health Care Services",
+  "hierarchy": "Hospitals and Health Care > Medical Practices > Home Health Care Services"
+ },
+ {
+  "id": "2069",
+  "label": "Medical and Diagnostic Laboratories",
+  "hierarchy": "Hospitals and Health Care > Medical Practices > Medical and Diagnostic Laboratories"
+ },
+ {
+  "id": "139",
+  "label": "Mental Health Care",
+  "hierarchy": "Hospitals and Health Care > Medical Practices > Mental Health Care"
+ },
+ {
+  "id": "2050",
+  "label": "Optometrists",
+  "hierarchy": "Hospitals and Health Care > Medical Practices > Optometrists"
+ },
+ {
+  "id": "2063",
+  "label": "Outpatient Care Centers",
+  "hierarchy": "Hospitals and Health Care > Medical Practices > Outpatient Care Centers"
+ },
+ {
+  "id": "2054",
+  "label": "Physical, Occupational and Speech Therapists",
+  "hierarchy": "Hospitals and Health Care > Medical Practices > Physical, Occupational and Speech Therapists"
+ },
+ {
+  "id": "2040",
+  "label": "Physicians",
+  "hierarchy": "Hospitals and Health Care > Medical Practices > Physicians"
+ },
+ {
+  "id": "2091",
+  "label": "Nursing Homes and Residential Care Facilities",
+  "hierarchy": "Hospitals and Health Care > Nursing Homes and Residential Care Facilities"
+ },
+ {
+  "id": "25",
+  "label": "Manufacturing",
+  "hierarchy": "Manufacturing"
+ },
+ {
+  "id": "598",
+  "label": "Apparel Manufacturing",
+  "hierarchy": "Manufacturing > Apparel Manufacturing"
+ },
+ {
+  "id": "615",
+  "label": "Fashion Accessories Manufacturing",
+  "hierarchy": "Manufacturing > Apparel Manufacturing > Fashion Accessories Manufacturing"
+ },
+ {
+  "id": "112",
+  "label": "Appliances, Electrical, and Electronics Manufacturing",
+  "hierarchy": "Manufacturing > Appliances, Electrical, and Electronics Manufacturing"
+ },
+ {
+  "id": "998",
+  "label": "Electric Lighting Equipment Manufacturing",
+  "hierarchy": "Manufacturing > Appliances, Electrical, and Electronics Manufacturing > Electric Lighting Equipment Manufacturing"
+ },
+ {
+  "id": "2468",
+  "label": "Electrical Equipment Manufacturing",
+  "hierarchy": "Manufacturing > Appliances, Electrical, and Electronics Manufacturing > Electrical Equipment Manufacturing"
+ },
+ {
+  "id": "3255",
+  "label": "Fuel Cell Manufacturing",
+  "hierarchy": "Manufacturing > Appliances, Electrical, and Electronics Manufacturing > Electrical Equipment Manufacturing > Fuel Cell Manufacturing"
+ },
+ {
+  "id": "1005",
+  "label": "Household Appliance Manufacturing",
+  "hierarchy": "Manufacturing > Appliances, Electrical, and Electronics Manufacturing > Household Appliance Manufacturing"
+ },
+ {
+  "id": "54",
+  "label": "Chemical Manufacturing",
+  "hierarchy": "Manufacturing > Chemical Manufacturing"
+ },
+ {
+  "id": "709",
+  "label": "Agricultural Chemical Manufacturing",
+  "hierarchy": "Manufacturing > Chemical Manufacturing > Agricultural Chemical Manufacturing"
+ },
+ {
+  "id": "703",
+  "label": "Artificial Rubber and Synthetic Fiber Manufacturing",
+  "hierarchy": "Manufacturing > Chemical Manufacturing > Artificial Rubber and Synthetic Fiber Manufacturing"
+ },
+ {
+  "id": "690",
+  "label": "Chemical Raw Materials Manufacturing",
+  "hierarchy": "Manufacturing > Chemical Manufacturing > Chemical Raw Materials Manufacturing"
+ },
+ {
+  "id": "722",
+  "label": "Paint, Coating, and Adhesive Manufacturing",
+  "hierarchy": "Manufacturing > Chemical Manufacturing > Paint, Coating, and Adhesive Manufacturing"
+ },
+ {
+  "id": "18",
+  "label": "Personal Care Product Manufacturing",
+  "hierarchy": "Manufacturing > Chemical Manufacturing > Personal Care Product Manufacturing"
+ },
+ {
+  "id": "15",
+  "label": "Pharmaceutical Manufacturing",
+  "hierarchy": "Manufacturing > Chemical Manufacturing > Pharmaceutical Manufacturing"
+ },
+ {
+  "id": "727",
+  "label": "Soap and Cleaning Product Manufacturing",
+  "hierarchy": "Manufacturing > Chemical Manufacturing > Soap and Cleaning Product Manufacturing"
+ },
+ {
+  "id": "3251",
+  "label": "Climate Technology Product Manufacturing",
+  "hierarchy": "Manufacturing > Climate Technology Products Manufacturing"
+ },
+ {
+  "id": "24",
+  "label": "Computers and Electronics Manufacturing",
+  "hierarchy": "Manufacturing > Computers and Electronics Manufacturing"
+ },
+ {
+  "id": "973",
+  "label": "Audio and Video Equipment Manufacturing",
+  "hierarchy": "Manufacturing > Computers and Electronics Manufacturing > Audio and Video Equipment Manufacturing"
+ },
+ {
+  "id": "964",
+  "label": "Communications Equipment Manufacturing",
+  "hierarchy": "Manufacturing > Computers and Electronics Manufacturing > Communications Equipment Manufacturing"
+ },
+ {
+  "id": "3",
+  "label": "Computer Hardware Manufacturing",
+  "hierarchy": "Manufacturing > Computers and Electronics Manufacturing > Computer Hardware Manufacturing"
+ },
+ {
+  "id": "3245",
+  "label": "Accessible Hardware Manufacturing",
+  "hierarchy": "Manufacturing > Computers and Electronics Manufacturing > Computer Hardware Manufacturing > Accessible Hardware Manufacturing"
+ },
+ {
+  "id": "994",
+  "label": "Magnetic and Optical Media Manufacturing",
+  "hierarchy": "Manufacturing > Computers and Electronics Manufacturing > Magnetic and Optical Media Manufacturing"
+ },
+ {
+  "id": "983",
+  "label": "Measuring and Control Instrument Manufacturing",
+  "hierarchy": "Manufacturing > Computers and Electronics Manufacturing > Measuring and Control Instrument Manufacturing"
+ },
+ {
+  "id": "3254",
+  "label": "Smart Meter Manufacturing",
+  "hierarchy": "Manufacturing > Computers and Electronics Manufacturing > Measuring and Control Instrument Manufacturing > Smart Meter Manufacturing"
+ },
+ {
+  "id": "7",
+  "label": "Semiconductor Manufacturing",
+  "hierarchy": "Manufacturing > Computers and Electronics Manufacturing > Semiconductor Manufacturing"
+ },
+ {
+  "id": "144",
+  "label": "Renewable Energy Semiconductor Manufacturing",
+  "hierarchy": "Manufacturing > Computers and Electronics Manufacturing > Semiconductor Manufacturing > Renewable Energy Semiconductor Manufacturing"
+ },
+ {
+  "id": "840",
+  "label": "Fabricated Metal Products",
+  "hierarchy": "Manufacturing > Fabricated Metal Products"
+ },
+ {
+  "id": "852",
+  "label": "Architectural and Structural Metal Manufacturing",
+  "hierarchy": "Manufacturing > Fabricated Metal Products > Architectural and Structural Metal Manufacturing"
+ },
+ {
+  "id": "861",
+  "label": "Boilers, Tanks, and Shipping Container Manufacturing",
+  "hierarchy": "Manufacturing > Fabricated Metal Products > Boilers, Tanks, and Shipping Container Manufacturing"
+ },
+ {
+  "id": "871",
+  "label": "Construction Hardware Manufacturing",
+  "hierarchy": "Manufacturing > Fabricated Metal Products > Construction Hardware Manufacturing"
+ },
+ {
+  "id": "849",
+  "label": "Cutlery and Handtool Manufacturing",
+  "hierarchy": "Manufacturing > Fabricated Metal Products > Cutlery and Handtool Manufacturing"
+ },
+ {
+  "id": "883",
+  "label": "Metal Treatments",
+  "hierarchy": "Manufacturing > Fabricated Metal Products > Metal Treatments"
+ },
+ {
+  "id": "887",
+  "label": "Metal Valve, Ball, and Roller Manufacturing",
+  "hierarchy": "Manufacturing > Fabricated Metal Products > Metal Valve, Ball, and Roller Manufacturing"
+ },
+ {
+  "id": "873",
+  "label": "Spring and Wire Product Manufacturing",
+  "hierarchy": "Manufacturing > Fabricated Metal Products > Spring and Wire Product Manufacturing"
+ },
+ {
+  "id": "876",
+  "label": "Turned Products and Fastener Manufacturing",
+  "hierarchy": "Manufacturing > Fabricated Metal Products > Turned Products and Fastener Manufacturing"
+ },
+ {
+  "id": "23",
+  "label": "Food and Beverage Manufacturing",
+  "hierarchy": "Manufacturing > Food and Beverage Manufacturing"
+ },
+ {
+  "id": "562",
+  "label": "Breweries",
+  "hierarchy": "Manufacturing > Food and Beverage Manufacturing > > Breweries"
+ },
+ {
+  "id": "564",
+  "label": "Distilleries",
+  "hierarchy": "Manufacturing > Food and Beverage Manufacturing > > Distilleries"
+ },
+ {
+  "id": "2500",
+  "label": "Wineries",
+  "hierarchy": "Manufacturing > Food and Beverage Manufacturing > > Wineries"
+ },
+ {
+  "id": "481",
+  "label": "Animal Feed Manufacturing",
+  "hierarchy": "Manufacturing > Food and Beverage Manufacturing > Animal Feed Manufacturing"
+ },
+ {
+  "id": "529",
+  "label": "Baked Goods Manufacturing",
+  "hierarchy": "Manufacturing > Food and Beverage Manufacturing > Baked Goods Manufacturing"
+ },
+ {
+  "id": "142",
+  "label": "Beverage Manufacturing",
+  "hierarchy": "Manufacturing > Food and Beverage Manufacturing > Beverage Manufacturing"
+ },
+ {
+  "id": "65",
+  "label": "Dairy Product Manufacturing",
+  "hierarchy": "Manufacturing > Food and Beverage Manufacturing > Dairy Product Manufacturing"
+ },
+ {
+  "id": "504",
+  "label": "Fruit and Vegetable Preserves Manufacturing",
+  "hierarchy": "Manufacturing > Food and Beverage Manufacturing > Fruit and Vegetable Preserves Manufacturing"
+ },
+ {
+  "id": "521",
+  "label": "Meat Products Manufacturing",
+  "hierarchy": "Manufacturing > Food and Beverage Manufacturing > Meat Products Manufacturing"
+ },
+ {
+  "id": "528",
+  "label": "Seafood Product Manufacturing",
+  "hierarchy": "Manufacturing > Food and Beverage Manufacturing > Seafood Product Manufacturing"
+ },
+ {
+  "id": "495",
+  "label": "Sugar and Confectionery Product Manufacturing",
+  "hierarchy": "Manufacturing > Food and Beverage Manufacturing > Sugar and Confectionery Product Manufacturing"
+ },
+ {
+  "id": "26",
+  "label": "Furniture and Home Furnishings Manufacturing",
+  "hierarchy": "Manufacturing > Furniture and Home Furnishings Manufacturing"
+ },
+ {
+  "id": "1080",
+  "label": "Household and Institutional Furniture Manufacturing",
+  "hierarchy": "Manufacturing > Furniture and Home Furnishings Manufacturing > Household and Institutional Furniture Manufacturing"
+ },
+ {
+  "id": "1095",
+  "label": "Mattress and Blinds Manufacturing",
+  "hierarchy": "Manufacturing > Furniture and Home Furnishings Manufacturing > Mattress and Blinds Manufacturing"
+ },
+ {
+  "id": "1090",
+  "label": "Office Furniture and Fixtures Manufacturing",
+  "hierarchy": "Manufacturing > Furniture and Home Furnishings Manufacturing > Office Furniture and Fixtures Manufacturing"
+ },
+ {
+  "id": "145",
+  "label": "Glass, Ceramics and Concrete Manufacturing",
+  "hierarchy": "Manufacturing > Glass, Ceramics and Concrete Manufacturing"
+ },
+ {
+  "id": "799",
+  "label": "Abrasives and Nonmetallic Minerals Manufacturing",
+  "hierarchy": "Manufacturing > Glass, Ceramics and Concrete Manufacturing > Abrasives and Nonmetallic Minerals Manufacturing"
+ },
+ {
+  "id": "773",
+  "label": "Clay and Refractory Products Manufacturing",
+  "hierarchy": "Manufacturing > Glass, Ceramics and Concrete Manufacturing > Clay and Refractory Products Manufacturing"
+ },
+ {
+  "id": "779",
+  "label": "Glass Product Manufacturing",
+  "hierarchy": "Manufacturing > Glass, Ceramics and Concrete Manufacturing > Glass Product Manufacturing"
+ },
+ {
+  "id": "794",
+  "label": "Lime and Gypsum Products Manufacturing",
+  "hierarchy": "Manufacturing > Glass, Ceramics and Concrete Manufacturing > Lime and Gypsum Products Manufacturing"
+ },
+ {
+  "id": "616",
+  "label": "Leather Product Manufacturing",
+  "hierarchy": "Manufacturing > Leather Product Manufacturing"
+ },
+ {
+  "id": "622",
+  "label": "Footwear Manufacturing",
+  "hierarchy": "Manufacturing > Leather Product Manufacturing > Footwear Manufacturing"
+ },
+ {
+  "id": "625",
+  "label": "Women's Handbag Manufacturing",
+  "hierarchy": "Manufacturing > Leather Product Manufacturing > Women's Handbag Manufacturing"
+ },
+ {
+  "id": "55",
+  "label": "Machinery Manufacturing",
+  "hierarchy": "Manufacturing > Machinery Manufacturing"
+ },
+ {
+  "id": "901",
+  "label": "Agriculture, Construction, Mining Machinery Manufacturing",
+  "hierarchy": "Manufacturing > Machinery Manufacturing > Agriculture, Construction, Mining Machinery Manufacturing"
+ },
+ {
+  "id": "147",
+  "label": "Automation Machinery Manufacturing",
+  "hierarchy": "Manufacturing > Machinery Manufacturing > Automation Machinery Manufacturing"
+ },
+ {
+  "id": "3247",
+  "label": "Robot Manufacturing",
+  "hierarchy": "Manufacturing > Machinery Manufacturing > Automation Machinery Manufacturing > Robot Manufacturing"
+ },
+ {
+  "id": "918",
+  "label": "Commercial and Service Industry Machinery Manufacturing",
+  "hierarchy": "Manufacturing > Machinery Manufacturing > Commercial and Service Industry Machinery Manufacturing"
+ },
+ {
+  "id": "935",
+  "label": "Engines and Power Transmission Equipment Manufacturing",
+  "hierarchy": "Manufacturing > Machinery Manufacturing > Engines and Power Transmission Equipment Manufacturing"
+ },
+ {
+  "id": "3241",
+  "label": "Renewable Energy Equipment Manufacturing",
+  "hierarchy": "Manufacturing > Machinery Manufacturing > Engines and Power Transmission Equipment Manufacturing > Renewable Energy Equipment Manufacturing"
+ },
+ {
+  "id": "923",
+  "label": "HVAC and Refrigeration Equipment Manufacturing",
+  "hierarchy": "Manufacturing > Machinery Manufacturing > HVAC and Refrigeration Equipment Manufacturing"
+ },
+ {
+  "id": "135",
+  "label": "Industrial Machinery Manufacturing",
+  "hierarchy": "Manufacturing > Machinery Manufacturing > Industrial Machinery Manufacturing"
+ },
+ {
+  "id": "928",
+  "label": "Metalworking Machinery Manufacturing",
+  "hierarchy": "Manufacturing > Machinery Manufacturing > Metalworking Machinery Manufacturing"
+ },
+ {
+  "id": "17",
+  "label": "Medical Equipment Manufacturing",
+  "hierarchy": "Manufacturing > Medical Equipment Manufacturing"
+ },
+ {
+  "id": "679",
+  "label": "Oil and Coal Product Manufacturing",
+  "hierarchy": "Manufacturing > Oil and Coal Product Manufacturing"
+ },
+ {
+  "id": "61",
+  "label": "Paper and Forest Product Manufacturing",
+  "hierarchy": "Manufacturing > Paper and Forest Product Manufacturing"
+ },
+ {
+  "id": "743",
+  "label": "Plastics and Rubber Product Manufacturing",
+  "hierarchy": "Manufacturing > Plastics and Rubber Product Manufacturing"
+ },
+ {
+  "id": "146",
+  "label": "Packaging and Containers Manufacturing",
+  "hierarchy": "Manufacturing > Plastics and Rubber Product Manufacturing > Packaging and Containers Manufacturing"
+ },
+ {
+  "id": "117",
+  "label": "Plastics Manufacturing",
+  "hierarchy": "Manufacturing > Plastics and Rubber Product Manufacturing > Plastics Manufacturing"
+ },
+ {
+  "id": "763",
+  "label": "Rubber Products Manufacturing",
+  "hierarchy": "Manufacturing > Plastics and Rubber Product Manufacturing > Rubber Products Manufacturing"
+ },
+ {
+  "id": "807",
+  "label": "Primary Metal Manufacturing",
+  "hierarchy": "Manufacturing > Primary Metal Manufacturing"
+ },
+ {
+  "id": "83",
+  "label": "Printing Services",
+  "hierarchy": "Manufacturing > Printing Services"
+ },
+ {
+  "id": "20",
+  "label": "Sporting Goods Manufacturing",
+  "hierarchy": "Manufacturing > Sporting Goods Manufacturing"
+ },
+ {
+  "id": "60",
+  "label": "Textile Manufacturing",
+  "hierarchy": "Manufacturing > Textile Manufacturing"
+ },
+ {
+  "id": "21",
+  "label": "Tobacco Manufacturing",
+  "hierarchy": "Manufacturing > Tobacco Manufacturing"
+ },
+ {
+  "id": "1029",
+  "label": "Transportation Equipment Manufacturing",
+  "hierarchy": "Manufacturing > Transportation Equipment Manufacturing"
+ },
+ {
+  "id": "52",
+  "label": "Aviation and Aerospace Component Manufacturing",
+  "hierarchy": "Manufacturing > Transportation Equipment Manufacturing > Aviation and Aerospace Component Manufacturing"
+ },
+ {
+  "id": "1",
+  "label": "Defense and Space Manufacturing",
+  "hierarchy": "Manufacturing > Transportation Equipment Manufacturing > Defense and Space Manufacturing"
+ },
+ {
+  "id": "53",
+  "label": "Motor Vehicle Manufacturing",
+  "hierarchy": "Manufacturing > Transportation Equipment Manufacturing > Motor Vehicle Manufacturing"
+ },
+ {
+  "id": "3253",
+  "label": "Alternative Fuel Vehicle Manufacturing",
+  "hierarchy": "Manufacturing > Transportation Equipment Manufacturing > Motor Vehicle Manufacturing > Alternative Fuel Vehicle Manufacturing"
+ },
+ {
+  "id": "1042",
+  "label": "Motor Vehicle Parts Manufacturing",
+  "hierarchy": "Manufacturing > Transportation Equipment Manufacturing > Motor Vehicle Parts Manufacturing"
+ },
+ {
+  "id": "62",
+  "label": "Railroad Equipment Manufacturing",
+  "hierarchy": "Manufacturing > Transportation Equipment Manufacturing > Railroad Equipment Manufacturing"
+ },
+ {
+  "id": "58",
+  "label": "Shipbuilding",
+  "hierarchy": "Manufacturing > Transportation Equipment Manufacturing > Shipbuilding"
+ },
+ {
+  "id": "784",
+  "label": "Wood Product Manufacturing",
+  "hierarchy": "Manufacturing > Wood Product Manufacturing"
+ },
+ {
+  "id": "332",
+  "label": "Oil, Gas, and Mining",
+  "hierarchy": "Oil, Gas, and Mining"
+ },
+ {
+  "id": "56",
+  "label": "Mining",
+  "hierarchy": "Oil, Gas, and Mining > Mining"
+ },
+ {
+  "id": "341",
+  "label": "Coal Mining",
+  "hierarchy": "Oil, Gas, and Mining > Mining > Coal Mining"
+ },
+ {
+  "id": "345",
+  "label": "Metal Ore Mining",
+  "hierarchy": "Oil, Gas, and Mining > Mining > Metal Ore Mining"
+ },
+ {
+  "id": "356",
+  "label": "Nonmetallic Mineral Mining",
+  "hierarchy": "Oil, Gas, and Mining > Mining > Nonmetallic Mineral Mining"
+ },
+ {
+  "id": "57",
+  "label": "Oil and Gas",
+  "hierarchy": "Oil, Gas, and Mining > Oil and Gas"
+ },
+ {
+  "id": "3096",
+  "label": "Natural Gas Extraction",
+  "hierarchy": "Oil, Gas, and Mining > Oil and Gas > Natural Gas Extraction"
+ },
+ {
+  "id": "3095",
+  "label": "Oil Extraction",
+  "hierarchy": "Oil, Gas, and Mining > Oil and Gas > Oil Extraction"
+ },
+ {
+  "id": "1810",
+  "label": "Professional Services",
+  "hierarchy": "Professional Services"
+ },
+ {
+  "id": "47",
+  "label": "Accounting",
+  "hierarchy": "Professional Services > Accounting"
+ },
+ {
+  "id": "80",
+  "label": "Advertising Services",
+  "hierarchy": "Professional Services > Advertising Services"
+ },
+ {
+  "id": "148",
+  "label": "Government Relations Services",
+  "hierarchy": "Professional Services > Advertising Services > Government Relations Services"
+ },
+ {
+  "id": "98",
+  "label": "Public Relations and Communications Services",
+  "hierarchy": "Professional Services > Advertising Services > Public Relations and Communications Services"
+ },
+ {
+  "id": "97",
+  "label": "Market Research",
+  "hierarchy": "Professional Services > Advertising Services> Market Research"
+ },
+ {
+  "id": "50",
+  "label": "Architecture and Planning",
+  "hierarchy": "Professional Services > Architecture and Planning"
+ },
+ {
+  "id": "3246",
+  "label": "Accessible Architecture and Design",
+  "hierarchy": "Professional Services > Architecture and Planning > Accessible Architecture and Design"
+ },
+ {
+  "id": "11",
+  "label": "Business Consulting and Services",
+  "hierarchy": "Professional Services > Business Consulting and Services"
+ },
+ {
+  "id": "86",
+  "label": "Environmental Services",
+  "hierarchy": "Professional Services > Business Consulting and Services > Environmental Services"
+ },
+ {
+  "id": "137",
+  "label": "Human Resources Services",
+  "hierarchy": "Professional Services > Business Consulting and Services > Human Resources Services"
+ },
+ {
+  "id": "1862",
+  "label": "Marketing Services",
+  "hierarchy": "Professional Services > Business Consulting and Services > Marketing Services"
+ },
+ {
+  "id": "2401",
+  "label": "Operations Consulting",
+  "hierarchy": "Professional Services > Business Consulting and Services > Operations Consulting"
+ },
+ {
+  "id": "123",
+  "label": "Outsourcing and Offshoring Consulting",
+  "hierarchy": "Professional Services > Business Consulting and Services > Outsourcing and Offshoring Consulting"
+ },
+ {
+  "id": "102",
+  "label": "Strategic Management Services",
+  "hierarchy": "Professional Services > Business Consulting and Services > Strategic Management Services"
+ },
+ {
+  "id": "99",
+  "label": "Design Services",
+  "hierarchy": "Professional Services > Design Services"
+ },
+ {
+  "id": "140",
+  "label": "Graphic Design",
+  "hierarchy": "Professional Services > Design Services > Graphic Design"
+ },
+ {
+  "id": "3256",
+  "label": "Regenerative Design",
+  "hierarchy": "Professional Services > Design Services > Regenerative Design"
+ },
+ {
+  "id": "3126",
+  "label": "Interior Design",
+  "hierarchy": "Professional Services > Design Services > Interior Design"
+ },
+ {
+  "id": "3242",
+  "label": "Engineering Services",
+  "hierarchy": "Professional Services > Engineering Services"
+ },
+ {
+  "id": "3248",
+  "label": "Robotics Engineering",
+  "hierarchy": "Professional Services > Engineering Services > Robotics Engineering"
+ },
+ {
+  "id": "3249",
+  "label": "Surveying and Mapping Services",
+  "hierarchy": "Professional Services > Engineering Services > Surveying and Mapping Services"
+ },
+ {
+  "id": "96",
+  "label": "IT Services and IT Consulting",
+  "hierarchy": "Professional Services > IT Services and IT Consulting"
+ },
+ {
+  "id": "118",
+  "label": "Computer and Network Security",
+  "hierarchy": "Professional Services > IT Services and IT Consulting > Computer and Network Security"
+ },
+ {
+  "id": "3244",
+  "label": "Digital Accessibility Services",
+  "hierarchy": "Professional Services > IT Services and IT Consulting > Digital Accessibility Services"
+ },
+ {
+  "id": "3102",
+  "label": "IT System Custom Software Development",
+  "hierarchy": "Professional Services > IT Services and IT Consulting > IT System Custom Software Development"
+ },
+ {
+  "id": "3106",
+  "label": "IT System Data Services",
+  "hierarchy": "Professional Services > IT Services and IT Consulting > IT System Data Services"
+ },
+ {
+  "id": "1855",
+  "label": "IT System Design Services",
+  "hierarchy": "Professional Services > IT Services and IT Consulting > IT System Design Services"
+ },
+ {
+  "id": "3104",
+  "label": "IT System Installation and Disposal",
+  "hierarchy": "Professional Services > IT Services and IT Consulting > IT System Installation and Disposal"
+ },
+ {
+  "id": "3103",
+  "label": "IT System Operations and Maintenance",
+  "hierarchy": "Professional Services > IT Services and IT Consulting > IT System Operations and Maintenance"
+ },
+ {
+  "id": "3107",
+  "label": "IT System Testing and Evaluation",
+  "hierarchy": "Professional Services > IT Services and IT Consulting > IT System Testing and Evaluation"
+ },
+ {
+  "id": "3105",
+  "label": "IT System Training and Support",
+  "hierarchy": "Professional Services > IT Services and IT Consulting > IT System Training and Support"
+ },
+ {
+  "id": "10",
+  "label": "Legal Services",
+  "hierarchy": "Professional Services > Legal Services"
+ },
+ {
+  "id": "120",
+  "label": "Alternative Dispute Resolution",
+  "hierarchy": "Professional Services > Legal Services > Alternative Dispute Resolution"
+ },
+ {
+  "id": "9",
+  "label": "Law Practice",
+  "hierarchy": "Professional Services > Legal Services > Law Practice"
+ },
+ {
+  "id": "136",
+  "label": "Photography",
+  "hierarchy": "Professional Services > Photography"
+ },
+ {
+  "id": "70",
+  "label": "Research Services",
+  "hierarchy": "Professional Services > Research Services"
+ },
+ {
+  "id": "12",
+  "label": "Biotechnology Research",
+  "hierarchy": "Professional Services > Research Services > Biotechnology Research"
+ },
+ {
+  "id": "114",
+  "label": "Nanotechnology Research",
+  "hierarchy": "Professional Services > Research Services > Nanotechnology Research"
+ },
+ {
+  "id": "130",
+  "label": "Think Tanks",
+  "hierarchy": "Professional Services > Research Services > Think Tanks"
+ },
+ {
+  "id": "3243",
+  "label": "Services for Renewable Energy",
+  "hierarchy": "Professional Services > Services for Renewable Energy"
+ },
+ {
+  "id": "16",
+  "label": "Veterinary Services",
+  "hierarchy": "Professional Services > Veterinary Services"
+ },
+ {
+  "id": "1757",
+  "label": "Real Estate and Equipment Rental Services",
+  "hierarchy": "Real Estate and Equipment Rental Services"
+ },
+ {
+  "id": "1779",
+  "label": "Equipment Rental Services",
+  "hierarchy": "Real Estate and Equipment Rental Services > Equipment Rental Services"
+ },
+ {
+  "id": "1798",
+  "label": "Commercial and Industrial Equipment Rental",
+  "hierarchy": "Real Estate and Equipment Rental Services > Equipment Rental Services > Commercial and Industrial Equipment Rental"
+ },
+ {
+  "id": "1786",
+  "label": "Consumer Goods Rental",
+  "hierarchy": "Real Estate and Equipment Rental Services > Equipment Rental Services > Consumer Goods Rental"
+ },
+ {
+  "id": "44",
+  "label": "Real Estate",
+  "hierarchy": "Real Estate and Equipment Rental Services > Real Estate"
+ },
+ {
+  "id": "128",
+  "label": "Leasing Non-residential Real Estate",
+  "hierarchy": "Real Estate and Equipment Rental Services > Real Estate > Leasing Non-residential Real Estate"
+ },
+ {
+  "id": "1759",
+  "label": "Leasing Residential Real Estate",
+  "hierarchy": "Real Estate and Equipment Rental Services > Real Estate > Leasing Residential Real Estate"
+ },
+ {
+  "id": "1770",
+  "label": "Real Estate Agents and Brokers",
+  "hierarchy": "Real Estate and Equipment Rental Services > Real Estate > Real Estate Agents and Brokers"
+ },
+ {
+  "id": "27",
+  "label": "Retail",
+  "hierarchy": "Retail"
+ },
+ {
+  "id": "1339",
+  "label": "Food and Beverage Retail",
+  "hierarchy": "Retail > Food and Beverage Retail"
+ },
+ {
+  "id": "22",
+  "label": "Retail Groceries",
+  "hierarchy": "Retail > Food and Beverage Retail > Retail Groceries"
+ },
+ {
+  "id": "1445",
+  "label": "Online and Mail Order Retail",
+  "hierarchy": "Retail > Online and Mail Order Retail"
+ },
+ {
+  "id": "19",
+  "label": "Retail Apparel and Fashion",
+  "hierarchy": "Retail > Retail Apparel and Fashion"
+ },
+ {
+  "id": "1319",
+  "label": "Retail Appliances, Electrical, and Electronic Equipment",
+  "hierarchy": "Retail > Retail Appliances, Electrical, and Electronic Equipment"
+ },
+ {
+  "id": "3186",
+  "label": "Retail Art Dealers",
+  "hierarchy": "Retail > Retail Art Dealers"
+ },
+ {
+  "id": "111",
+  "label": "Retail Art Supplies",
+  "hierarchy": "Retail > Retail Art Supplies"
+ },
+ {
+  "id": "1409",
+  "label": "Retail Books and Printed News",
+  "hierarchy": "Retail > Retail Books and Printed News"
+ },
+ {
+  "id": "1324",
+  "label": "Retail Building Materials and Garden Equipment",
+  "hierarchy": "Retail > Retail Building Materials and Garden Equipment"
+ },
+ {
+  "id": "1423",
+  "label": "Retail Florists",
+  "hierarchy": "Retail > Retail Florists"
+ },
+ {
+  "id": "1309",
+  "label": "Retail Furniture and Home Furnishings",
+  "hierarchy": "Retail > Retail Furniture and Home Furnishings"
+ },
+ {
+  "id": "1370",
+  "label": "Retail Gasoline",
+  "hierarchy": "Retail > Retail Gasoline"
+ },
+ {
+  "id": "1359",
+  "label": "Retail Health and Personal Care Products",
+  "hierarchy": "Retail > Retail Health and Personal Care Products"
+ },
+ {
+  "id": "3250",
+  "label": "Retail Pharmacies",
+  "hierarchy": "Retail > Retail Health and Personal Care Products > Retail Pharmacies"
+ },
+ {
+  "id": "143",
+  "label": "Retail Luxury Goods and Jewelry",
+  "hierarchy": "Retail > Retail Luxury Goods and Jewelry"
+ },
+ {
+  "id": "1292",
+  "label": "Retail Motor Vehicles",
+  "hierarchy": "Retail > Retail Motor Vehicles"
+ },
+ {
+  "id": "1407",
+  "label": "Retail Musical Instruments",
+  "hierarchy": "Retail > Retail Musical Instruments"
+ },
+ {
+  "id": "138",
+  "label": "Retail Office Equipment",
+  "hierarchy": "Retail > Retail Office Equipment"
+ },
+ {
+  "id": "1424",
+  "label": "Retail Office Supplies and Gifts",
+  "hierarchy": "Retail > Retail Office Supplies and Gifts"
+ },
+ {
+  "id": "1431",
+  "label": "Retail Recyclable Materials & Used Merchandise",
+  "hierarchy": "Retail > Retail Recyclable Materials & Used Merchandise"
+ },
+ {
+  "id": "1594",
+  "label": "Technology, Information and Media",
+  "hierarchy": "Technology, Information and Media"
+ },
+ {
+  "id": "3133",
+  "label": "Media & Telecommunications",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications"
+ },
+ {
+  "id": "82",
+  "label": "Book and Periodical Publishing",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Book and Periodical Publishing"
+ },
+ {
+  "id": "1602",
+  "label": "Book Publishing",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Book and Periodical Publishing > Book Publishing"
+ },
+ {
+  "id": "81",
+  "label": "Newspaper Publishing",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Book and Periodical Publishing > Newspaper Publishing"
+ },
+ {
+  "id": "1600",
+  "label": "Periodical Publishing",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Book and Periodical Publishing > Periodical Publishing"
+ },
+ {
+  "id": "36",
+  "label": "Broadcast Media Production and Distribution",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Broadcast Media Production and Distribution"
+ },
+ {
+  "id": "1641",
+  "label": "Cable and Satellite Programming",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Broadcast Media Production and Distribution > Cable and Satellite Programming"
+ },
+ {
+  "id": "1633",
+  "label": "Radio and Television Broadcasting",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Broadcast Media Production and Distribution > Radio and Television Broadcasting"
+ },
+ {
+  "id": "35",
+  "label": "Movies, Videos and Sound",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Movies, Videos and Sound"
+ },
+ {
+  "id": "127",
+  "label": "Animation and Post-production",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Movies, Videos and Sound > Animation and Post-production"
+ },
+ {
+  "id": "126",
+  "label": "Media Production",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Movies, Videos and Sound > Media Production"
+ },
+ {
+  "id": "1611",
+  "label": "Movies and Sound Recording",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Movies, Videos and Sound > Movies and Sound Recording"
+ },
+ {
+  "id": "1623",
+  "label": "Sound Recording",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Movies, Videos and Sound > Movies and Sound Recording > Sound Recording"
+ },
+ {
+  "id": "1625",
+  "label": "Sheet Music Publishing",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Movies, Videos and Sound > Sheet Music Publishing"
+ },
+ {
+  "id": "8",
+  "label": "Telecommunications",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Telecommunications"
+ },
+ {
+  "id": "1649",
+  "label": "Satellite Telecommunications",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Telecommunications > Satellite Telecommunications"
+ },
+ {
+  "id": "1644",
+  "label": "Telecommunications Carriers",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Telecommunications > Telecommunications Carriers"
+ },
+ {
+  "id": "119",
+  "label": "Wireless Services",
+  "hierarchy": "Technology, Information and Media > Media and Telecommunications > Telecommunications > Wireless Services"
+ },
+ {
+  "id": "6",
+  "label": "Technology, Information and Internet",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet"
+ },
+ {
+  "id": "2458",
+  "label": "Data Infrastructure and Analytics",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Data Infrastructure and Analytics"
+ },
+ {
+  "id": "3134",
+  "label": "Blockchain Services",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Data Infrastructure and Analytics > Blockchain Services"
+ },
+ {
+  "id": "3128",
+  "label": "Business Intelligence Platforms",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Data Infrastructure and Analytics > Business Intelligence Platforms"
+ },
+ {
+  "id": "3252",
+  "label": "Climate Data and Analytics",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Data Infrastructure and Analytics > Climate Data and Analytics"
+ },
+ {
+  "id": "84",
+  "label": "Information Services",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Information Services"
+ },
+ {
+  "id": "3132",
+  "label": "Internet Publishing",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Information Services > Internet Publishing"
+ },
+ {
+  "id": "3129",
+  "label": "Business Content",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Information Services > Internet Publishing > Business Content"
+ },
+ {
+  "id": "113",
+  "label": "Online Audio and Video Media",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Information Services > Internet Publishing > Online Audio and Video Media"
+ },
+ {
+  "id": "3124",
+  "label": "Internet News",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Information Services > Internet Publishing > Online Audio and Video Media > Internet News"
+ },
+ {
+  "id": "85",
+  "label": "Libraries",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Information Services > Libraries"
+ },
+ {
+  "id": "3125",
+  "label": "Blogs",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Information Services >Internet Publishing > Blogs"
+ },
+ {
+  "id": "1285",
+  "label": "Internet Marketplace Platforms",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Internet Marketplace Platforms"
+ },
+ {
+  "id": "3127",
+  "label": "Social Networking Platforms",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Social Networking Platforms"
+ },
+ {
+  "id": "4",
+  "label": "Software Development",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Software Development"
+ },
+ {
+  "id": "109",
+  "label": "Computer Games",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Software Development > Computer Games"
+ },
+ {
+  "id": "3131",
+  "label": "Mobile Gaming Apps",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Software Development > Computer Games > Mobile Gaming Apps"
+ },
+ {
+  "id": "5",
+  "label": "Computer Networking Products",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Software Development > Computer Networking Products"
+ },
+ {
+  "id": "3130",
+  "label": "Data Security Software Products",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Software Development > Data Security Software Products"
+ },
+ {
+  "id": "3101",
+  "label": "Desktop Computing Software Products",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Software Development > Desktop Computing Software Products"
+ },
+ {
+  "id": "3099",
+  "label": "Embedded Software Products",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Software Development > Embedded Software Products"
+ },
+ {
+  "id": "3100",
+  "label": "Mobile Computing Software Products",
+  "hierarchy": "Technology, Information and Media > Technology, Information and Internet > Software Development > Mobile Computing Software Products"
+ },
+ {
+  "id": "116",
+  "label": "Transportation, Logistics, Supply Chain and Storage",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage"
+ },
+ {
+  "id": "94",
+  "label": "Airlines and Aviation",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Airlines and Aviation"
+ },
+ {
+  "id": "87",
+  "label": "Freight and Package Transportation",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Freight and Package Transportation"
+ },
+ {
+  "id": "1495",
+  "label": "Ground Passenger Transportation",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Ground Passenger Transportation"
+ },
+ {
+  "id": "1504",
+  "label": "Interurban and Rural Bus Services",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Ground Passenger Transportation > Interurban and Rural Bus Services"
+ },
+ {
+  "id": "1512",
+  "label": "School and Employee Bus Services",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Ground Passenger Transportation > School and Employee Bus Services"
+ },
+ {
+  "id": "1517",
+  "label": "Shuttles and Special Needs Transportation Services",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Ground Passenger Transportation > Shuttles and Special Needs Transportation Services"
+ },
+ {
+  "id": "1532",
+  "label": "Sightseeing Transportation",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Ground Passenger Transportation > Sightseeing Transportation"
+ },
+ {
+  "id": "1505",
+  "label": "Taxi and Limousine Services",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Ground Passenger Transportation > Taxi and Limousine Services"
+ },
+ {
+  "id": "1497",
+  "label": "Urban Transit Services",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Ground Passenger Transportation > Urban Transit Services"
+ },
+ {
+  "id": "95",
+  "label": "Maritime Transportation",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Maritime Transportation"
+ },
+ {
+  "id": "1520",
+  "label": "Pipeline Transportation",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Pipeline Transportation"
+ },
+ {
+  "id": "1573",
+  "label": "Postal Services",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Postal Services"
+ },
+ {
+  "id": "1481",
+  "label": "Rail Transportation",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Rail Transportation"
+ },
+ {
+  "id": "92",
+  "label": "Truck Transportation",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Truck Transportation"
+ },
+ {
+  "id": "93",
+  "label": "Warehousing and Storage",
+  "hierarchy": "Transportation, Logistics, Supply Chain and Storage > Warehousing and Storage"
+ },
+ {
+  "id": "59",
+  "label": "Utilities",
+  "hierarchy": "Utilities"
+ },
+ {
+  "id": "383",
+  "label": "Electric Power Generation",
+  "hierarchy": "Utilities > Electric Power Generation"
+ },
+ {
+  "id": "385",
+  "label": "Fossil Fuel Electric Power Generation",
+  "hierarchy": "Utilities > Electric Power Generation > Fossil Fuel Electric Power Generation"
+ },
+ {
+  "id": "386",
+  "label": "Nuclear Electric Power Generation",
+  "hierarchy": "Utilities > Electric Power Generation > Nuclear Electric Power Generation"
+ },
+ {
+  "id": "3240",
+  "label": "Renewable Energy Power Generation",
+  "hierarchy": "Utilities > Electric Power Generation > Renewable Energy Power Generation"
+ },
+ {
+  "id": "390",
+  "label": "Biomass Electric Power Generation",
+  "hierarchy": "Utilities > Electric Power Generation > Renewable Energy Power Generation > Biomass Electric Power Generation"
+ },
+ {
+  "id": "389",
+  "label": "Geothermal Electric Power Generation",
+  "hierarchy": "Utilities > Electric Power Generation > Renewable Energy Power Generation > Geothermal Electric Power Generation"
+ },
+ {
+  "id": "384",
+  "label": "Hydroelectric Power Generation",
+  "hierarchy": "Utilities > Electric Power Generation > Renewable Energy Power Generation > Hydroelectric Power Generation"
+ },
+ {
+  "id": "387",
+  "label": "Solar Electric Power Generation",
+  "hierarchy": "Utilities > Electric Power Generation > Renewable Energy Power Generation > Solar Electric Power Generation"
+ },
+ {
+  "id": "2489",
+  "label": "Wind Electric Power Generation",
+  "hierarchy": "Utilities > Electric Power Generation > Renewable Energy Power Generation > Wind Electric Power Generation"
+ },
+ {
+  "id": "382",
+  "label": "Electric Power Transmission, Control, and Distribution",
+  "hierarchy": "Utilities > Electric Power Transmission, Control, and Distribution"
+ },
+ {
+  "id": "397",
+  "label": "Natural Gas Distribution",
+  "hierarchy": "Utilities > Natural Gas Distribution"
+ },
+ {
+  "id": "398",
+  "label": "Water, Waste, Steam, and Air Conditioning Services",
+  "hierarchy": "Utilities > Water, Waste, Steam, and Air Conditioning Services"
+ },
+ {
+  "id": "404",
+  "label": "Steam and Air-Conditioning Supply",
+  "hierarchy": "Utilities > Water, Waste, Steam, and Air Conditioning Services > Steam and Air-Conditioning Supply"
+ },
+ {
+  "id": "1981",
+  "label": "Waste Collection",
+  "hierarchy": "Utilities > Water, Waste, Steam, and Air Conditioning Services > Waste Collection"
+ },
+ {
+  "id": "1986",
+  "label": "Waste Treatment and Disposal",
+  "hierarchy": "Utilities > Water, Waste, Steam, and Air Conditioning Services > Waste Treatment and Disposal"
+ },
+ {
+  "id": "400",
+  "label": "Water Supply and Irrigation Systems",
+  "hierarchy": "Utilities > Water, Waste, Steam, and Air Conditioning Services > Water Supply and Irrigation Systems"
+ },
+ {
+  "id": "133",
+  "label": "Wholesale",
+  "hierarchy": "Wholesale"
+ },
+ {
+  "id": "1267",
+  "label": "Wholesale Alcoholic Beverages",
+  "hierarchy": "Wholesale > Wholesale Alcoholic Beverages"
+ },
+ {
+  "id": "1222",
+  "label": "Wholesale Apparel and Sewing Supplies",
+  "hierarchy": "Wholesale > Wholesale Apparel and Sewing Supplies"
+ },
+ {
+  "id": "1171",
+  "label": "Wholesale Appliances, Electrical, and Electronics",
+  "hierarchy": "Wholesale > Wholesale Appliances, Electrical, and Electronics"
+ },
+ {
+  "id": "49",
+  "label": "Wholesale Building Materials",
+  "hierarchy": "Wholesale > Wholesale Building Materials"
+ },
+ {
+  "id": "1257",
+  "label": "Wholesale Chemical and Allied Products",
+  "hierarchy": "Wholesale > Wholesale Chemical and Allied Products"
+ },
+ {
+  "id": "1157",
+  "label": "Wholesale Computer Equipment",
+  "hierarchy": "Wholesale > Wholesale Computer Equipment"
+ },
+ {
+  "id": "1221",
+  "label": "Wholesale Drugs and Sundries",
+  "hierarchy": "Wholesale > Wholesale Drugs and Sundries"
+ },
+ {
+  "id": "1231",
+  "label": "Wholesale Food and Beverage",
+  "hierarchy": "Wholesale > Wholesale Food and Beverage"
+ },
+ {
+  "id": "1230",
+  "label": "Wholesale Footwear",
+  "hierarchy": "Wholesale > Wholesale Footwear"
+ },
+ {
+  "id": "1137",
+  "label": "Wholesale Furniture and Home Furnishings",
+  "hierarchy": "Wholesale > Wholesale Furniture and Home Furnishings"
+ },
+ {
+  "id": "1178",
+  "label": "Wholesale Hardware, Plumbing, Heating Equipment",
+  "hierarchy": "Wholesale > Wholesale Hardware, Plumbing, Heating Equipment"
+ },
+ {
+  "id": "134",
+  "label": "Wholesale Import and Export",
+  "hierarchy": "Wholesale > Wholesale Import and Export"
+ },
+ {
+  "id": "1208",
+  "label": "Wholesale Luxury Goods and Jewelry",
+  "hierarchy": "Wholesale > Wholesale Luxury Goods and Jewelry"
+ },
+ {
+  "id": "1187",
+  "label": "Wholesale Machinery",
+  "hierarchy": "Wholesale > Wholesale Machinery"
+ },
+ {
+  "id": "1166",
+  "label": "Wholesale Metals and Minerals",
+  "hierarchy": "Wholesale > Wholesale Metals and Minerals"
+ },
+ {
+  "id": "1128",
+  "label": "Wholesale Motor Vehicles and Parts",
+  "hierarchy": "Wholesale > Wholesale Motor Vehicles and Parts"
+ },
+ {
+  "id": "1212",
+  "label": "Wholesale Paper Products",
+  "hierarchy": "Wholesale > Wholesale Paper Products"
+ },
+ {
+  "id": "1262",
+  "label": "Wholesale Petroleum and Petroleum Products",
+  "hierarchy": "Wholesale > Wholesale Petroleum and Petroleum Products"
+ },
+ {
+  "id": "1153",
+  "label": "Wholesale Photography Equipment and Supplies",
+  "hierarchy": "Wholesale > Wholesale Photography Equipment and Supplies"
+ },
+ {
+  "id": "1250",
+  "label": "Wholesale Raw Farm Products",
+  "hierarchy": "Wholesale > Wholesale Raw Farm Products"
+ },
+ {
+  "id": "1206",
+  "label": "Wholesale Recyclable Materials",
+  "hierarchy": "Wholesale > Wholesale Recyclable Materials"
+ },
+ {
+  "id": "3215",
+  "label": "Animation",
+  "hierarchy": "This industry includes entities that produce and/or sell art made with a method in which figures are manipulated to appear as moving images."
+ },
+ {
+  "id": "3190",
+  "label": "Apparel and Fashion",
+  "hierarchy": "This industry includes entities that design, manufacture, and distribute clothing and apparel."
+ },
+ {
+  "id": "3204",
+  "label": "Arts and Crafts",
+  "hierarchy": "This industry includes entities that participate in economic activities related to the creation of goods by artisans or skilled craftspeople or the design, development, manufacturing, and distribution of craft supplies."
+ },
+ {
+  "id": "3198",
+  "label": "Automotive",
+  "hierarchy": "This industry includes entities that participate in the design, development, manufacturing, marketing, and selling of motor vehicles."
+ },
+ {
+  "id": "3226",
+  "label": "Aviation & Aerospace",
+  "hierarchy": "This industry includes entities that engage in the research, development, manufacture and sale of flight vehicles, major flight-vehicle subsystems such as propulsion and avionics and key support systems necessary for the testing, operation, and maintenance of flight vehicles."
+ },
+ {
+  "id": "3238",
+  "label": "Biotechnology",
+  "hierarchy": "This industry includes entities that use living organisms and molecular biology to produce healthcare-related products."
+ },
+ {
+  "id": "3197",
+  "label": "Building Materials",
+  "hierarchy": "This industry includes entities that produce and/or sell building materials, such as lumber, plywood, millwork, and wood panels; brick, stone, and related construction materials; roofing, siding, and insulation materials; and other construction materials, including manufactured homes (such as mobile homes) and/or prefabricated buildings."
+ },
+ {
+  "id": "3211",
+  "label": "Business Supplies and Equipment",
+  "hierarchy": "This industry includes entities that produce and/or sell consumables and equipment regularly used in offices by businesses and other organizations."
+ },
+ {
+  "id": "3219",
+  "label": "Commercial Real Estate",
+  "hierarchy": "This industry includes entities that manage, construct, design, or sell real estate (buildings or land) intended to generate a profit, either from capital gains or rental income."
+ },
+ {
+  "id": "3235",
+  "label": "Computer Hardware",
+  "hierarchy": "This industry includes entities that produce and/or sell the physical parts of a computer, such as the case, central processing unit (CPU), random access memory (RAM), monitor, mouse, keyboard, computer data storage, graphics card, sound card, speakers and motherboard."
+ },
+ {
+  "id": "3234",
+  "label": "Computer Networking",
+  "hierarchy": "This industry includes entities that produce, sell, and/or provide services for interconnected computing devices that can exchange data and share resources with each other."
+ },
+ {
+  "id": "3191",
+  "label": "Consumer Electronics",
+  "hierarchy": "This industry includes entities that produce and/or sell electronic equipment intended for everyday use."
+ },
+ {
+  "id": "3192",
+  "label": "Consumer Goods",
+  "hierarchy": "This industry includes entities that produce and/or sell final products ready for use by the consumer."
+ },
+ {
+  "id": "3189",
+  "label": "Cosmetics",
+  "hierarchy": "This industry includes entities that manufacture and distribute cosmetic products, such as foundation, mascara, skincare, haircare and soap."
+ },
+ {
+  "id": "3199",
+  "label": "Dairy",
+  "hierarchy": "This industry includes entities that produce and/or sell dairy products made from raw milk, processed milk, and dairy substitutes."
+ },
+ {
+  "id": "3187",
+  "label": "Defense & Space",
+  "hierarchy": "This industry includes entities that produce and/or sell guided missiles and space vehicles."
+ },
+ {
+  "id": "3227",
+  "label": "Design",
+  "hierarchy": "This industry includes entities that create plans or specifications for the production of an object or system, or for the implementation of an activity or process or the result of that plan or specification in the form of a prototype, product, or process."
+ },
+ {
+  "id": "3208",
+  "label": "E-Learning",
+  "hierarchy": "This industry includes entities that use a combination of computer hardware, software, and educational theory and practice to facilitate learning."
+ },
+ {
+  "id": "3200",
+  "label": "Education Management",
+  "hierarchy": "This industry includes entities that participate in activities related to educational leadership and management."
+ },
+ {
+  "id": "3237",
+  "label": "Entertainment",
+  "hierarchy": "This industry includes entities that are involved in the production and distribution of mass media entertainment."
+ },
+ {
+  "id": "3196",
+  "label": "Fine Art",
+  "hierarchy": "This industry includes entities that produce and/or sell products related to the visual arts such as painting, drawing, printmaking, sculpture, ceramics, and photography."
+ },
+ {
+  "id": "3195",
+  "label": "Food & Beverages",
+  "hierarchy": "This industry includes entities that prepare, present and serve food and beverages to customers."
+ },
+ {
+  "id": "3224",
+  "label": "Food Production",
+  "hierarchy": "This industry includes entities that transform livestock and agricultural products into products for intermediate or final consumption."
+ },
+ {
+  "id": "3193",
+  "label": "Furniture",
+  "hierarchy": "This industry includes entities that participate in the design, manufacture, distribution, and sale of household furniture (such as baby furniture, box springs, and mattresses) and outdoor furniture; office furniture (except those sold in combination with office supplies and equipment), and other furniture objects."
+ },
+ {
+  "id": "3232",
+  "label": "Government Relations",
+  "hierarchy": "This industry includes entities that monitor and engage in the federal and state legislative process, facilitate relationships with members of local, state, and federal administrative agencies, departments, commissions, and boards; and engage in grassroots lobbying and legislative policy strategies."
+ },
+ {
+  "id": "3207",
+  "label": "Health, Wellness and Fitness",
+  "hierarchy": "This industry includes entities that produce and deliver products and services that promote physical and mental wellbeing."
+ },
+ {
+  "id": "3210",
+  "label": "Human Resources",
+  "hierarchy": "This industry includes entities that are involved in finding, screening, recruiting, and training job applicants, as well as administering benefits"
+ },
+ {
+  "id": "3209",
+  "label": "Import and Export",
+  "hierarchy": "This industry includes entities that participate in international trade and exchange of goods, products and services."
+ },
+ {
+  "id": "3216",
+  "label": "Industrial Automation",
+  "hierarchy": "This industry includes entities that produce and/or sell autonomous control systems that use technologies such as robotics and computer software to handle processes and machinery."
+ },
+ {
+  "id": "3231",
+  "label": "Information Technology and Services",
+  "hierarchy": "This industry includes entities that provide functions, maintenance, and support for information technology products, or provide services that support the design, development, application, implementation, support, and management of computer-based information systems."
+ },
+ {
+  "id": "3194",
+  "label": "Leisure, Travel & Tourism",
+  "hierarchy": "This industry includes entities that participate in business focused on recreation, entertainment, sports, and tourism-related products and services; and in the business of attracting, accommodating, and entertaining tourists, and the business of operating tours."
+ },
+ {
+  "id": "3212",
+  "label": "Luxury Goods and Jewelry",
+  "hierarchy": "This industry includes entities that produce and/or sell goods that are not necessary but deemed highly desirable within a culture or society, such as haute couture apparel, fine jewelry and watches, and high-end luggage."
+ },
+ {
+  "id": "3236",
+  "label": "Maritime",
+  "hierarchy": "This industry includes entities that participate in the construction, repair, and scraping of watercraft, as well as the movement of cargo and other materials."
+ },
+ {
+  "id": "3221",
+  "label": "Mechanical or Industrial Engineering",
+  "hierarchy": "This industry includes entities that conduct engineering projects that combine engineering physics and mathematics principles with materials science, to design, analyze, manufacture, and maintain mechanical or industrial systems."
+ },
+ {
+  "id": "3217",
+  "label": "Medical Devices",
+  "hierarchy": "This industry includes entities that produce and distribute instruments, apparatus, implements, machines, contrivances, implants, in vitro reagents, or other similar products which are intended for use in the diagnosis, mitigation or treatment of disease or other medical conditions."
+ },
+ {
+  "id": "3205",
+  "label": "Music",
+  "hierarchy": "This industry includes entities that are involved in music creation, performance, and distribution."
+ },
+ {
+  "id": "3202",
+  "label": "Non-profit Organization Management",
+  "hierarchy": "This industry includes entities that participate in the administration and management of a not-for-profit organization."
+ },
+ {
+  "id": "3214",
+  "label": "Online Media",
+  "hierarchy": "This industry includes entities that produce and/or distribute media, which is published over the Internet, and includes, without limitation, web-sites, blogs, and social media."
+ },
+ {
+  "id": "3206",
+  "label": "Outsourcing/Offshoring",
+  "hierarchy": "This industry includes entities that negotiate contracts with a third party to perform a specific function and/or send in-house jobs to be performed in another country/region."
+ },
+ {
+  "id": "3223",
+  "label": "Packaging and Containers",
+  "hierarchy": "This industry includes entities that carry out the planning, creating, manufacturing, wrapping, boxing, or bottling of goods."
+ },
+ {
+  "id": "3239",
+  "label": "Paper and Forest Products",
+  "hierarchy": "This industry includes entities that produce and/or sell any material derived from forestry for direct consumption or commercial use, such as lumber, paper, or fodder for livestock."
+ },
+ {
+  "id": "3230",
+  "label": "Philanthropy",
+  "hierarchy": "This industry includes entities that participate in charitable giving, for the public good, focusing on quality of life."
+ },
+ {
+  "id": "3203",
+  "label": "Program Development",
+  "hierarchy": "This industry includes entities that participate in the ongoing systematic process of planning, implementing and evaluating programs."
+ },
+ {
+  "id": "3201",
+  "label": "Public Policy",
+  "hierarchy": "This industry includes entities that participate in programs as a course of action created and/or enacted, typically by a government or nonprofit organization, in response to social issues."
+ },
+ {
+  "id": "3213",
+  "label": "Renewables & Environment",
+  "hierarchy": "This industry includes entities that are part of the energy industry focused on new and appropriate renewable energy technologies."
+ },
+ {
+  "id": "3233",
+  "label": "Research",
+  "hierarchy": "This industry includes entities that provide systematic investigation into and study of materials and sources in order to establish facts and reach new conclusions."
+ },
+ {
+  "id": "3218",
+  "label": "Semiconductors",
+  "hierarchy": "This industry includes entities that produce and/or sell semiconductors."
+ },
+ {
+  "id": "3225",
+  "label": "Sporting Goods",
+  "hierarchy": "This industry includes entities that produce and/or sell the equipment, materials, apparel, and gear used to participate in a sport."
+ },
+ {
+  "id": "3228",
+  "label": "Tobacco",
+  "hierarchy": "This industry includes entities that produce and/or sell tobacco and tobacco-related products"
+ },
+ {
+  "id": "3222",
+  "label": "Transportation/Trucking/Railroad",
+  "hierarchy": "This industry includes entities that provide services for moving people, goods, or the infrastructure to do so."
+ },
+ {
+  "id": "3188",
+  "label": "Veterinary",
+  "hierarchy": "This industry includes entities that participate in economic activities related to the practice of veterinary medicine, dentistry, or surgery for animals."
+ },
+ {
+  "id": "3229",
+  "label": "Warehousing",
+  "hierarchy": "This industry includes entities that provide storage of physical inventory for sale or distribution."
+ },
+ {
+  "id": "3220",
+  "label": "Wine and Spirits",
+  "hierarchy": "This industry includes entities that produce and/or sell alcoholic drinks exclusive of beer and cider."
+ }
+]
