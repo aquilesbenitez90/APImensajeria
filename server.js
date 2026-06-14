@@ -31,7 +31,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const puppeteer = require('puppeteer');
-const { PDFDocument } = require('pdf-lib');
+const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const { renderReport } = require('./render.js'); // plantilla fija + datos JSON -> HTML
 const fs = require('fs');
 const path = require('path');
@@ -3493,12 +3493,55 @@ async function enriquecerSenalesEmpresa(data){
   });
 }
 
-async function procesar(jobId, { email, dominio, empresa, nombre, profileId, evalMode, idioma }) {
+// PDF MÍNIMO DE PRUEBA (modo test): un PDF válido y abrible, generado con pdf-lib (NO chromium, NO Claude,
+// NO MCP → $0 y al instante). Solo sirve para verificar el flujo de n8n (disparo → polling → mail con adjunto).
+async function _pdfDePrueba(nombre){
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([595, 842]);   // A4
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const reg  = await doc.embedFont(StandardFonts.Helvetica);
+  const tinta = rgb(0.04, 0.05, 0.08), gris = rgb(0.42, 0.44, 0.48);
+  const put = (t, x, y, sz, f, c) => page.drawText(String(t), { x, y, size: sz, font: f || reg, color: c || tinta });
+  put('REPORTE DE PRUEBA', 56, 760, 26, bold);
+  put('MODO TEST - no se gasto un solo token de Claude ni se llamo al MCP.', 56, 728, 12, reg, gris);
+  put('Este PDF existe solo para verificar el flujo de n8n de punta a punta:', 56, 690, 12);
+  put('disparo a /generar, polling a /resultado y envio del adjunto por mail.', 56, 672, 12);
+  put('Cliente de prueba: ' + (nombre || '-'), 56, 628, 14, bold);
+  put('Si te llego este PDF por correo, el cableado de n8n funciona OK.', 56, 590, 12);
+  put('INBOUND-TOOLS.COM  -  ANALISIS DE MERCADO (PRUEBA)', 56, 40, 9, reg, gris);
+  return Buffer.from(await doc.save()).toString('base64');
+}
+
+async function procesar(jobId, { email, dominio, empresa, nombre, profileId, evalMode, idioma, test }) {
   return _statsALS.run(_nuevoStats(), async () => {
   const _st0 = _statsALS.getStore(); if (_st0) _st0.idiomaDoc = _idiomaCode(idioma);   // idioma del DOCUMENTO (manual desde la landing)
   try {
     console.log(`\n========== Job ${jobId} - Inicio (${NUM_CUENTAS} cuentas) ==========`);
     console.log(`Empresa: ${empresa} | Email: ${email} | Dominio: ${dominio} | profileId: ${profileId ?? '-'}`);
+
+    // ===== MODO TEST (n8n end-to-end sin gastar): "test":true en el body O TEST_MODE=on en el env. =====
+    // Devuelve un reporte FALSO (PDF mínimo válido) con TODOS los campos que n8n lee (status, pdf_base64,
+    // apto_envio, pdf_filename, paginas, tokens_*=0). NO llama a Claude ni al MCP → $0 y al instante. Para
+    // probar el plumbing (disparo, polling, envío por mail) sin pagar el ~$0.70 del pipeline real.
+    if (test === true || String(test).toLowerCase() === 'on' || String(process.env.TEST_MODE || '').toLowerCase() === 'on') {
+      const _emp = empresa || dominio || 'Empresa de prueba';
+      console.log(`[TEST] Job ${jobId}: MODO PRUEBA n8n — NO se llama Claude ni el MCP, devuelvo un PDF falso (0 tokens, $0).`);
+      const pdfB64 = await _pdfDePrueba(_emp);
+      jobs.set(jobId, {
+        status: 'ok', test: true, apto_envio: true,
+        pdf_base64: pdfB64,
+        empresa: _emp, nombre: nombre || '', email: email || '',
+        pdf_filename: _nombreArchivoPDF('TEST ' + _emp),
+        paginas: 1,
+        juez: 'TEST (sin evaluar)',
+        cards_validas: NUM_CUENTAS, cards_descartadas: [],
+        tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
+        tokens_input: 0, tokens_output: 0, tokens_cache_write: 0, tokens_cache_read: 0,
+        finishedAt: Date.now()
+      });
+      console.log(`========== Job ${jobId} - TEST OK (PDF falso, $0, sin tocar Claude/MCP) ==========\n`);
+      return;
+    }
 
     const cliente = await resolverCliente({ profileId, dominio, empresa });
     const empresaFinal = cliente.empresa || empresa;
@@ -3706,7 +3749,7 @@ app.post('/generar', (req, res) => {
   if (process.env.LANDING_KEY && req.header('x-landing-key') !== process.env.LANDING_KEY) {
     return res.status(401).json({ error: 'Clave invalida' });
   }
-  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug, idioma } = req.body || {};
+  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug, idioma, test } = req.body || {};
   if (!empresa && !dominio && !profileId) {
     return res.status(400).json({ error: 'Falta empresa, dominio o profileId' });
   }
@@ -3747,7 +3790,7 @@ app.post('/generar', (req, res) => {
   });
 
   Promise.race([
-    procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug, idioma }),
+    procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug, idioma, test }),
     timeoutGlobal
   ])
   // CATCH DEFENSIVO: procesar() maneja sus errores internamente (try/catch -> status:'error'),
