@@ -21,6 +21,7 @@
  * Si querés un candado extra: poné un TOKEN abajo y sumá "token":"loMismo" en el server (opcional).
  */
 
+var SHEET_ID = '19c8FYt0cDcIQoBRhKCK5WzEW6QXUg4u6PdVA806Ln90';  // Sheet "Diagnosticos GTM IBT Gastos". Vacío ('') = usa la hoja donde pegaste el script.
 var HOJA  = 'Analisis';   // nombre de la pestaña; se crea sola si no existe
 var TOKEN = '';           // opcional: si lo llenás, el server tiene que mandar el mismo token
 
@@ -32,7 +33,7 @@ function doPost(e) {
   try {
     var d = JSON.parse(e.postData.contents || '{}');
     if (TOKEN && d.token !== TOKEN) return _out('unauthorized');
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var ss = SHEET_ID ? SpreadsheetApp.openById(SHEET_ID) : SpreadsheetApp.getActiveSpreadsheet();
     var sh = ss.getSheetByName(HOJA) || ss.insertSheet(HOJA);
     if (sh.getLastRow() === 0) sh.appendRow(COLUMNAS);   // encabezado la primera vez
     sh.appendRow(COLUMNAS.map(function (c) { return d[c] !== undefined && d[c] !== null ? d[c] : ''; }));
