@@ -57,6 +57,9 @@ const LIMITES = {
   REF_NARRATIVA: 520, GAP_DIM: 30, GAP_PROSPECT: 40, GAP_REF: 45, GAP_CLOSING_BODY: 480,
   PLAN_INTRO: 260, OKR_OBJETIVO: 80, OKR_KR: 80, OKR_CELDA: 20,
   BENEFIT_TITLE: 55, BENEFIT_DESC: 170, PROJ_NOTA: 340, QUOTE: 280, CTA_HEADING: 90, CTA_BODY: 220,
+  // Campos del RESEARCH que van a cajas chicas del PDF (corrida real 5: un value de métrica
+  // con un párrafo entero estiró la página 2 a 1153px → PDF de 5 páginas).
+  REF_METRIC_LABEL: 30, REF_METRIC_VALUE: 20, REF_DESC: 140,
 };
 
 // Framing TEPI: metodología interna PROHIBIDA en copy externo. OJO: "DOS", "Rocks" y "EOS"
@@ -245,7 +248,7 @@ Vienen en el mensaje del usuario: empresa, dominio, headcount de LinkedIn (si ha
 ## QUÉ INVESTIGAR
 1. LA EMPRESA: qué hace, industria (etiqueta corta estilo "IT Consulting / Capital Markets"), ciudad/país sede, escala y contexto de crecimiento (adquisiciones, expansión, fondeo) SOLO con fuente. Si el headcount total no vino confirmado, buscalo y citá la fuente.
 2. EQUIPO DIRECTIVO: solo para COMPLEMENTAR lo que Sales Navigator no trajo. Cada rol que agregues necesita fuente pública (sitio de la empresa, LinkedIn, prensa); si no la hay, no lo agregues.
-3. REFERENTE DEL SECTOR: una empresa REAL y reconocida del mismo sector (o el más cercano), idealmente del mismo país del prospecto (si no hay, regional). Necesito EXACTAMENTE 4 métricas del referente, cada una con fuente y año (escala de personas, revenue publicado, países de operación, años en mercado, u otras con respaldo). Solo cifras publicadas: nada de estimaciones propias. El referente NO puede ser la misma empresa prospecto ni un competidor directo agresivo (buscá inspiración, no amenaza).
+3. REFERENTE DEL SECTOR: una empresa REAL y reconocida del mismo sector (o el más cercano), idealmente del mismo país del prospecto (si no hay, regional). Necesito EXACTAMENTE 4 métricas del referente, cada una con fuente y año (escala de personas, revenue publicado, países de operación, años en mercado, u otras con respaldo). Solo cifras publicadas: nada de estimaciones propias. FORMATO de cada métrica: "label" corto (máx 30 chars, ej. "Escala global") y "value" de DISPLAY ultra corto (máx 20 chars: "14.000+", "$500M+ USD", "43 años", "6 países"); el contexto y el detalle van en "hechos", NUNCA en el value (va en una cajita chica del PDF). El referente NO puede ser la misma empresa prospecto ni un competidor directo agresivo (buscá inspiración, no amenaza).
 4. PATRÓN OPERATIVO DEL SECTOR: 2 a 4 hechos o tendencias del sector en ese país, con fuente, que sirvan para diagnosticar fricción operativa (crecimiento del sector, presión de escala, consolidación).
 5. SUPUESTOS DEL CÁLCULO:
    - costo_hora de un líder en USD según país e industria. Benchmarks de referencia: Colombia/México SaaS-Tech $35; Argentina Tech $30-35; Perú Inmobiliario/FoodTech $35-38; Chile Fintech/Retail $38-40; Guatemala/Honduras Distribución/Agro $28, Tech/Gaming $30-45; Costa Rica/El Salvador Operaciones/Logística $22-32; México Multinacional/Gaming $45-55; Global/PE-backed C-level $45-55.
@@ -410,6 +413,7 @@ SOLO este JSON (sin markdown):
     let t = String(s).trim();
     for (let i = 0; i < 6; i++) {
       const prev = t;
+      t = t.replace(/\s*\([^)]*$/, '');            // paréntesis abierto sin cerrar ("30+ años (fundada")
       t = t.replace(_COLA_COJA, '').replace(/[\s,;:]+$/, '');
       if (t === prev) break;
     }
@@ -638,7 +642,10 @@ SOLO este JSON (sin markdown):
       DIAGNOSIS_HEADING: c.diagnosis.heading, DIAGNOSIS_BODY: c.diagnosis.body,
       BENCHMARK_NOTA: c.benchmark_nota,
       TIMEBARS_HEADING: c.timebars.heading,
-      REF_NAME: ref.nombre, REF_DESC: ref.desc,
+      // Los campos de research que van a cajas chicas se normalizan determinísticamente:
+      // el prompt pide values de display cortos, pero si el research se explaya igual,
+      // esto garantiza que la página 2 no crece (los desbordes de research no tienen retry).
+      REF_NAME: ref.nombre, REF_DESC: _recorteDeterminista(ref.desc, LIMITES.REF_DESC),
       REF_NARRATIVA: c.ref_narrativa,
       REF_FUENTE: `Fuente: ${ref.fuente_principal}`,
       GAP_CLOSING_BODY: c.gap_closing,
@@ -649,7 +656,10 @@ SOLO este JSON (sin markdown):
     };
     c.ineficiencias.forEach((x, i) => { d[`INEFF_${i + 1}_TITLE`] = x.title; d[`INEFF_${i + 1}_DESC`] = x.desc; });
     c.timebars.bars.forEach((b, i) => { d[`BAR_${i + 1}_LABEL`] = b.label; d[`BAR_${i + 1}_PCT`] = String(b.pct); });
-    ref.metricas.forEach((m, i) => { d[`REF_METRIC_${i + 1}_LABEL`] = m.label; d[`REF_METRIC_${i + 1}_VALUE`] = m.value; });
+    ref.metricas.forEach((m, i) => {
+      d[`REF_METRIC_${i + 1}_LABEL`] = _recorteDeterminista(m.label, LIMITES.REF_METRIC_LABEL);
+      d[`REF_METRIC_${i + 1}_VALUE`] = _recorteDeterminista(m.value, LIMITES.REF_METRIC_VALUE);
+    });
     c.gaps.forEach((g, i) => { d[`GAP_${i + 1}_DIM`] = g.dim; d[`GAP_${i + 1}_PROSPECT`] = g.prospect; d[`GAP_${i + 1}_REF`] = g.ref; });
     c.okrs.forEach((o, i) => {
       d[`OKR_${i + 1}_OBJETIVO`] = o.objetivo;
