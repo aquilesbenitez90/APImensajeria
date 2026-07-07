@@ -29,7 +29,7 @@ const { renderDelta } = require('./render-delta.js');
 const DELTA_EXPECTED_PAGES    = parseInt(process.env.DELTA_EXPECTED_PAGES || '4', 10);
 const DELTA_RESEARCH_TRIES    = parseInt(process.env.DELTA_RESEARCH_TRIES || '2', 10);
 const DELTA_CONTENT_TRIES     = parseInt(process.env.DELTA_CONTENT_TRIES || '3', 10);
-const DELTA_MAX_FIX_ITERS     = parseInt(process.env.DELTA_MAX_FIX_ITERS || '1', 10);
+const DELTA_MAX_FIX_ITERS     = parseInt(process.env.DELTA_MAX_FIX_ITERS || '2', 10);
 const DELTA_JOB_TIMEOUT_MS    = parseInt(process.env.DELTA_JOB_TIMEOUT_MS || '720000', 10);
 const DELTA_LIDER_LIMIT       = parseInt(process.env.DELTA_LIDER_LIMIT || '50', 10);
 // Fail-closed por default (producto nuevo, prompts sin curtir): solo se adjunta PDF si el juez aprueba.
@@ -295,7 +295,8 @@ Reuniones que generan decisiones documentadas con seguimiento · Dashboard unifi
 4 categorías de a dónde se va el tiempo redirigible de los líderes en ese sector. Porcentajes ENTEROS entre 5 y 60 que sumen EXACTAMENTE 100, en orden descendente.
 
 ## OKRs (página 3)
-2 OKRs (Q1 días 1-90, Q2 días 91-180) que cierren las brechas identificadas. Cada uno: objetivo + 3 KRs con "hoy" (estado plausible del prospecto, honesto: "Sin dato" o "Línea base" si no sabés), "meta" (Q1/Q2) y "referente" (benchmark del referente o cifra Delta de la whitelist). Celdas hoy/meta/referente ULTRA cortas (máx 15 chars).
+2 OKRs (Q1 días 1-90, Q2 días 91-180) que cierren las brechas identificadas. Cada uno: objetivo + 3 KRs con "hoy" (estado plausible del prospecto, honesto: "Sin dato" o "Línea base" si no sabés), "meta" (Q1/Q2) y "referente" (benchmark del referente o cifra Delta de la whitelist). Celdas hoy/meta/referente ULTRA cortas (máx 20 chars). REGLA: la META nunca puede SUPERAR el benchmark de su columna referente (prometer 85% con referente 81.7% implica que Delta garantiza más que su propio track record: prohibido; la meta debe ser igual o más conservadora que el referente citado).
+plan_intro debe mencionar los DOS trimestres (Q1 días 1-90 y Q2 días 91-180) en frases cortas, sin describir un plan de fases distinto al de la página.
 
 ## PRESUPUESTOS DE LONGITUD (chars máx, NO los superes; el sistema rechaza si te pasás)
 Apuntá a ~85% del máximo de cada campo, contando caracteres CON espacios. Ante la duda, MÁS CORTO: un campo corto es válido, uno pasado se rechaza.
@@ -347,12 +348,25 @@ SOLO este JSON (sin markdown):
   }
 
   // RED FINAL contra los largos: la IA no sabe contar caracteres (verificado 2 veces en producción,
-  // ni el acorte dirigido converge siempre). Recorte SEGURO: tira oraciones enteras del final;
-  // si ni una oración entra (campos cortos), corta en límite de palabra. El juez evalúa el texto
-  // FINAL, así que un recorte que rompa el sentido no pasa sin control.
+  // ni el acorte dirigido converge siempre). Recorte SEGURO en 3 niveles: (1) tira oraciones enteras
+  // del final; (2) prosa de una sola oración: corta en la última cláusula (coma) que entre; (3) corta
+  // en palabra. Siempre limpia la "cola coja" (artículo/preposición colgando: el juez de la corrida
+  // real cazó "en la carga sobre las." y "sin resolver en el"). El juez evalúa el texto FINAL.
+  const _COLA_COJA = /\s+(de|del|la|las|los|el|en|y|o|u|e|a|al|un|una|unos|unas|para|por|con|sin|sobre|que|se|su|sus|lo|como|entre|hacia|mas|más|menos|ni|si)$/i;
+  function _sinColaCoja(s) {
+    let t = String(s).trim();
+    for (let i = 0; i < 6; i++) {
+      const prev = t;
+      t = t.replace(_COLA_COJA, '').replace(/[\s,;:]+$/, '');
+      if (t === prev) break;
+    }
+    return t;
+  }
   function _recorteDeterminista(texto, max) {
     let t = String(texto || '').trim();
     if (t.length <= max) return t;
+    const esProsa = max >= 100;
+    // 1) oraciones enteras del final
     const oraciones = t.match(/[^.!?]+[.!?]+(?:\s+|$)/g);
     if (oraciones && oraciones.length > 1) {
       let out = '';
@@ -363,11 +377,22 @@ SOLO este JSON (sin markdown):
       out = out.trim();
       if (out.length >= Math.min(40, max * 0.5)) return out;
     }
+    // 2) prosa de una sola oración: última cláusula completa que entre
+    if (esProsa) {
+      let clausula = '';
+      for (const m of t.matchAll(/[,;:]/g)) {
+        if (m.index + 1 > max) break;
+        clausula = t.slice(0, m.index);
+      }
+      clausula = _sinColaCoja(clausula);
+      if (clausula.length >= max * 0.5) return clausula.length + 1 <= max ? clausula + '.' : clausula;
+    }
+    // 3) corte por palabra, sin cola coja
     let corte = t.slice(0, max);
     const esp = corte.lastIndexOf(' ');
     if (esp > max * 0.6) corte = corte.slice(0, esp);
-    corte = corte.replace(/[\s,;:.]+$/, '');
-    return (/[.!?]$/.test(t) && corte.length + 1 <= max) ? corte + '.' : corte;
+    corte = _sinColaCoja(corte);
+    return (esProsa && corte.length + 1 <= max) ? corte + '.' : corte;
   }
 
   // GUARDAS determinísticas sobre el copy (el juez NO puede saltarlas).
@@ -481,7 +506,7 @@ SOLO este JSON (sin markdown):
     const items = largos.map(l => ({ ruta: l.ruta, max: l.max, texto: String(_getRuta(c, l.ruta) || '') }));
     const resp = await callClaude({
       model: MODEL_DELTA_GEN,
-      system: 'Sos el editor de textos de Delta Teams. Recibís campos de un documento que EXCEDEN su máximo de caracteres. Reescribí CADA UNO por debajo de su "max" (apuntá al 85% del max, contando caracteres CON espacios), conservando el sentido y el dato principal. Reglas duras: sin em dashes, sin montos de dinero nuevos, sin DOS/Rocks/L10/EOS/Traction, español LATAM neutro sin voseo. Respondé SOLO un JSON de la forma {"<ruta>": "<texto nuevo>", ...} con EXACTAMENTE las mismas rutas que recibiste.',
+      system: 'Sos el editor de textos de Delta Teams. Recibís campos de un documento que EXCEDEN su máximo de caracteres. Reescribí CADA UNO por debajo de su "max" (apuntá al 85% del max, contando caracteres CON espacios), conservando el sentido y el dato principal. IMPORTANTE: REESCRIBÍ, no cortes. La salida debe ser texto completo con oraciones terminadas y sentido propio. PROHIBIDO devolver frases cortadas a la mitad, números partidos (si el original dice "7.67%" jamás puede quedar "67%"; si dice "3.000" jamás "000") o texto que empiece en mitad de una idea. Preferí ELIMINAR una idea entera antes que mutilar una frase. Reglas duras: sin em dashes, sin montos de dinero nuevos, sin DOS/Rocks/L10/EOS/Traction, español LATAM neutro sin voseo. Respondé SOLO un JSON de la forma {"<ruta>": "<texto nuevo>", ...} con EXACTAMENTE las mismas rutas que recibiste.',
       messages: [{ role: 'user', content: JSON.stringify(items) }],
       maxTokens: 3000,
     });
