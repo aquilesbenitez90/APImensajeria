@@ -3526,6 +3526,9 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
     if (test === true || String(test).toLowerCase() === 'on' || String(process.env.TEST_MODE || '').toLowerCase() === 'on') {
       const _emp = empresa || dominio || 'Empresa de prueba';
       console.log(`[TEST] Job ${jobId}: MODO PRUEBA n8n — NO se llama Claude ni el MCP, devuelvo un PDF falso (0 tokens, $0).`);
+      // TEST_DELAY_MS (opcional): simula un job lento para load-testear la cola de concurrencia sin gastar.
+      const _tdelay = parseInt(process.env.TEST_DELAY_MS || '0', 10) || 0;
+      if (_tdelay > 0) await new Promise(r => setTimeout(r, _tdelay));
       const pdfB64 = await _pdfDePrueba(_emp);
       jobs.set(jobId, {
         status: 'ok', test: true, apto_envio: true,
@@ -3742,6 +3745,26 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000);
 
+// ===== COLA CON LÍMITE DE CONCURRENCIA =====
+// Sin esto, N diagnósticos simultáneos = N pipelines en paralelo → se pasa el tope de 60 req/min del MCP
+// (cada reporte ~40 llamadas) y se acumulan instancias de Chromium en RAM (riesgo de OOM y caída del server).
+// Con la cola, solo MAX_CONCURRENT_JOBS corren a la vez; el resto espera turno con status 'queued'. NADIE recibe
+// error por carga: la web/n8n ya hacen polling y el job arranca cuando se libera un slot. El timeout global de
+// cada job arranca cuando EMPIEZA a procesar (dentro de `run`), no mientras espera en la cola.
+const MAX_CONCURRENT_JOBS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_JOBS || '2', 10));
+let _jobsActivos = 0;
+const _cola = [];   // [{ jobId, run }] — pendientes de arrancar (FIFO)
+function _dispatchCola(){
+  while (_jobsActivos < MAX_CONCURRENT_JOBS && _cola.length) {
+    const item = _cola.shift();
+    const prev = jobs.get(item.jobId);
+    if (!prev) continue;   // el job expiró/desapareció del Map antes de arrancar → saltar
+    _jobsActivos++;
+    if (prev.status === 'queued') jobs.set(item.jobId, { ...prev, status: 'processing', startedAt: Date.now() });
+    Promise.resolve().then(item.run).catch(()=>{}).finally(() => { _jobsActivos--; _dispatchCola(); });
+  }
+}
+
 app.post('/generar', (req, res) => {
   // GATE DE LA LANDING (uso privado): si LANDING_KEY está seteada (solo en el servicio de la landing,
   // NO en el de producción que usa n8n), exigimos la clave en el header. Si no está seteada, no gatea
@@ -3767,51 +3790,55 @@ app.post('/generar', (req, res) => {
   }
 
   const jobId = crypto.randomUUID();
-  jobs.set(jobId, { status: 'processing', createdAt: Date.now() });
+  // ¿arranca ya o va a la cola? Si hay slot libre (menos de MAX corriendo Y nada esperando), arranca; si no, 'queued'.
+  const arrancaYa = _jobsActivos < MAX_CONCURRENT_JOBS && _cola.length === 0;
+  jobs.set(jobId, { status: arrancaYa ? 'processing' : 'queued', createdAt: Date.now() });
   if (key) enProgreso.set(key, jobId);
-  res.status(202).json({ jobId, status: 'processing' });
+  res.status(202).json({ jobId, status: arrancaYa ? 'processing' : 'queued', en_cola: !arrancaYa, por_delante: arrancaYa ? 0 : _cola.length });
 
-  // CINTURÓN GLOBAL: cualquier await sin timeout (presente o futuro) podía dejar el job en "processing"
-  // para siempre; el TTL del Map limpia el registro a 1h pero NO mata el promise de fondo, e infla
-  // jobs_activos. Promise.race contra JOB_TIMEOUT_MS garantiza que el job SIEMPRE cierra.
-  // No rompe el flujo normal: los jobs que terminan antes resuelven primero y este timeout queda inerte.
-  // procesar() maneja sus propios errores internamente (status:'error'); este race solo cubre el cuelgue total.
-  // 12 min (no 8): con la fase de señales web (~1-2 min) + MCP lento, el job legítimamente tarda más y el
-  // belt lo marcaba error ANTES de terminar (el PDF salía en background pero la landing ya mostraba timeout).
-  // El async NO está atado a los 300s de Railway (eso es para requests sync), así que 12 min es seguro.
-  const JOB_TIMEOUT_MS = parseInt(process.env.JOB_TIMEOUT_MS || '720000', 10);
-  let jobTimer;
-  const timeoutGlobal = new Promise((resolve) => {
-    jobTimer = setTimeout(() => {
-      console.error(`[Job ${jobId}] TIMEOUT GLOBAL (>${JOB_TIMEOUT_MS}ms). Se marca error; el promise de fondo puede seguir, pero el job ya no queda zombie.`);
-      jobs.set(jobId, { status: 'error', error: 'timeout global del job (>8min)', finishedAt: Date.now() });
-      resolve();
-    }, JOB_TIMEOUT_MS);
-  });
-
-  Promise.race([
-    procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug, idioma, test }),
-    timeoutGlobal
-  ])
-  // CATCH DEFENSIVO: procesar() maneja sus errores internamente (try/catch -> status:'error'),
-  // pero si alguna vez rechaza (o rechaza el rewrite de países / seleccionarConRetry sin atrapar),
-  // sin este .catch sería un unhandledRejection. Marcamos el job en error y NO re-lanzamos.
-  .catch((err) => {
-    console.error(`[Job ${jobId}] Rechazo no atrapado en el path async (lo absorbo, no tumbo el server):`, err?.stack || err);
-    const prev = jobs.get(jobId);
-    if (!prev || prev.status === 'processing') {
-      jobs.set(jobId, { status: 'error', error: err?.message || String(err), finishedAt: Date.now() });
-    }
-  })
-  .finally(() => {
-    clearTimeout(jobTimer);
-    if (key && enProgreso.get(key) === jobId) enProgreso.delete(key);
-  });
+  // EL TRABAJO REAL: se ejecuta cuando la cola le da un slot (máx MAX_CONCURRENT_JOBS a la vez). El CINTURÓN
+  // GLOBAL (Promise.race vs JOB_TIMEOUT_MS) arranca acá dentro, o sea cuando el job EMPIEZA a procesar, no
+  // mientras espera en la cola: así un job que esperó su turno tiene sus 12 min completos. procesar() maneja
+  // sus errores internamente (status:'error'); este race solo cubre el cuelgue total. El async NO está atado a
+  // los 300s de Railway (eso es para requests sync), así que 12 min es seguro.
+  const run = () => {
+    const JOB_TIMEOUT_MS = parseInt(process.env.JOB_TIMEOUT_MS || '720000', 10);
+    let jobTimer;
+    const timeoutGlobal = new Promise((resolve) => {
+      jobTimer = setTimeout(() => {
+        console.error(`[Job ${jobId}] TIMEOUT GLOBAL (>${JOB_TIMEOUT_MS}ms). Se marca error; el promise de fondo puede seguir, pero el job ya no queda zombie.`);
+        jobs.set(jobId, { status: 'error', error: 'timeout global del job', finishedAt: Date.now() });
+        resolve();
+      }, JOB_TIMEOUT_MS);
+    });
+    return Promise.race([
+      procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug, idioma, test }),
+      timeoutGlobal
+    ])
+    .catch((err) => {   // CATCH DEFENSIVO: si procesar() rechaza sin atrapar, no tumbamos el server.
+      console.error(`[Job ${jobId}] Rechazo no atrapado en el path async (lo absorbo, no tumbo el server):`, err?.stack || err);
+      const prev = jobs.get(jobId);
+      if (!prev || prev.status === 'processing') {
+        jobs.set(jobId, { status: 'error', error: err?.message || String(err), finishedAt: Date.now() });
+      }
+    })
+    .finally(() => {
+      clearTimeout(jobTimer);
+      if (key && enProgreso.get(key) === jobId) enProgreso.delete(key);
+    });
+  };
+  _cola.push({ jobId, run });   // encolar y despachar: arranca ya si hay slot, o espera turno.
+  _dispatchCola();
 });
 
 app.get('/resultado/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'jobId no encontrado o expirado' });
+  // Si está esperando en la cola, agregamos cuántos tiene por delante (para mostrarlo en el front).
+  if (job.status === 'queued') {
+    const idx = _cola.findIndex(q => q.jobId === req.params.jobId);
+    return res.json({ ...job, en_cola: true, por_delante: idx < 0 ? 0 : idx });
+  }
   res.json(job);
 });
 
@@ -4010,7 +4037,7 @@ app.get('/health', (req, res) => {
   // jobs_activos = jobs corriendo AHORA (termómetro de zombies); jobs_en_cache = total en el Map
   // (incluye terminados ok/error hasta el barrido de 1h). jobs.size mezclaba ambos y confundía.
   let activos = 0; for (const j of jobs.values()) if (j.status === 'processing') activos++;
-  res.json({ ok: true, jobs_activos: activos, jobs_en_cache: jobs.size, cuentas: NUM_CUENTAS, signals_mode: SIGNALS_MODE });
+  res.json({ ok: true, jobs_activos: activos, jobs_procesando: _jobsActivos, en_cola: _cola.length, max_concurrent: MAX_CONCURRENT_JOBS, jobs_en_cache: jobs.size, cuentas: NUM_CUENTAS, signals_mode: SIGNALS_MODE });
 });
 
 // Descarga del log de resultados (JSONL). ?tail=N devuelve solo las últimas N líneas.

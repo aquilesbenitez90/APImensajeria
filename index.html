@@ -158,6 +158,21 @@ function startProgress(startTs){
 }
 function stopProgress(){ clearInterval(timer); clearInterval(msgTimer); }
 
+// Estado de cola: mientras el job espera turno (status 'queued'), mostramos cuántos tiene por delante.
+let _enProgreso = false;   // ¿ya arrancó el cronómetro de "generando"?
+function mostrarCola(n){
+  $('pmsg').textContent = (n > 0)
+    ? 'En cola: hay ' + n + ' análisis antes del tuyo. Arranca solo en cuanto se libere un lugar…'
+    : 'Sos el próximo en la cola. Arrancando en instantes…';
+  $('ptime').textContent = 'En espera';
+}
+// Aplica el estado del job a la UI de progreso. Devuelve true si es TERMINAL (ok/error), false si hay que seguir esperando.
+function aplicarEstado(job, ts){
+  if(job.status === 'queued'){ _enProgreso = false; stopProgress(); mostrarCola(job.por_delante || 0); return false; }
+  if(job.status === 'processing'){ if(!_enProgreso){ _enProgreso = true; startProgress(ts); } return false; }
+  return true;
+}
+
 function mostrarOk(jobId, empresa){
   $('okEmp').textContent = empresa || '';
   $('dlLink').setAttribute('href', '/pdf/'+jobId);
@@ -186,14 +201,15 @@ async function generar(){
   }catch(e){ $('err').textContent = 'Error de conexión. Reintentá.'; return; }
 
   saveJob(jobId, dominio);
-  show('stageProg'); startProgress();
+  show('stageProg');
+  aplicarEstado(j);          // según la respuesta de /generar: muestra la cola o arranca el progreso
   poll(jobId);
 }
 
 async function poll(jobId){
-  const DEADLINE = Date.now() + 9*60*1000; // 9 min
+  const DEADLINE = Date.now() + 20*60*1000; // 20 min (la cola puede sumar espera antes de arrancar)
   while(Date.now() < DEADLINE){
-    await new Promise(r=>setTimeout(r, 5000));
+    await new Promise(r=>setTimeout(r, 4000));
     let job;
     try{
       const r = await fetch('/resultado/'+jobId);
@@ -201,7 +217,8 @@ async function poll(jobId){
       if(!r.ok) continue;
       job = await r.json();
     }catch(e){ continue; }
-    if(!job || job.status === 'processing') continue;
+    if(!job) continue;
+    if(!aplicarEstado(job)) continue;   // 'queued' → muestra la cola | 'processing' → progreso; en ambos, seguir esperando
     stopProgress();
     if(job.status === 'ok' && job.paginas){
       mostrarOk(jobId, job.empresa);   // dejamos el job guardado: si reabrís dentro de la hora, podés volver a descargar
@@ -226,9 +243,9 @@ async function init(){
     const r = await fetch('/resultado/'+saved.jobId);
     if(r.status === 404){ clearJob(); show('stageForm'); return; }
     const job = await r.json();
-    if(job.status === 'processing'){
+    if(job.status === 'processing' || job.status === 'queued'){
       if(saved.dominio) $('dominio').value = saved.dominio;
-      show('stageProg'); startProgress(saved.ts); poll(saved.jobId); return;
+      show('stageProg'); aplicarEstado(job, job.status === 'processing' ? saved.ts : undefined); poll(saved.jobId); return;
     }
     if(job.status === 'ok' && job.paginas){ mostrarOk(saved.jobId, job.empresa); return; }
     clearJob(); show('stageForm');
