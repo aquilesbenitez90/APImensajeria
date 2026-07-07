@@ -368,10 +368,39 @@ function _costoTotal(st){ return ['gen','signals','judge','fix'].reduce((c,e)=> 
 // Si no, escribe junto al server y se pierde al redeploy.
 // ---------------------------------------------------------------------------
 const RESULT_LOG = process.env.RESULT_LOG_PATH || path.join(__dirname, 'resultados.jsonl');
+// GOOGLE SHEET (opcional): si SHEET_WEBHOOK_URL apunta a un Web App de Google Apps Script, mandamos UNA fila
+// por análisis (empresa, dominio, resultado, costo aprox). Fire-and-forget: NO bloquea el job ni lo rompe si
+// falla. Si el env no está seteado → no-op. Los jobs de TEST no llegan acá (cortan antes de _registrarResultado).
+const SHEET_WEBHOOK_URL = process.env.SHEET_WEBHOOK_URL || '';
+function _enviarASheet(rec){
+  if(!SHEET_WEBHOOK_URL) return;
+  try{
+    const fila = {
+      fecha: rec.ts,
+      empresa: rec.empresa || '',
+      dominio: rec.dominio || '',
+      estado: rec.status || '',
+      veredicto: rec.veredicto || '',
+      score: rec.score ?? '',
+      apto_envio: rec.apto_envio ? 'SI' : 'NO',
+      cards: rec.cards_validas ?? '',
+      paginas: rec.paginas ?? '',
+      motivo: rec.motivo_rechazo || '',
+      costo_usd: rec.costo ?? '',
+      jobId: rec.jobId || ''
+    };
+    const ctrl = new AbortController();
+    const _t = setTimeout(() => ctrl.abort(), 10000);
+    fetch(SHEET_WEBHOOK_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(fila), signal: ctrl.signal })
+      .catch(e => console.warn('[SHEET] no pude registrar en el Google Sheet:', e.message))
+      .finally(() => clearTimeout(_t));
+  }catch(e){ console.warn('[SHEET] error:', e.message); }
+}
 function _registrarResultado(rec){
   try{
     fs.appendFile(RESULT_LOG, JSON.stringify(rec) + '\n', e => { if(e) console.warn('[LOG] no pude escribir resultado:', e.message); });
   }catch(e){ console.warn('[LOG] error registrando resultado:', e.message); }
+  _enviarASheet(rec);   // además, una fila en el Google Sheet (si SHEET_WEBHOOK_URL está seteado)
 }
 // Motivo de rechazo canónico y AGREGABLE (para contar patrones de falla en resultados.jsonl).
 // Devuelve el PRIMER motivo determinístico que disparó, en orden de prioridad:
