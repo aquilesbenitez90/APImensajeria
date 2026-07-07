@@ -26,22 +26,24 @@ Verificado: reproduce 16/16 cifras del PDF de ejemplo (Optimissa México, 8 líd
 | `HEADLINE` | 110 | |
 | `SUBHEADLINE` | 220 | |
 | `DIAGNOSIS_HEADING` | 60 | |
-| `DIAGNOSIS_BODY` | 520 | Patrón de industria, JAMÁS afirmaciones sobre el CEO/contacto |
-| `BENCHMARK_NOTA` | 160 | "Estimación basada en benchmark operativo para [industria] en [país]" |
-| `INEFF_1..4_TITLE` / `_DESC` | 55 / 220 | Elegir 4 fuentes de fricción distintas (lista del skill) |
-| `TIMEBARS_HEADING` | 70 | |
+| `DIAGNOSIS_BODY` | 560 | Patrón de industria, JAMÁS afirmaciones sobre el CEO/contacto |
+| `BENCHMARK_NOTA` | 190 | "Estimación basada en..."; puede citar el costo hora del supuesto |
+| `INEFF_1..4_TITLE` / `_DESC` | 55 / 240 | Elegir 4 fuentes de fricción distintas (lista del skill) |
+| `TIMEBARS_HEADING` | 75 | |
 | `BAR_1..4_LABEL` / `_PCT` | 45 / entero | PCT: enteros 5-60, **suma exacta 100** (distribución ilustrativa) |
-| `REF_NARRATIVA` | 480 | Solo hechos con fuente + espejo con el prospecto |
+| `REF_NARRATIVA` | 520 | Solo hechos con fuente + espejo con el prospecto |
 | `GAP_1..6_DIM` / `_PROSPECT` / `_REF` | 30 / 40 / 45 | Lado prospecto = observado o patrón declarado; lado referente = investigado o benchmark |
-| `GAP_CLOSING_BODY` | 440 | |
-| `PLAN_INTRO` | 220 | |
+| `GAP_CLOSING_BODY` | 480 | |
+| `PLAN_INTRO` | 260 | |
 | `OKR_1..2_OBJETIVO` | 80 | |
-| `OKR_x_KR_1..3` | 70 | |
-| `OKR_x_HOY/META/REF_1..3` | 15 | Cifras "Referente" solo de whitelist Delta o benchmark citado |
-| `BENEFIT_1..2_TITLE` / `_DESC` | 55 / 150 | Del catálogo de beneficios del skill |
-| `PROJ_NOTA` | 320 | Debe mencionar el supuesto de crecimiento 12% |
-| `QUOTE` | 260 | Sin métricas inventadas |
-| `CTA_HEADING` / `CTA_BODY` | 90 / 200 | Body siempre "con Camila", nunca el nombre del prospecto |
+| `OKR_x_KR_1..3` | 80 | |
+| `OKR_x_HOY/META/REF_1..3` | 20 | Cifras "Referente" solo de whitelist Delta o benchmark citado |
+| `BENEFIT_1..2_TITLE` / `_DESC` | 55 / 170 | Del catálogo de beneficios del skill |
+| `PROJ_NOTA` | 340 | Debe mencionar el supuesto de crecimiento 12% |
+| `QUOTE` | 280 | Sin métricas inventadas |
+| `CTA_HEADING` / `CTA_BODY` | 90 / 220 | Body siempre "con Camila", nunca el nombre del prospecto |
+
+**Cómo se garantizan los largos** (aprendizaje de producción: la IA no sabe contar caracteres): 1) el prompt pide apuntar al 85% del máximo; 2) si hay campos pasados, un pase de **acorte dirigido** reescribe con IA solo esos campos; 3) lo que siga pasado se **recorta determinístico** (oraciones enteras del final, o límite de palabra en campos cortos). Los largos ya no pueden tumbar un job. Límites recalibrados con la holgura real de cada página; el guardián definitivo del desborde es el PDF de 4 páginas exactas.
 
 Fijo en template (la IA no interviene): logo SVG, headers de página, footer, etiquetas del hero, headings fijos, badges Q1/Q2, labels de la tabla de proyección, botón y URL del CTA (calendly de Camila).
 
@@ -50,7 +52,7 @@ Fijo en template (la IA no interviene): logo SVG, headers de página, footer, et
 1. **Presupuestos de longitud** por campo (tabla de arriba) → recorte o re-generación.
 2. **`_sinGuiones`**: sin em dashes (—) en ningún campo (ya existe en server.js).
 3. **Framing TEPI**: regex case-sensitive `\b(DOS|Rocks|L10|People Analyzer|EOS|Traction)\b` → rechazo. Ojo: "DOS" solo en mayúsculas ("dos" en español es válido).
-4. **Sin montos en copy IA**: `$\d` en campos de IA → rechazo salvo que coincida exactamente con un monto calculado.
+4. **Sin montos en copy IA**: `$\d` en campos de IA → rechazo salvo que coincida con un monto calculado, una métrica del referente o el costo hora del supuesto (y su rango de benchmark).
 5. **Nombre del contacto en `DIAGNOSIS_BODY`** → rechazo (regla 3 del skill).
 6. **Bars**: 4 enteros en [5,60] que suman 100.
 7. **Cantidades exactas**: 4 fricciones, 4 bars, 4 métricas de referente, 6 gaps, 2 OKRs × 3 KRs, 2 benefits.

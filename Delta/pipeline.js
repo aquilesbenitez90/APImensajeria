@@ -21,7 +21,7 @@ const express = require('express');
 const crypto = require('crypto');
 const path = require('path');
 const {
-  numerosParaTemplate, clampCostoHora, clampHorasPerdidas, liderazgoEstimado,
+  numerosParaTemplate, clampCostoHora, clampHorasPerdidas, liderazgoEstimado, _rangoCostoHora,
 } = require('./calculo.js');
 const { renderDelta } = require('./render-delta.js');
 
@@ -47,15 +47,16 @@ const DELTA_SHEET_TAB   = process.env.DELTA_SHEET_TAB || 'Delta';
 const CIFRAS_DELTA_WHITELIST = ['61.4%', '81.7%', '-30%', '+20-40%', '90 días'];
 
 // ── Presupuestos de longitud (chars máx por campo; ver Delta/SCHEMA.md) ─────
-// Calibrados contra el PDF de ejemplo aprobado (Optimissa): sus textos reales caben en
-// 4 páginas, así que los límites los envuelven con un margen chico. Si se achica el
-// template, recalibrar acá y en el prompt de CONTENT.
+// Calibrados con la holgura REAL de cada página (las 4 tenían aire de sobra en el preview);
+// el guardián definitivo del desborde es el PDF de 4 páginas exactas, no estos números.
+// Producción mostró que la IA no sabe contar chars: los límites son la meta, y el recorte
+// determinístico (_recorteDeterminista) garantiza que SIEMPRE se cumplen.
 const LIMITES = {
-  HEADLINE: 110, SUBHEADLINE: 220, DIAGNOSIS_HEADING: 60, DIAGNOSIS_BODY: 520, BENCHMARK_NOTA: 160,
-  INEFF_TITLE: 55, INEFF_DESC: 220, TIMEBARS_HEADING: 70, BAR_LABEL: 45,
-  REF_NARRATIVA: 480, GAP_DIM: 30, GAP_PROSPECT: 40, GAP_REF: 45, GAP_CLOSING_BODY: 440,
-  PLAN_INTRO: 220, OKR_OBJETIVO: 80, OKR_KR: 70, OKR_CELDA: 15,
-  BENEFIT_TITLE: 55, BENEFIT_DESC: 150, PROJ_NOTA: 320, QUOTE: 260, CTA_HEADING: 90, CTA_BODY: 200,
+  HEADLINE: 110, SUBHEADLINE: 240, DIAGNOSIS_HEADING: 60, DIAGNOSIS_BODY: 560, BENCHMARK_NOTA: 190,
+  INEFF_TITLE: 55, INEFF_DESC: 240, TIMEBARS_HEADING: 75, BAR_LABEL: 45,
+  REF_NARRATIVA: 520, GAP_DIM: 30, GAP_PROSPECT: 40, GAP_REF: 45, GAP_CLOSING_BODY: 480,
+  PLAN_INTRO: 260, OKR_OBJETIVO: 80, OKR_KR: 80, OKR_CELDA: 20,
+  BENEFIT_TITLE: 55, BENEFIT_DESC: 170, PROJ_NOTA: 340, QUOTE: 280, CTA_HEADING: 90, CTA_BODY: 220,
 };
 
 // Framing TEPI: metodología interna PROHIBIDA en copy externo. OJO: "DOS", "Rocks" y "EOS"
@@ -276,7 +277,7 @@ Sos el redactor comercial de Delta Teams. Recibís research verificado + montos 
 1. FRAMING TEPI: PROHIBIDO escribir DOS, Rocks, L10, People Analyzer, EOS o Traction. Usá: "infraestructura de ejecución", "sistema de reuniones estructurado", "visibilidad del equipo", "objetivos con dueño y seguimiento", "decisiones con trazabilidad".
 2. SIN EM DASHES: prohibido "—". Usá coma, punto o reestructurá.
 3. DIAGNÓSTICO = PATRÓN DE INDUSTRIA: diagnosis.body habla del patrón del sector ("Las empresas de X en LATAM enfrentan..."), JAMÁS afirma conductas del CEO/founder/contacto específico. No nombres a ninguna persona.
-4. MONTOS: NO escribas NINGÚN monto de dinero. Los montos ya están calculados y el sistema los pone en el template. Si necesitás referirte al costo, hacelo sin cifra ("lo que eso cuesta por año"). Única excepción: podés citar métricas del REFERENTE que vengan del research (con su valor textual).
+4. MONTOS: NO escribas NINGÚN monto de dinero. Los montos ya están calculados y el sistema los pone en el template. Si necesitás referirte al costo, hacelo sin cifra ("lo que eso cuesta por año"). Únicas excepciones: métricas del REFERENTE que vengan del research (con su valor textual) y el costo hora del supuesto (te lo doy en el contexto), que podés citar en benchmark_nota.
 5. ESPAÑOL LATAM NEUTRO: sin voseo argentino. Términos del sector (OKRs, KPIs, Scorecard, accountability) quedan en inglés.
 6. CTA: cta.body invita a "20 minutos con Camila". NUNCA el nombre del prospecto en el CTA.
 7. HONESTIDAD DE DATOS: usá SOLO hechos del research. Nada de años, cantidades, certificaciones o nombres que no estén ahí. benchmark_nota SIEMPRE arranca con "Estimación basada en..." y si el liderazgo vino estimado (te lo dice el contexto), lo aclara ("liderazgo estimado por tamaño").
@@ -298,7 +299,7 @@ Reuniones que generan decisiones documentadas con seguimiento · Dashboard unifi
 
 ## PRESUPUESTOS DE LONGITUD (chars máx, NO los superes; el sistema rechaza si te pasás)
 Apuntá a ~85% del máximo de cada campo, contando caracteres CON espacios. Ante la duda, MÁS CORTO: un campo corto es válido, uno pasado se rechaza.
-headline 110 · subheadline 220 · diagnosis.heading 60 · diagnosis.body 520 · benchmark_nota 160 · ineficiencias title 55 / desc 220 · timebars.heading 70 / bar label 45 · ref_narrativa 480 · gaps dim 30 / prospect 40 / ref 45 · gap_closing 440 · plan_intro 220 · okr objetivo 80 / kr 70 / celdas 15 · benefits title 55 / desc 150 · proj_nota 320 · quote 260 · cta.heading 90 / cta.body 200.
+headline 110 · subheadline 240 · diagnosis.heading 60 · diagnosis.body 560 · benchmark_nota 190 · ineficiencias title 55 / desc 240 · timebars.heading 75 / bar label 45 · ref_narrativa 520 · gaps dim 30 / prospect 40 / ref 45 · gap_closing 480 · plan_intro 260 · okr objetivo 80 / kr 80 / celdas 20 · benefits title 55 / desc 170 · proj_nota 340 · quote 280 · cta.heading 90 / cta.body 220.
 
 ## SALIDA
 SOLO este JSON (sin markdown):
@@ -343,6 +344,30 @@ SOLO este JSON (sin markdown):
     let a = o;
     for (let i = 0; i < ps.length - 1; i++) { if (a == null) return; a = a[ps[i]]; }
     if (a != null) a[ps[ps.length - 1]] = v;
+  }
+
+  // RED FINAL contra los largos: la IA no sabe contar caracteres (verificado 2 veces en producción,
+  // ni el acorte dirigido converge siempre). Recorte SEGURO: tira oraciones enteras del final;
+  // si ni una oración entra (campos cortos), corta en límite de palabra. El juez evalúa el texto
+  // FINAL, así que un recorte que rompa el sentido no pasa sin control.
+  function _recorteDeterminista(texto, max) {
+    let t = String(texto || '').trim();
+    if (t.length <= max) return t;
+    const oraciones = t.match(/[^.!?]+[.!?]+(?:\s+|$)/g);
+    if (oraciones && oraciones.length > 1) {
+      let out = '';
+      for (const o of oraciones) {
+        if ((out + o).trim().length > max) break;
+        out += o;
+      }
+      out = out.trim();
+      if (out.length >= Math.min(40, max * 0.5)) return out;
+    }
+    let corte = t.slice(0, max);
+    const esp = corte.lastIndexOf(' ');
+    if (esp > max * 0.6) corte = corte.slice(0, esp);
+    corte = corte.replace(/[\s,;:.]+$/, '');
+    return (/[.!?]$/.test(t) && corte.length + 1 <= max) ? corte + '.' : corte;
   }
 
   // GUARDAS determinísticas sobre el copy (el juez NO puede saltarlas).
@@ -435,9 +460,11 @@ SOLO este JSON (sin markdown):
       if (c.diagnosis && rePila.test(String(c.diagnosis.body || ''))) p.push(`diagnosis.body nombra al contacto (${pila}): el diagnóstico habla del patrón de industria, no de la persona`);
       if (c.cta && (rePila.test(String(c.cta.heading || '')) || rePila.test(String(c.cta.body || '')))) p.push(`el CTA nombra al prospecto (${pila}): el CTA es siempre con Camila`);
     }
-    // Montos: la IA no escribe dinero. Se permiten SOLO strings de montos calculados o métricas del referente.
+    // Montos: la IA no escribe dinero. Se permiten SOLO montos calculados, métricas del referente
+    // y el costo hora del supuesto con su rango de benchmark (citarlo en benchmark_nota es honesto).
     const permitidos = new Set(Object.values(ctx.nums).map(v => String(v).replace(/[^0-9]/g, '')));
     for (const m of (ctx.montosReferente || [])) permitidos.add(String(m).replace(/[^0-9]/g, ''));
+    for (const m of (ctx.montosSupuestos || [])) permitidos.add(String(m).replace(/[^0-9]/g, ''));
     for (const [ruta, t] of textos) {
       for (const m of String(t).matchAll(/\$\s?([\d][\d.,]*)/g)) {
         const digitos = m[1].replace(/[^0-9]/g, '');
@@ -485,11 +512,17 @@ SOLO este JSON (sin markdown):
       try { c = _sanearDeep(_parseJSON(_textoDe(resp), 'CONTENT')); }
       catch (e) { feedback = `\n\nEL INTENTO ANTERIOR FALLÓ: ${e.message}. Devolvé SOLO el JSON pedido.`; continue; }
       let problemas = validarContenido(c, ctx);
-      // Si TODOS los problemas son de largo → acorte dirigido (hasta 2 pases) en vez de regenerar.
-      for (let pase = 1; pase <= 2 && problemas.length && problemas._largos && problemas.length === problemas._largos.length; pase++) {
-        console.warn(`[DELTA:CONTENT] ${problemas.length} campos exceden el largo → acorte dirigido ${pase}/2 (${problemas._largos.map(l => l.ruta).join(', ')})`);
-        try { c = await acortarCampos(c, problemas._largos); }
-        catch (e) { console.warn('[DELTA:CONTENT] acorte dirigido falló:', e.message); break; }
+      const _soloLargos = (pr) => pr.length && pr._largos && pr.length === pr._largos.length;
+      // Si TODOS los problemas son de largo: 1 pase de acorte con IA (calidad)...
+      if (_soloLargos(problemas)) {
+        console.warn(`[DELTA:CONTENT] ${problemas.length} campos exceden el largo → acorte dirigido (${problemas._largos.map(l => l.ruta).join(', ')})`);
+        try { c = await acortarCampos(c, problemas._largos); problemas = validarContenido(c, ctx); }
+        catch (e) { console.warn('[DELTA:CONTENT] acorte dirigido falló:', e.message); }
+      }
+      // ...y lo que siga pasado se recorta determinístico: los largos ya NO pueden tumbar el job.
+      if (_soloLargos(problemas)) {
+        console.warn(`[DELTA:CONTENT] recorte determinístico final de ${problemas._largos.length} campos (${problemas._largos.map(l => l.ruta).join(', ')})`);
+        for (const l of problemas._largos) _setRuta(c, l.ruta, _recorteDeterminista(String(_getRuta(c, l.ruta) || ''), l.max));
         problemas = validarContenido(c, ctx);
       }
       if (!problemas.length) return c;
@@ -645,10 +678,12 @@ Respondé SOLO este JSON:
         const nums = numerosParaTemplate({ headcountLeadership: liderazgo.cantidad, costoHora, horasPerdidas });
         console.log(`[DELTA:CALC] ${liderazgo.cantidad} líderes (${liderazgo.fuente}) × $${costoHora}/h × ${horasPerdidas}h → ${nums.INEFF_COST_ANNUAL}/año`);
 
+        const rangoBenchmark = _rangoCostoHora(research.company.country, research.company.industry);
         const ctx = {
           ...ctxBase, headcountTotal, liderazgo, nums,
           supuestos: { costoHora, horasPerdidas },
           montosReferente: (research.referente.metricas || []).map(m => m && m.value).filter(Boolean),
+          montosSupuestos: [costoHora, rangoBenchmark.min, rangoBenchmark.max],
         };
 
         // 5-7. CONTENT → guardas → render → páginas (reintento si el PDF no da 4 páginas exactas)
@@ -811,6 +846,6 @@ Respondé SOLO este JSON:
   });
 
   // Helpers puros expuestos para test (convención del repo)
-  router._interno = { validarContenido, validarResearch, resolverLiderazgo, armarData, _empKeyDelta, _fechaEs, _getRuta, _setRuta, LIMITES };
+  router._interno = { validarContenido, validarResearch, resolverLiderazgo, armarData, _empKeyDelta, _fechaEs, _getRuta, _setRuta, _recorteDeterminista, LIMITES };
   return router;
 };
