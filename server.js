@@ -4025,6 +4025,27 @@ app.get('/resultados-log', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ===========================================================================
+// DELTA TEAMS — Diagnóstico ROI (segundo producto, módulo aparte en Delta/).
+// Mismo playbook que el GTM (research real → cálculo determinístico → copy con
+// guardas → juez fail-closed), otra marca y otro template. Acá SOLO se inyectan
+// las dependencias compartidas y se monta el router (/delta/generar, /delta/resultado,
+// /delta/pdf, /delta/health). El try/catch garantiza que un problema en Delta
+// NUNCA tumba el servicio GTM de IBT que corre en producción.
+// ===========================================================================
+try {
+  const crearDeltaRouter = require('./Delta/pipeline.js');
+  app.use('/delta', crearDeltaRouter({
+    callClaude, callMCP, resolverCliente, renderizarPdf, contarPaginas,
+    statsALS: _statsALS, nuevoStats: _nuevoStats, setStage: _setStage, logTokenCost,
+    sinGuiones: _sinGuiones, extraerJSON: _extraerJSON, parsePeople: _parsePeople,
+    MODEL_GEN, MODEL_JUDGE, WEB_SEARCH_TOOL
+  }));
+  console.log('[DELTA] Router montado en /delta (generar, resultado, pdf, health).');
+} catch (e) {
+  console.error('[DELTA] No se pudo montar el router (el GTM de IBT sigue normal):', e.message);
+}
+
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT} (NUM_CUENTAS=${NUM_CUENTAS}, EXPECTED_PAGES=${EXPECTED_PAGES||'no validar'})`));

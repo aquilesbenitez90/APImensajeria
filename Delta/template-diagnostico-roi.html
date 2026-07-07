@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diagnóstico ROI Personalizado: Optimissa México</title>
+<link href="https://fonts.googleapis.com/css2?family=Josefin+Sans:wght@400;600;700&family=Nunito+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Nunito Sans', sans-serif;
+    background: #fff;
+    color: #374151;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  /* ─── PAGE ─── */
+  .page {
+    width: 794px;
+    min-height: 1123px;
+    position: relative;
+    background: #fff;
+    padding-bottom: 52px;
+    page-break-after: always;
+    overflow: hidden;
+  }
+
+  /* ─── HEADER ─── */
+  .header {
+    background: #084fc1;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 32px;
+  }
+  .header-logo svg { display: block; }
+  .header-label {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 11px;
+    color: #fff;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+
+  /* ─── FOOTER ─── */
+  .footer {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    border-top: 1px solid #E5E7EB;
+    padding: 10px 32px;
+    text-align: center;
+    font-size: 10px;
+    color: #374151;
+  }
+
+  /* ─── PAGE CONTENT ─── */
+  .content {
+    padding: 24px 32px 0;
+  }
+
+  /* ─── HERO BLOCK ─── */
+  .hero {
+    background: #084fc1;
+    border-radius: 6px;
+    padding: 22px 28px 20px;
+    color: #fff;
+    margin-bottom: 16px;
+  }
+  .hero-headline {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 20px;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.25;
+    margin-bottom: 6px;
+  }
+  .hero-subheadline {
+    font-size: 12px;
+    color: rgba(255,255,255,0.85);
+    margin-bottom: 10px;
+    line-height: 1.5;
+  }
+  .hero-meta {
+    font-size: 10px;
+    color: rgba(255,255,255,0.65);
+    letter-spacing: 0.04em;
+    margin-bottom: 16px;
+    text-transform: uppercase;
+  }
+  .hero-cost-label {
+    font-size: 10px;
+    color: rgba(255,255,255,0.7);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 2px;
+  }
+  .hero-cost-number {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 52px;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+  .hero-cost-sublabel {
+    font-size: 10px;
+    color: rgba(255,255,255,0.7);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 18px;
+  }
+  .hero-cols {
+    display: flex;
+    gap: 32px;
+  }
+  .hero-col-label {
+    font-size: 10px;
+    color: rgba(255,255,255,0.65);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 2px;
+  }
+  .hero-col-value {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 20px;
+    font-weight: 700;
+    color: #fff;
+  }
+
+  /* ─── SECTION HEADING ─── */
+  .section-heading {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 15px;
+    font-weight: 700;
+    color: #084fc1;
+    margin-bottom: 8px;
+    margin-top: 16px;
+  }
+  .section-body {
+    font-size: 12px;
+    color: #374151;
+    line-height: 1.65;
+    margin-bottom: 4px;
+  }
+  .benchmark-nota {
+    font-size: 10px;
+    color: #9CA3AF;
+    font-style: italic;
+    margin-top: 4px;
+  }
+
+  /* ─── GRID 2x2 ─── */
+  .grid-2x2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 12px;
+  }
+  .card {
+    background: #F4F6F9;
+    border-radius: 6px;
+    padding: 12px 14px;
+  }
+  .card-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #000;
+    margin-bottom: 4px;
+  }
+  .card-desc {
+    font-size: 11px;
+    color: #374151;
+    line-height: 1.55;
+  }
+
+  /* ─── TIME BARS ─── */
+  .time-bars { margin-top: 14px; }
+  .time-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .time-bar-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: #000;
+    width: 220px;
+    flex-shrink: 0;
+  }
+  .time-bar-track {
+    flex: 1;
+    height: 16px;
+    border-radius: 4px;
+    background: #E9EDF3;
+    overflow: hidden;
+  }
+  .time-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .time-bar-pct {
+    font-size: 12px;
+    font-weight: 700;
+    color: #084fc1;
+    width: 36px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  /* ─── PAGE 2: REFERENTE ─── */
+  .ref-block {
+    background: #F4F6F9;
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+  }
+  .ref-name {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 20px;
+    font-weight: 700;
+    color: #000;
+    margin-bottom: 4px;
+  }
+  .ref-desc {
+    font-size: 12px;
+    color: #374151;
+    margin-bottom: 14px;
+  }
+  .ref-metrics {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 14px;
+  }
+  .ref-metric-box {
+    background: #fff;
+    border-radius: 6px;
+    padding: 10px 16px;
+    min-width: 110px;
+  }
+  .ref-metric-label {
+    font-size: 10px;
+    color: #374151;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .ref-metric-value {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 18px;
+    font-weight: 700;
+    color: #000;
+  }
+  .ref-narrativa {
+    font-size: 12px;
+    color: #374151;
+    line-height: 1.6;
+    margin-bottom: 6px;
+  }
+  .ref-fuente {
+    font-size: 10px;
+    color: #9CA3AF;
+    font-style: italic;
+  }
+
+  /* ─── TABLE GENERAL ─── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  table thead tr {
+    background: #084fc1;
+    color: #fff;
+  }
+  table thead th {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 8px 12px;
+    text-align: left;
+  }
+  table tbody tr:nth-child(even) { background: #edf4ff; }
+  table tbody tr:nth-child(odd) { background: #fff; }
+  table tbody td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #E5E7EB;
+    vertical-align: middle;
+  }
+  .td-prosp { color: #374151; }
+  .td-ref { color: #084fc1; font-weight: 700; }
+  .td-dim { color: #000; font-weight: 600; }
+
+  /* ─── PAGE 3: OKRs ─── */
+  .okr-badge {
+    background: #084fc1;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-radius: 4px;
+    display: inline-block;
+    padding: 4px 10px;
+    margin-bottom: 8px;
+  }
+  .okr-objetivo {
+    font-size: 14px;
+    font-weight: 700;
+    color: #000;
+    margin-bottom: 10px;
+  }
+  .okr-sep {
+    height: 1px;
+    background: #E5E7EB;
+    margin: 20px 0;
+  }
+  .td-kr { color: #000; font-size: 12px; }
+  .td-hoy { color: #DC2626; font-weight: 600; }
+  .td-meta { color: #084fc1; font-weight: 700; }
+  .td-refval { color: #374151; }
+
+  /* ─── PAGE 4: PROYECCIÓN ─── */
+  .proy-nota {
+    font-size: 10px;
+    color: #9CA3AF;
+    font-style: italic;
+    margin-top: 6px;
+    margin-bottom: 16px;
+  }
+  .td-acum-blue { color: #084fc1; font-weight: 700; }
+  .tr-statusquo td { color: #DC2626; }
+  .tr-statusquo .td-dim { color: #DC2626; font-weight: 700; }
+  .tr-statusquo .td-acum-blue { color: #DC2626; font-weight: 700; }
+  .tr-cons td { color: #000; }
+  .tr-opt td { color: #000; }
+
+  /* ─── QUOTE ─── */
+  .quote-box {
+    background: #edf4ff;
+    border-left: 4px solid #084fc1;
+    padding: 16px 20px;
+    border-radius: 0 6px 6px 0;
+    margin: 16px 0;
+  }
+  .quote-text {
+    font-size: 13px;
+    font-style: italic;
+    color: #374151;
+    line-height: 1.65;
+  }
+
+  /* ─── CTA BOX ─── */
+  .cta-box {
+    background: #084fc1;
+    border-radius: 6px;
+    padding: 22px 28px;
+    margin-top: 16px;
+  }
+  .cta-heading {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 18px;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 8px;
+  }
+  .cta-body {
+    font-size: 13px;
+    color: rgba(255,255,255,0.9);
+    margin-bottom: 16px;
+    line-height: 1.55;
+  }
+  .cta-btn {
+    display: inline-block;
+    background: #fff;
+    color: #084fc1;
+    font-size: 13px;
+    font-weight: 700;
+    border-radius: 6px;
+    padding: 10px 24px;
+    text-decoration: none;
+    font-family: 'Josefin Sans', sans-serif;
+  }
+
+  @media print {
+    .page { page-break-after: always; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════
+     PÁGINA 1: EL COSTO
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="header">
+    <div class="header-logo">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 85 14.2" height="26" aria-label="Delta Teams">
+        <polygon fill="#FFFFFF" points="12.1 7.3 12.1 7.3 12.1 7.3 12.1 7.3"/>
+        <g>
+          <path fill="#FFFFFF" d="M.7,10.9s1.5-.7,1.5-.7l2.4-5.6,1.5,3.6,1.3-.6L4.7,1.1c0,0-.1,0-.1,0L.1,11.5c.1-.2.3-.4.6-.6Z"/>
+          <polygon fill="#FFFFFF" points="7.2 10.8 8.2 13.1 9.7 13.1 8.3 9.6 7.2 10.8"/>
+          <path fill="#FFFFFF" d="M11.7,5.2l-4.3,2.3-1.4.7-3.9,2s-1.4.7-1.5.7c-.3.1-.5.3-.6.6h0c0,.4-.1.6,0,.9.2.6.9.9,1.5.6,0,0,0,0,.1,0l10.1-7.5c.1,0,0-.3-.1-.2Z"/>
+        </g>
+        <g>
+          <path fill="#FFFFFF" d="M15.2,5.6h2c.9,0,1.7.2,2.3.6s1.1.8,1.3,1.4c.3.6.4,1.2.4,1.8s-.2,1.4-.5,1.9c-.3.6-.8,1-1.4,1.3-.6.3-1.2.4-1.8.4h-2.4v-7.5ZM17.4,12.1c.6,0,1-.1,1.5-.3s.8-.5,1-.9c.2-.4.4-.9.4-1.5s-.1-1.1-.4-1.5-.6-.7-1-1c-.4-.2-.9-.3-1.4-.3h-1.3v5.5h1.2Z"/>
+          <path fill="#FFFFFF" d="M27.8,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M30.7,5.6v6.5h3.8v1h-4.8v-7.5h1Z"/>
+          <path fill="#FFFFFF" d="M39.7,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M44.6,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM44.2,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M55.6,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M62,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M67.8,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM67.5,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M78.6,5.3v7.7h-1v-4.8l-2.7,3.9h0l-2.7-3.8v4.7h-1v-7.7h0l3.7,5.2,3.7-5.2h0Z"/>
+          <path fill="#FFFFFF" d="M83.7,6.5c-.3,0-.6-.1-.9-.1-.4,0-.7,0-1,.3s-.4.4-.4.7.1.6.4.8c.3.2.7.4,1.2.6.4.1.7.3,1,.4.3.2.5.4.7.7.2.3.3.6.3,1.1s0,.8-.3,1.1c-.2.3-.5.6-.9.8-.4.2-.8.3-1.3.3s-.9,0-1.3-.2c-.4-.1-.8-.3-1.1-.6l.4-.8c.3.2.6.4.9.5.4.1.7.2,1,.2s.7-.1,1-.3c.3-.2.4-.5.4-.9s-.1-.6-.4-.8c-.3-.2-.6-.4-1.1-.6-.4-.2-.8-.3-1-.5-.3-.2-.5-.4-.7-.6-.2-.3-.3-.6-.3-1,0-.6.2-1.1.6-1.4.4-.4.9-.6,1.6-.6.8,0,1.6.2,2.2.6l-.4.8c-.3-.1-.6-.3-.9-.4Z"/>
+        </g>
+      </svg>
+    </div>
+    <div class="header-label">Diagnóstico ROI Personalizado</div>
+  </div>
+
+  <div class="content">
+
+    <!-- HERO -->
+    <div class="hero">
+      <div class="hero-headline">Optimissa México: el costo de crecer sin infraestructura de ejecución</div>
+      <div class="hero-subheadline">Cada semana, 8 líderes en Optimissa México absorben fricción operativa que no genera valor. Este diagnóstico cuantifica lo que eso cuesta, y lo que se recupera con Delta.</div>
+      <div class="hero-meta">IT Consulting / Capital Markets · 100 personas · 8 líderes · México · Junio 2026</div>
+      <div class="hero-cost-label">Costo estimado de ineficiencia</div>
+      <div class="hero-cost-number">$92,160 USD</div>
+      <div class="hero-cost-sublabel">Costo de ineficiencia / año</div>
+      <div class="hero-cols">
+        <div>
+          <div class="hero-col-label">Costo mensual</div>
+          <div class="hero-col-value">$7,680 USD</div>
+        </div>
+        <div>
+          <div class="hero-col-label">Recuperación conservadora</div>
+          <div class="hero-col-value">$55,296 USD/año</div>
+        </div>
+        <div>
+          <div class="hero-col-label">Recuperación optimista</div>
+          <div class="hero-col-value">$73,728 USD/año</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DIAGNÓSTICO SECTORIAL -->
+    <div class="section-heading">El patrón del sector</div>
+    <div class="section-body">
+      Las consultoras IT en fase de escalamiento enfrentan una paradoja: cuanto más crece el portfolio de proyectos, más tiempo absorben los líderes en coordinación informal. Sin una capa común de ejecución, el Country Manager se convierte en el único punto de visibilidad, con un precio directo sobre la capacidad de venta, retención de clientes y expansión de cuentas. Optimissa México tiene el modelo y el mandato de ser el hub LATAM de Alten Group. El cuello de botella no es comercial ni técnico: es operativo.
+    </div>
+    <div class="benchmark-nota">Estimación basada en benchmark operativo para consultoras IT Capital Markets en fase de escalamiento en México.</div>
+
+    <!-- 4 FUENTES DE FRICCIÓN -->
+    <div class="section-heading">Las 4 fuentes de fricción que consumen presupuesto de liderazgo</div>
+    <div class="grid-2x2">
+      <div class="card">
+        <div class="card-title">CEO como único punto de coordinación</div>
+        <div class="card-desc">El Country Manager centraliza decisiones de entrega, cliente y equipo que deberían resolverse en la capa siguiente. Cada escalada consume tiempo que debería ir a expansión de cuentas y relación con Alten Group.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Proyectos sin seguimiento estructurado</div>
+        <div class="card-desc">Con un portfolio multicliente y multitecnología (SAP, Murex, Calypso, desarrollo a medida), el avance de iniciativas se gestiona por reuniones reactivas y actualizaciones individuales, sin visibilidad centralizada.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Objetivos sin dueño claro ni revisión semanal</div>
+        <div class="card-desc">La meta de escalar a 500 personas y consolidar el hub LATAM requiere OKRs con dueños y cadencia. Sin esa estructura, los líderes de área operan con agendas desconectadas de la estrategia de crecimiento.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Estrategia global sin traducción a ejecución local</div>
+        <div class="card-desc">Optimissa forma parte de Alten Group desde 2018. Alinear la estrategia del grupo con la operación diaria en México exige mecanismos de ejecución que hoy se resuelven con reuniones manuales y reportes ad hoc.</div>
+      </div>
+    </div>
+
+    <!-- DISTRIBUCIÓN DE TIEMPO -->
+    <div class="section-heading">Distribución del tiempo redirigible en líderes IT Consulting</div>
+    <div class="time-bars">
+      <div class="time-bar-row">
+        <div class="time-bar-label">Coordinación entre proyectos y clientes</div>
+        <div class="time-bar-track"><div class="time-bar-fill" style="background:linear-gradient(to right,#084fc1 38%,#E9EDF3 38%);width:100%;"></div></div>
+        <div class="time-bar-pct">38%</div>
+      </div>
+      <div class="time-bar-row">
+        <div class="time-bar-label">Reuniones sin decisión documentada</div>
+        <div class="time-bar-track"><div class="time-bar-fill" style="background:linear-gradient(to right,#084fc1 27%,#E9EDF3 27%);width:100%;"></div></div>
+        <div class="time-bar-pct">27%</div>
+      </div>
+      <div class="time-bar-row">
+        <div class="time-bar-label">Re-trabajo por falta de visibilidad común</div>
+        <div class="time-bar-track"><div class="time-bar-fill" style="background:linear-gradient(to right,#084fc1 21%,#E9EDF3 21%);width:100%;"></div></div>
+        <div class="time-bar-pct">21%</div>
+      </div>
+      <div class="time-bar-row">
+        <div class="time-bar-label">Aprobaciones que escalan al Country Manager</div>
+        <div class="time-bar-track"><div class="time-bar-fill" style="background:linear-gradient(to right,#084fc1 14%,#E9EDF3 14%);width:100%;"></div></div>
+        <div class="time-bar-pct">14%</div>
+      </div>
+    </div>
+
+  </div>
+  <div class="footer">Delta Teams · deltateams.com · Infraestructura de ejecución para equipos en crecimiento</div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════
+     PÁGINA 2: REFERENTE Y BRECHA
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="header">
+    <div class="header-logo">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 85 14.2" height="26" aria-label="Delta Teams">
+        <polygon fill="#FFFFFF" points="12.1 7.3 12.1 7.3 12.1 7.3 12.1 7.3"/>
+        <g>
+          <path fill="#FFFFFF" d="M.7,10.9s1.5-.7,1.5-.7l2.4-5.6,1.5,3.6,1.3-.6L4.7,1.1c0,0-.1,0-.1,0L.1,11.5c.1-.2.3-.4.6-.6Z"/>
+          <polygon fill="#FFFFFF" points="7.2 10.8 8.2 13.1 9.7 13.1 8.3 9.6 7.2 10.8"/>
+          <path fill="#FFFFFF" d="M11.7,5.2l-4.3,2.3-1.4.7-3.9,2s-1.4.7-1.5.7c-.3.1-.5.3-.6.6h0c0,.4-.1.6,0,.9.2.6.9.9,1.5.6,0,0,0,0,.1,0l10.1-7.5c.1,0,0-.3-.1-.2Z"/>
+        </g>
+        <g>
+          <path fill="#FFFFFF" d="M15.2,5.6h2c.9,0,1.7.2,2.3.6s1.1.8,1.3,1.4c.3.6.4,1.2.4,1.8s-.2,1.4-.5,1.9c-.3.6-.8,1-1.4,1.3-.6.3-1.2.4-1.8.4h-2.4v-7.5ZM17.4,12.1c.6,0,1-.1,1.5-.3s.8-.5,1-.9c.2-.4.4-.9.4-1.5s-.1-1.1-.4-1.5-.6-.7-1-1c-.4-.2-.9-.3-1.4-.3h-1.3v5.5h1.2Z"/>
+          <path fill="#FFFFFF" d="M27.8,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M30.7,5.6v6.5h3.8v1h-4.8v-7.5h1Z"/>
+          <path fill="#FFFFFF" d="M39.7,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M44.6,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM44.2,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M55.6,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M62,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M67.8,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM67.5,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M78.6,5.3v7.7h-1v-4.8l-2.7,3.9h0l-2.7-3.8v4.7h-1v-7.7h0l3.7,5.2,3.7-5.2h0Z"/>
+          <path fill="#FFFFFF" d="M83.7,6.5c-.3,0-.6-.1-.9-.1-.4,0-.7,0-1,.3s-.4.4-.4.7.1.6.4.8c.3.2.7.4,1.2.6.4.1.7.3,1,.4.3.2.5.4.7.7.2.3.3.6.3,1.1s0,.8-.3,1.1c-.2.3-.5.6-.9.8-.4.2-.8.3-1.3.3s-.9,0-1.3-.2c-.4-.1-.8-.3-1.1-.6l.4-.8c.3.2.6.4.9.5.4.1.7.2,1,.2s.7-.1,1-.3c.3-.2.4-.5.4-.9s-.1-.6-.4-.8c-.3-.2-.6-.4-1.1-.6-.4-.2-.8-.3-1-.5-.3-.2-.5-.4-.7-.6-.2-.3-.3-.6-.3-1,0-.6.2-1.1.6-1.4.4-.4.9-.6,1.6-.6.8,0,1.6.2,2.2.6l-.4.8c-.3-.1-.6-.3-.9-.4Z"/>
+        </g>
+      </svg>
+    </div>
+    <div class="header-label">Referente y Brecha</div>
+  </div>
+
+  <div class="content">
+
+    <div class="section-heading">El referente del sector en México</div>
+
+    <div class="ref-block">
+      <div class="ref-name">Softtek</div>
+      <div class="ref-desc">Líder IT Consulting de origen mexicano · +14,000 personas · 20+ países · fundada en Monterrey en 1982</div>
+      <div class="ref-metrics">
+        <div class="ref-metric-box">
+          <div class="ref-metric-label">Escala global</div>
+          <div class="ref-metric-value">14,000+</div>
+        </div>
+        <div class="ref-metric-box">
+          <div class="ref-metric-label">Revenue estimado</div>
+          <div class="ref-metric-value">$500M+ USD</div>
+        </div>
+        <div class="ref-metric-box">
+          <div class="ref-metric-label">Países de operación</div>
+          <div class="ref-metric-value">20+</div>
+        </div>
+        <div class="ref-metric-box">
+          <div class="ref-metric-label">Años en mercado</div>
+          <div class="ref-metric-value">43 años</div>
+        </div>
+      </div>
+      <div class="ref-narrativa">
+        Softtek no llegó a los 14,000 profesionales por tener mejor tecnología que sus competidores. Lo hizo construyendo una capa de ejecución que permitió escalar cuentas, replicar modelos de entrega y crecer de forma previsible. Optimissa México tiene el mandato de ser el hub LATAM de Alten Group: la misma ambición que tuvo Softtek en sus primeras dos décadas. La diferencia entre ambas no es de tamaño: es de infraestructura operativa para sostener el crecimiento.
+      </div>
+      <div class="ref-fuente"></div>
+    </div>
+
+    <!-- TABLA DE BRECHAS -->
+    <div class="section-heading">Brechas operativas clave</div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:35%">Dimensión</th>
+          <th style="width:30%">Optimissa México</th>
+          <th style="width:30%">Softtek</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="td-dim">Personas en operación</td>
+          <td class="td-prosp">~100 en México</td>
+          <td class="td-ref">14,000+ global</td>
+        </tr>
+        <tr>
+          <td class="td-dim">Cobertura geográfica</td>
+          <td class="td-prosp">México + Europa (vía Alten)</td>
+          <td class="td-ref">20+ países independientes</td>
+        </tr>
+        <tr>
+          <td class="td-dim">Visibilidad de objetivos</td>
+          <td class="td-prosp">Gestionada por reuniones reactivas</td>
+          <td class="td-ref">OKRs con dashboards por unidad</td>
+        </tr>
+        <tr>
+          <td class="td-dim">Velocidad de decisión</td>
+          <td class="td-prosp">Centralizada en Country Manager</td>
+          <td class="td-ref">Delegada por capa y región</td>
+        </tr>
+        <tr>
+          <td class="td-dim">Escalabilidad de delivery</td>
+          <td class="td-prosp">Modelo proyecto a proyecto</td>
+          <td class="td-ref">Modelo de entrega replicable</td>
+        </tr>
+        <tr>
+          <td class="td-dim">Retención de talento lider</td>
+          <td class="td-prosp">Sin métricas de performance por rol</td>
+          <td class="td-ref">81.7% retención con estructura definida</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div style="margin-top:14px;">
+      <div class="section-heading">Por qué la brecha no es de tamaño</div>
+      <div class="section-body">
+        Softtek tiene 140 veces más personas que Optimissa México, pero eso no explica la diferencia operativa. Softtek construyó sus primeros 500 empleados con una metodología de ejecución clara antes de escalar. Optimissa México está en ese punto de inflexión hoy: el momento en que la coordinación informal deja de funcionar y cada semana sin estructura de ejecución tiene un costo directo sobre la velocidad de crecimiento.
+      </div>
+    </div>
+
+  </div>
+  <div class="footer">Delta Teams · deltateams.com · Infraestructura de ejecución para equipos en crecimiento</div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════
+     PÁGINA 3: EL PLAN · 6 MESES
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="header">
+    <div class="header-logo">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 85 14.2" height="26" aria-label="Delta Teams">
+        <polygon fill="#FFFFFF" points="12.1 7.3 12.1 7.3 12.1 7.3 12.1 7.3"/>
+        <g>
+          <path fill="#FFFFFF" d="M.7,10.9s1.5-.7,1.5-.7l2.4-5.6,1.5,3.6,1.3-.6L4.7,1.1c0,0-.1,0-.1,0L.1,11.5c.1-.2.3-.4.6-.6Z"/>
+          <polygon fill="#FFFFFF" points="7.2 10.8 8.2 13.1 9.7 13.1 8.3 9.6 7.2 10.8"/>
+          <path fill="#FFFFFF" d="M11.7,5.2l-4.3,2.3-1.4.7-3.9,2s-1.4.7-1.5.7c-.3.1-.5.3-.6.6h0c0,.4-.1.6,0,.9.2.6.9.9,1.5.6,0,0,0,0,.1,0l10.1-7.5c.1,0,0-.3-.1-.2Z"/>
+        </g>
+        <g>
+          <path fill="#FFFFFF" d="M15.2,5.6h2c.9,0,1.7.2,2.3.6s1.1.8,1.3,1.4c.3.6.4,1.2.4,1.8s-.2,1.4-.5,1.9c-.3.6-.8,1-1.4,1.3-.6.3-1.2.4-1.8.4h-2.4v-7.5ZM17.4,12.1c.6,0,1-.1,1.5-.3s.8-.5,1-.9c.2-.4.4-.9.4-1.5s-.1-1.1-.4-1.5-.6-.7-1-1c-.4-.2-.9-.3-1.4-.3h-1.3v5.5h1.2Z"/>
+          <path fill="#FFFFFF" d="M27.8,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M30.7,5.6v6.5h3.8v1h-4.8v-7.5h1Z"/>
+          <path fill="#FFFFFF" d="M39.7,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M44.6,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM44.2,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M55.6,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M62,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M67.8,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM67.5,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M78.6,5.3v7.7h-1v-4.8l-2.7,3.9h0l-2.7-3.8v4.7h-1v-7.7h0l3.7,5.2,3.7-5.2h0Z"/>
+          <path fill="#FFFFFF" d="M83.7,6.5c-.3,0-.6-.1-.9-.1-.4,0-.7,0-1,.3s-.4.4-.4.7.1.6.4.8c.3.2.7.4,1.2.6.4.1.7.3,1,.4.3.2.5.4.7.7.2.3.3.6.3,1.1s0,.8-.3,1.1c-.2.3-.5.6-.9.8-.4.2-.8.3-1.3.3s-.9,0-1.3-.2c-.4-.1-.8-.3-1.1-.6l.4-.8c.3.2.6.4.9.5.4.1.7.2,1,.2s.7-.1,1-.3c.3-.2.4-.5.4-.9s-.1-.6-.4-.8c-.3-.2-.6-.4-1.1-.6-.4-.2-.8-.3-1-.5-.3-.2-.5-.4-.7-.6-.2-.3-.3-.6-.3-1,0-.6.2-1.1.6-1.4.4-.4.9-.6,1.6-.6.8,0,1.6.2,2.2.6l-.4.8c-.3-.1-.6-.3-.9-.4Z"/>
+        </g>
+      </svg>
+    </div>
+    <div class="header-label">El Plan · 6 Meses</div>
+  </div>
+
+  <div class="content">
+
+    <div class="section-heading">Plan de ejecución en 2 trimestres</div>
+    <div class="section-body" style="margin-bottom:16px;">
+      Dos OKRs diseñados para cerrar las brechas operativas identificadas. Cada KR incluye el estado actual de Optimissa México, la meta a 90 días y el benchmark del referente sectorial.
+    </div>
+
+    <!-- OKR 1 -->
+    <div class="okr-badge">Q1 · Días 1-90</div>
+    <div class="okr-objetivo">Instalar visibilidad operativa y liberar capacidad del Country Manager</div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:40%">Key Result</th>
+          <th style="width:18%">Hoy</th>
+          <th style="width:18%">Meta Q1</th>
+          <th style="width:18%">Referente</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="td-kr">% de proyectos con avance visible en dashboard centralizado</td>
+          <td class="td-hoy">0%</td>
+          <td class="td-meta">80%</td>
+          <td class="td-refval">95%+</td>
+        </tr>
+        <tr>
+          <td class="td-kr">Decisiones que escalan al Country Manager por semana</td>
+          <td class="td-hoy">15-20</td>
+          <td class="td-meta">6 o menos</td>
+          <td class="td-refval">2-3</td>
+        </tr>
+        <tr>
+          <td class="td-kr">Líderes con OKRs asignados y revisión semanal activa</td>
+          <td class="td-hoy">0 de 8</td>
+          <td class="td-meta">8 de 8</td>
+          <td class="td-refval">100%</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="okr-sep"></div>
+
+    <!-- OKR 2 -->
+    <div class="okr-badge">Q2 · Días 91-180</div>
+    <div class="okr-objetivo">Acelerar ejecución y preparar el modelo para escala LATAM</div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:40%">Key Result</th>
+          <th style="width:18%">Hoy</th>
+          <th style="width:18%">Meta Q2</th>
+          <th style="width:18%">Referente</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="td-kr">Avance promedio en objetivos estratégicos del trimestre</td>
+          <td class="td-hoy">&lt;40%</td>
+          <td class="td-meta">65%+</td>
+          <td class="td-refval">61.4% (IBT)</td>
+        </tr>
+        <tr>
+          <td class="td-kr">Reducción en horas de reuniones sin decisión documentada</td>
+          <td class="td-hoy">Línea base</td>
+          <td class="td-meta">-30%</td>
+          <td class="td-refval">-40%</td>
+        </tr>
+        <tr>
+          <td class="td-kr">Modelo de delivery documentado y replicable para nuevas cuentas</td>
+          <td class="td-hoy">Informal</td>
+          <td class="td-meta">V1 activo</td>
+          <td class="td-refval">Estandarizado</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div style="margin-top:18px;">
+      <div class="section-heading">Lo que Delta activa en 90 días</div>
+      <div class="grid-2x2">
+        <div class="card">
+          <div class="card-title">Reuniones con decisiones documentadas</div>
+          <div class="card-desc">Cada sesión genera acuerdos trazables. El Country Manager deja de ser el repositorio de contexto y pasa a ser el validador de dirección.</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Dashboard unificado de objetivos en tiempo real</div>
+          <div class="card-desc">Visibilidad del avance por proyecto, por líder y por cuenta, sin entrar a la operación ni multiplicar reportes manuales.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <div class="footer">Delta Teams · deltateams.com · Infraestructura de ejecución para equipos en crecimiento</div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════
+     PÁGINA 4: PROYECCIÓN Y SIGUIENTE PASO
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="header">
+    <div class="header-logo">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 85 14.2" height="26" aria-label="Delta Teams">
+        <polygon fill="#FFFFFF" points="12.1 7.3 12.1 7.3 12.1 7.3 12.1 7.3"/>
+        <g>
+          <path fill="#FFFFFF" d="M.7,10.9s1.5-.7,1.5-.7l2.4-5.6,1.5,3.6,1.3-.6L4.7,1.1c0,0-.1,0-.1,0L.1,11.5c.1-.2.3-.4.6-.6Z"/>
+          <polygon fill="#FFFFFF" points="7.2 10.8 8.2 13.1 9.7 13.1 8.3 9.6 7.2 10.8"/>
+          <path fill="#FFFFFF" d="M11.7,5.2l-4.3,2.3-1.4.7-3.9,2s-1.4.7-1.5.7c-.3.1-.5.3-.6.6h0c0,.4-.1.6,0,.9.2.6.9.9,1.5.6,0,0,0,0,.1,0l10.1-7.5c.1,0,0-.3-.1-.2Z"/>
+        </g>
+        <g>
+          <path fill="#FFFFFF" d="M15.2,5.6h2c.9,0,1.7.2,2.3.6s1.1.8,1.3,1.4c.3.6.4,1.2.4,1.8s-.2,1.4-.5,1.9c-.3.6-.8,1-1.4,1.3-.6.3-1.2.4-1.8.4h-2.4v-7.5ZM17.4,12.1c.6,0,1-.1,1.5-.3s.8-.5,1-.9c.2-.4.4-.9.4-1.5s-.1-1.1-.4-1.5-.6-.7-1-1c-.4-.2-.9-.3-1.4-.3h-1.3v5.5h1.2Z"/>
+          <path fill="#FFFFFF" d="M27.8,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M30.7,5.6v6.5h3.8v1h-4.8v-7.5h1Z"/>
+          <path fill="#FFFFFF" d="M39.7,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M44.6,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM44.2,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M55.6,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M62,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M67.8,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM67.5,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M78.6,5.3v7.7h-1v-4.8l-2.7,3.9h0l-2.7-3.8v4.7h-1v-7.7h0l3.7,5.2,3.7-5.2h0Z"/>
+          <path fill="#FFFFFF" d="M83.7,6.5c-.3,0-.6-.1-.9-.1-.4,0-.7,0-1,.3s-.4.4-.4.7.1.6.4.8c.3.2.7.4,1.2.6.4.1.7.3,1,.4.3.2.5.4.7.7.2.3.3.6.3,1.1s0,.8-.3,1.1c-.2.3-.5.6-.9.8-.4.2-.8.3-1.3.3s-.9,0-1.3-.2c-.4-.1-.8-.3-1.1-.6l.4-.8c.3.2.6.4.9.5.4.1.7.2,1,.2s.7-.1,1-.3c.3-.2.4-.5.4-.9s-.1-.6-.4-.8c-.3-.2-.6-.4-1.1-.6-.4-.2-.8-.3-1-.5-.3-.2-.5-.4-.7-.6-.2-.3-.3-.6-.3-1,0-.6.2-1.1.6-1.4.4-.4.9-.6,1.6-.6.8,0,1.6.2,2.2.6l-.4.8c-.3-.1-.6-.3-.9-.4Z"/>
+        </g>
+      </svg>
+    </div>
+    <div class="header-label">Proyección y Siguiente Paso</div>
+  </div>
+
+  <div class="content">
+
+    <div class="section-heading">Proyección de costo acumulado a 3 años</div>
+
+    <table>
+      <thead>
+        <tr>
+          <th style="width:28%">Escenario</th>
+          <th style="width:18%">Año 1</th>
+          <th style="width:18%">Año 2</th>
+          <th style="width:18%">Año 3</th>
+          <th style="width:18%">Acumulado 3 años</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="tr-statusquo">
+          <td class="td-dim">Costo status quo</td>
+          <td>$92,160 USD</td>
+          <td>$103,219 USD</td>
+          <td>$115,606 USD</td>
+          <td class="td-acum-blue">$310,985 USD</td>
+        </tr>
+        <tr class="tr-cons" style="background:#edf4ff;">
+          <td class="td-dim">Ahorro conservador (60%)</td>
+          <td>$55,296 USD</td>
+          <td>$61,932 USD</td>
+          <td>$69,363 USD</td>
+          <td class="td-acum-blue">$186,591 USD</td>
+        </tr>
+        <tr class="tr-opt" style="background:#edf4ff;">
+          <td class="td-dim">Ahorro optimista (80%)</td>
+          <td>$73,728 USD</td>
+          <td>$82,575 USD</td>
+          <td>$92,484 USD</td>
+          <td class="td-acum-blue">$248,788 USD</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="proy-nota">
+      Supuesto: crecimiento del 12% anual en el costo de ineficiencia, en línea con el crecimiento del sector IT Consulting en México 2024-2025 y el plan de escalamiento de Optimissa México hacia las 500 personas. No incluye el costo de oportunidad por velocidad de ejecución perdida.
+    </div>
+
+    <!-- QUOTE -->
+    <div class="quote-box">
+      <div class="quote-text">
+        En IT consulting, el riesgo no está en perder un proyecto. Está en llegar al doble de personas sin haber construido la capa que convierte la coordinación en resultados predecibles, porque a esa escala, el costo de la fricción deja de ser invisible.
+      </div>
+    </div>
+
+    <!-- CTA -->
+    <div class="cta-box">
+      <div class="cta-heading">Cada semana sin visibilidad tiene un costo en Optimissa México. Veamos cómo cerrarlo.</div>
+      <div class="cta-body">
+        Revisa el diagnóstico con Camila en 20 minutos y explora qué dimensión de la operación tiene más urgencia para Optimissa México.
+      </div>
+      <a class="cta-btn" href="https://calendly.com/camilaacosta-squads/30min?utm_source=email&utm_medium=diagnostico&utm_campaign=roi_personalizado">Agendar 20 min</a>
+    </div>
+
+  </div>
+  <div class="footer">Delta Teams · deltateams.com · Infraestructura de ejecución para equipos en crecimiento</div>
+</div>
+
+</body>
+</html>

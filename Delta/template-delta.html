@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diagnóstico ROI Personalizado: {{COMPANY_NAME}}</title>
+<link href="https://fonts.googleapis.com/css2?family=Josefin+Sans:wght@400;600;700&family=Nunito+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Nunito Sans', sans-serif;
+    background: #fff;
+    color: #374151;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  /* ─── PAGE ─── */
+  .page {
+    width: 794px;
+    min-height: 1123px;
+    position: relative;
+    background: #fff;
+    padding-bottom: 52px;
+    page-break-after: always;
+    overflow: hidden;
+  }
+
+  /* ─── HEADER ─── */
+  .header {
+    background: #084fc1;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 32px;
+  }
+  .header-logo svg { display: block; }
+  .header-label {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 11px;
+    color: #fff;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+
+  /* ─── FOOTER ─── */
+  .footer {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    border-top: 1px solid #E5E7EB;
+    padding: 10px 32px;
+    text-align: center;
+    font-size: 10px;
+    color: #374151;
+  }
+
+  /* ─── PAGE CONTENT ─── */
+  .content {
+    padding: 24px 32px 0;
+  }
+
+  /* ─── HERO BLOCK ─── */
+  .hero {
+    background: #084fc1;
+    border-radius: 6px;
+    padding: 22px 28px 20px;
+    color: #fff;
+    margin-bottom: 16px;
+  }
+  .hero-headline {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 20px;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.25;
+    margin-bottom: 6px;
+  }
+  .hero-subheadline {
+    font-size: 12px;
+    color: rgba(255,255,255,0.85);
+    margin-bottom: 10px;
+    line-height: 1.5;
+  }
+  .hero-meta {
+    font-size: 10px;
+    color: rgba(255,255,255,0.65);
+    letter-spacing: 0.04em;
+    margin-bottom: 16px;
+    text-transform: uppercase;
+  }
+  .hero-cost-label {
+    font-size: 10px;
+    color: rgba(255,255,255,0.7);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 2px;
+  }
+  .hero-cost-number {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 52px;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+  .hero-cost-sublabel {
+    font-size: 10px;
+    color: rgba(255,255,255,0.7);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 18px;
+  }
+  .hero-cols {
+    display: flex;
+    gap: 32px;
+  }
+  .hero-col-label {
+    font-size: 10px;
+    color: rgba(255,255,255,0.65);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 2px;
+  }
+  .hero-col-value {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 20px;
+    font-weight: 700;
+    color: #fff;
+  }
+
+  /* ─── SECTION HEADING ─── */
+  .section-heading {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 15px;
+    font-weight: 700;
+    color: #084fc1;
+    margin-bottom: 8px;
+    margin-top: 16px;
+  }
+  .section-body {
+    font-size: 12px;
+    color: #374151;
+    line-height: 1.65;
+    margin-bottom: 4px;
+  }
+  .benchmark-nota {
+    font-size: 10px;
+    color: #9CA3AF;
+    font-style: italic;
+    margin-top: 4px;
+  }
+
+  /* ─── GRID 2x2 ─── */
+  .grid-2x2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 12px;
+  }
+  .card {
+    background: #F4F6F9;
+    border-radius: 6px;
+    padding: 12px 14px;
+  }
+  .card-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #000;
+    margin-bottom: 4px;
+  }
+  .card-desc {
+    font-size: 11px;
+    color: #374151;
+    line-height: 1.55;
+  }
+
+  /* ─── TIME BARS ─── */
+  .time-bars { margin-top: 14px; }
+  .time-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .time-bar-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: #000;
+    width: 220px;
+    flex-shrink: 0;
+  }
+  .time-bar-track {
+    flex: 1;
+    height: 16px;
+    border-radius: 4px;
+    background: #E9EDF3;
+    overflow: hidden;
+  }
+  .time-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .time-bar-pct {
+    font-size: 12px;
+    font-weight: 700;
+    color: #084fc1;
+    width: 36px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  /* ─── PAGE 2: REFERENTE ─── */
+  .ref-block {
+    background: #F4F6F9;
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+  }
+  .ref-name {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 20px;
+    font-weight: 700;
+    color: #000;
+    margin-bottom: 4px;
+  }
+  .ref-desc {
+    font-size: 12px;
+    color: #374151;
+    margin-bottom: 14px;
+  }
+  .ref-metrics {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 14px;
+  }
+  .ref-metric-box {
+    background: #fff;
+    border-radius: 6px;
+    padding: 10px 16px;
+    min-width: 110px;
+  }
+  .ref-metric-label {
+    font-size: 10px;
+    color: #374151;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .ref-metric-value {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 18px;
+    font-weight: 700;
+    color: #000;
+  }
+  .ref-narrativa {
+    font-size: 12px;
+    color: #374151;
+    line-height: 1.6;
+    margin-bottom: 6px;
+  }
+  .ref-fuente {
+    font-size: 10px;
+    color: #9CA3AF;
+    font-style: italic;
+  }
+
+  /* ─── TABLE GENERAL ─── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  table thead tr {
+    background: #084fc1;
+    color: #fff;
+  }
+  table thead th {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 8px 12px;
+    text-align: left;
+  }
+  table tbody tr:nth-child(even) { background: #edf4ff; }
+  table tbody tr:nth-child(odd) { background: #fff; }
+  table tbody td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #E5E7EB;
+    vertical-align: middle;
+  }
+  .td-prosp { color: #374151; }
+  .td-ref { color: #084fc1; font-weight: 700; }
+  .td-dim { color: #000; font-weight: 600; }
+
+  /* ─── PAGE 3: OKRs ─── */
+  .okr-badge {
+    background: #084fc1;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-radius: 4px;
+    display: inline-block;
+    padding: 4px 10px;
+    margin-bottom: 8px;
+  }
+  .okr-objetivo {
+    font-size: 14px;
+    font-weight: 700;
+    color: #000;
+    margin-bottom: 10px;
+  }
+  .okr-sep {
+    height: 1px;
+    background: #E5E7EB;
+    margin: 20px 0;
+  }
+  .td-kr { color: #000; font-size: 12px; }
+  .td-hoy { color: #DC2626; font-weight: 600; }
+  .td-meta { color: #084fc1; font-weight: 700; }
+  .td-refval { color: #374151; }
+
+  /* ─── PAGE 4: PROYECCIÓN ─── */
+  .proy-nota {
+    font-size: 10px;
+    color: #9CA3AF;
+    font-style: italic;
+    margin-top: 6px;
+    margin-bottom: 16px;
+  }
+  .td-acum-blue { color: #084fc1; font-weight: 700; }
+  .tr-statusquo td { color: #DC2626; }
+  .tr-statusquo .td-dim { color: #DC2626; font-weight: 700; }
+  .tr-statusquo .td-acum-blue { color: #DC2626; font-weight: 700; }
+  .tr-cons td { color: #000; }
+  .tr-opt td { color: #000; }
+
+  /* ─── QUOTE ─── */
+  .quote-box {
+    background: #edf4ff;
+    border-left: 4px solid #084fc1;
+    padding: 16px 20px;
+    border-radius: 0 6px 6px 0;
+    margin: 16px 0;
+  }
+  .quote-text {
+    font-size: 13px;
+    font-style: italic;
+    color: #374151;
+    line-height: 1.65;
+  }
+
+  /* ─── CTA BOX ─── */
+  .cta-box {
+    background: #084fc1;
+    border-radius: 6px;
+    padding: 22px 28px;
+    margin-top: 16px;
+  }
+  .cta-heading {
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 18px;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 8px;
+  }
+  .cta-body {
+    font-size: 13px;
+    color: rgba(255,255,255,0.9);
+    margin-bottom: 16px;
+    line-height: 1.55;
+  }
+  .cta-btn {
+    display: inline-block;
+    background: #fff;
+    color: #084fc1;
+    font-size: 13px;
+    font-weight: 700;
+    border-radius: 6px;
+    padding: 10px 24px;
+    text-decoration: none;
+    font-family: 'Josefin Sans', sans-serif;
+  }
+
+  /* Puppeteer en producción usa preferCSSPageSize: sin @page caería en Letter y rompería el corte de páginas.
+     last-child evita la 5ta página en blanco (mismo patrón que template.html de GTM). */
+  @page { size: A4; margin: 0; }
+  .page:last-child { page-break-after: avoid; }
+  @media print {
+    .page { page-break-after: always; }
+    .page:last-child { page-break-after: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════
+     PÁGINA 1: EL COSTO
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="header">
+    <div class="header-logo">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 85 14.2" height="26" aria-label="Delta Teams">
+        <polygon fill="#FFFFFF" points="12.1 7.3 12.1 7.3 12.1 7.3 12.1 7.3"/>
+        <g>
+          <path fill="#FFFFFF" d="M.7,10.9s1.5-.7,1.5-.7l2.4-5.6,1.5,3.6,1.3-.6L4.7,1.1c0,0-.1,0-.1,0L.1,11.5c.1-.2.3-.4.6-.6Z"/>
+          <polygon fill="#FFFFFF" points="7.2 10.8 8.2 13.1 9.7 13.1 8.3 9.6 7.2 10.8"/>
+          <path fill="#FFFFFF" d="M11.7,5.2l-4.3,2.3-1.4.7-3.9,2s-1.4.7-1.5.7c-.3.1-.5.3-.6.6h0c0,.4-.1.6,0,.9.2.6.9.9,1.5.6,0,0,0,0,.1,0l10.1-7.5c.1,0,0-.3-.1-.2Z"/>
+        </g>
+        <g>
+          <path fill="#FFFFFF" d="M15.2,5.6h2c.9,0,1.7.2,2.3.6s1.1.8,1.3,1.4c.3.6.4,1.2.4,1.8s-.2,1.4-.5,1.9c-.3.6-.8,1-1.4,1.3-.6.3-1.2.4-1.8.4h-2.4v-7.5ZM17.4,12.1c.6,0,1-.1,1.5-.3s.8-.5,1-.9c.2-.4.4-.9.4-1.5s-.1-1.1-.4-1.5-.6-.7-1-1c-.4-.2-.9-.3-1.4-.3h-1.3v5.5h1.2Z"/>
+          <path fill="#FFFFFF" d="M27.8,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M30.7,5.6v6.5h3.8v1h-4.8v-7.5h1Z"/>
+          <path fill="#FFFFFF" d="M39.7,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M44.6,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM44.2,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M55.6,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M62,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M67.8,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM67.5,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M78.6,5.3v7.7h-1v-4.8l-2.7,3.9h0l-2.7-3.8v4.7h-1v-7.7h0l3.7,5.2,3.7-5.2h0Z"/>
+          <path fill="#FFFFFF" d="M83.7,6.5c-.3,0-.6-.1-.9-.1-.4,0-.7,0-1,.3s-.4.4-.4.7.1.6.4.8c.3.2.7.4,1.2.6.4.1.7.3,1,.4.3.2.5.4.7.7.2.3.3.6.3,1.1s0,.8-.3,1.1c-.2.3-.5.6-.9.8-.4.2-.8.3-1.3.3s-.9,0-1.3-.2c-.4-.1-.8-.3-1.1-.6l.4-.8c.3.2.6.4.9.5.4.1.7.2,1,.2s.7-.1,1-.3c.3-.2.4-.5.4-.9s-.1-.6-.4-.8c-.3-.2-.6-.4-1.1-.6-.4-.2-.8-.3-1-.5-.3-.2-.5-.4-.7-.6-.2-.3-.3-.6-.3-1,0-.6.2-1.1.6-1.4.4-.4.9-.6,1.6-.6.8,0,1.6.2,2.2.6l-.4.8c-.3-.1-.6-.3-.9-.4Z"/>
+        </g>
+      </svg>
+    </div>
+    <div class="header-label">Diagnóstico ROI Personalizado</div>
+  </div>
+
+  <div class="content">
+
+    <!-- HERO -->
+    <div class="hero">
+      <div class="hero-headline">{{HEADLINE}}</div>
+      <div class="hero-subheadline">{{SUBHEADLINE}}</div>
+      <div class="hero-meta">{{COMPANY_INDUSTRY}} · {{COMPANY_HEADCOUNT_TOTAL}} personas · {{COMPANY_HEADCOUNT_LEADERSHIP}} líderes · {{COMPANY_LOCATION}} · {{REPORT_DATE}}</div>
+      <div class="hero-cost-label">Costo estimado de ineficiencia</div>
+      <div class="hero-cost-number">{{INEFF_COST_ANNUAL}}</div>
+      <div class="hero-cost-sublabel">Costo de ineficiencia / año</div>
+      <div class="hero-cols">
+        <div>
+          <div class="hero-col-label">Costo mensual</div>
+          <div class="hero-col-value">{{INEFF_COST_MONTHLY}}</div>
+        </div>
+        <div>
+          <div class="hero-col-label">Recuperación conservadora</div>
+          <div class="hero-col-value">{{SAVINGS_CONSERVATIVE_ANNUAL}}/año</div>
+        </div>
+        <div>
+          <div class="hero-col-label">Recuperación optimista</div>
+          <div class="hero-col-value">{{SAVINGS_OPTIMISTIC_ANNUAL}}/año</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DIAGNÓSTICO SECTORIAL -->
+    <div class="section-heading">{{DIAGNOSIS_HEADING}}</div>
+    <div class="section-body">
+      {{DIAGNOSIS_BODY}}
+    </div>
+    <div class="benchmark-nota">{{BENCHMARK_NOTA}}</div>
+
+    <!-- 4 FUENTES DE FRICCIÓN -->
+    <div class="section-heading">Las 4 fuentes de fricción que consumen presupuesto de liderazgo</div>
+    <div class="grid-2x2">
+      <div class="card">
+        <div class="card-title">{{INEFF_1_TITLE}}</div>
+        <div class="card-desc">{{INEFF_1_DESC}}</div>
+      </div>
+      <div class="card">
+        <div class="card-title">{{INEFF_2_TITLE}}</div>
+        <div class="card-desc">{{INEFF_2_DESC}}</div>
+      </div>
+      <div class="card">
+        <div class="card-title">{{INEFF_3_TITLE}}</div>
+        <div class="card-desc">{{INEFF_3_DESC}}</div>
+      </div>
+      <div class="card">
+        <div class="card-title">{{INEFF_4_TITLE}}</div>
+        <div class="card-desc">{{INEFF_4_DESC}}</div>
+      </div>
+    </div>
+
+    <!-- DISTRIBUCIÓN DE TIEMPO -->
+    <div class="section-heading">{{TIMEBARS_HEADING}}</div>
+    <div class="time-bars">
+      <div class="time-bar-row">
+        <div class="time-bar-label">{{BAR_1_LABEL}}</div>
+        <div class="time-bar-track"><div class="time-bar-fill" style="background:linear-gradient(to right,#084fc1 {{BAR_1_PCT}}%,#E9EDF3 {{BAR_1_PCT}}%);width:100%;"></div></div>
+        <div class="time-bar-pct">{{BAR_1_PCT}}%</div>
+      </div>
+      <div class="time-bar-row">
+        <div class="time-bar-label">{{BAR_2_LABEL}}</div>
+        <div class="time-bar-track"><div class="time-bar-fill" style="background:linear-gradient(to right,#084fc1 {{BAR_2_PCT}}%,#E9EDF3 {{BAR_2_PCT}}%);width:100%;"></div></div>
+        <div class="time-bar-pct">{{BAR_2_PCT}}%</div>
+      </div>
+      <div class="time-bar-row">
+        <div class="time-bar-label">{{BAR_3_LABEL}}</div>
+        <div class="time-bar-track"><div class="time-bar-fill" style="background:linear-gradient(to right,#084fc1 {{BAR_3_PCT}}%,#E9EDF3 {{BAR_3_PCT}}%);width:100%;"></div></div>
+        <div class="time-bar-pct">{{BAR_3_PCT}}%</div>
+      </div>
+      <div class="time-bar-row">
+        <div class="time-bar-label">{{BAR_4_LABEL}}</div>
+        <div class="time-bar-track"><div class="time-bar-fill" style="background:linear-gradient(to right,#084fc1 {{BAR_4_PCT}}%,#E9EDF3 {{BAR_4_PCT}}%);width:100%;"></div></div>
+        <div class="time-bar-pct">{{BAR_4_PCT}}%</div>
+      </div>
+    </div>
+
+  </div>
+  <div class="footer">Delta Teams · deltateams.com · Infraestructura de ejecución para equipos en crecimiento</div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════
+     PÁGINA 2: REFERENTE Y BRECHA
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="header">
+    <div class="header-logo">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 85 14.2" height="26" aria-label="Delta Teams">
+        <polygon fill="#FFFFFF" points="12.1 7.3 12.1 7.3 12.1 7.3 12.1 7.3"/>
+        <g>
+          <path fill="#FFFFFF" d="M.7,10.9s1.5-.7,1.5-.7l2.4-5.6,1.5,3.6,1.3-.6L4.7,1.1c0,0-.1,0-.1,0L.1,11.5c.1-.2.3-.4.6-.6Z"/>
+          <polygon fill="#FFFFFF" points="7.2 10.8 8.2 13.1 9.7 13.1 8.3 9.6 7.2 10.8"/>
+          <path fill="#FFFFFF" d="M11.7,5.2l-4.3,2.3-1.4.7-3.9,2s-1.4.7-1.5.7c-.3.1-.5.3-.6.6h0c0,.4-.1.6,0,.9.2.6.9.9,1.5.6,0,0,0,0,.1,0l10.1-7.5c.1,0,0-.3-.1-.2Z"/>
+        </g>
+        <g>
+          <path fill="#FFFFFF" d="M15.2,5.6h2c.9,0,1.7.2,2.3.6s1.1.8,1.3,1.4c.3.6.4,1.2.4,1.8s-.2,1.4-.5,1.9c-.3.6-.8,1-1.4,1.3-.6.3-1.2.4-1.8.4h-2.4v-7.5ZM17.4,12.1c.6,0,1-.1,1.5-.3s.8-.5,1-.9c.2-.4.4-.9.4-1.5s-.1-1.1-.4-1.5-.6-.7-1-1c-.4-.2-.9-.3-1.4-.3h-1.3v5.5h1.2Z"/>
+          <path fill="#FFFFFF" d="M27.8,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M30.7,5.6v6.5h3.8v1h-4.8v-7.5h1Z"/>
+          <path fill="#FFFFFF" d="M39.7,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M44.6,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM44.2,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M55.6,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M62,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M67.8,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM67.5,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M78.6,5.3v7.7h-1v-4.8l-2.7,3.9h0l-2.7-3.8v4.7h-1v-7.7h0l3.7,5.2,3.7-5.2h0Z"/>
+          <path fill="#FFFFFF" d="M83.7,6.5c-.3,0-.6-.1-.9-.1-.4,0-.7,0-1,.3s-.4.4-.4.7.1.6.4.8c.3.2.7.4,1.2.6.4.1.7.3,1,.4.3.2.5.4.7.7.2.3.3.6.3,1.1s0,.8-.3,1.1c-.2.3-.5.6-.9.8-.4.2-.8.3-1.3.3s-.9,0-1.3-.2c-.4-.1-.8-.3-1.1-.6l.4-.8c.3.2.6.4.9.5.4.1.7.2,1,.2s.7-.1,1-.3c.3-.2.4-.5.4-.9s-.1-.6-.4-.8c-.3-.2-.6-.4-1.1-.6-.4-.2-.8-.3-1-.5-.3-.2-.5-.4-.7-.6-.2-.3-.3-.6-.3-1,0-.6.2-1.1.6-1.4.4-.4.9-.6,1.6-.6.8,0,1.6.2,2.2.6l-.4.8c-.3-.1-.6-.3-.9-.4Z"/>
+        </g>
+      </svg>
+    </div>
+    <div class="header-label">Referente y Brecha</div>
+  </div>
+
+  <div class="content">
+
+    <div class="section-heading">El referente del sector en {{COMPANY_COUNTRY}}</div>
+
+    <div class="ref-block">
+      <div class="ref-name">{{REF_NAME}}</div>
+      <div class="ref-desc">{{REF_DESC}}</div>
+      <div class="ref-metrics">
+        <div class="ref-metric-box">
+          <div class="ref-metric-label">{{REF_METRIC_1_LABEL}}</div>
+          <div class="ref-metric-value">{{REF_METRIC_1_VALUE}}</div>
+        </div>
+        <div class="ref-metric-box">
+          <div class="ref-metric-label">{{REF_METRIC_2_LABEL}}</div>
+          <div class="ref-metric-value">{{REF_METRIC_2_VALUE}}</div>
+        </div>
+        <div class="ref-metric-box">
+          <div class="ref-metric-label">{{REF_METRIC_3_LABEL}}</div>
+          <div class="ref-metric-value">{{REF_METRIC_3_VALUE}}</div>
+        </div>
+        <div class="ref-metric-box">
+          <div class="ref-metric-label">{{REF_METRIC_4_LABEL}}</div>
+          <div class="ref-metric-value">{{REF_METRIC_4_VALUE}}</div>
+        </div>
+      </div>
+      <div class="ref-narrativa">
+        {{REF_NARRATIVA}}
+      </div>
+      <div class="ref-fuente">{{REF_FUENTE}}</div>
+    </div>
+
+    <!-- TABLA DE BRECHAS -->
+    <div class="section-heading">Brechas operativas clave</div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:35%">Dimensión</th>
+          <th style="width:30%">{{COMPANY_NAME}}</th>
+          <th style="width:30%">{{REF_NAME}}</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="td-dim">{{GAP_1_DIM}}</td>
+          <td class="td-prosp">{{GAP_1_PROSPECT}}</td>
+          <td class="td-ref">{{GAP_1_REF}}</td>
+        </tr>
+        <tr>
+          <td class="td-dim">{{GAP_2_DIM}}</td>
+          <td class="td-prosp">{{GAP_2_PROSPECT}}</td>
+          <td class="td-ref">{{GAP_2_REF}}</td>
+        </tr>
+        <tr>
+          <td class="td-dim">{{GAP_3_DIM}}</td>
+          <td class="td-prosp">{{GAP_3_PROSPECT}}</td>
+          <td class="td-ref">{{GAP_3_REF}}</td>
+        </tr>
+        <tr>
+          <td class="td-dim">{{GAP_4_DIM}}</td>
+          <td class="td-prosp">{{GAP_4_PROSPECT}}</td>
+          <td class="td-ref">{{GAP_4_REF}}</td>
+        </tr>
+        <tr>
+          <td class="td-dim">{{GAP_5_DIM}}</td>
+          <td class="td-prosp">{{GAP_5_PROSPECT}}</td>
+          <td class="td-ref">{{GAP_5_REF}}</td>
+        </tr>
+        <tr>
+          <td class="td-dim">{{GAP_6_DIM}}</td>
+          <td class="td-prosp">{{GAP_6_PROSPECT}}</td>
+          <td class="td-ref">{{GAP_6_REF}}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div style="margin-top:14px;">
+      <div class="section-heading">Por qué la brecha no es de tamaño</div>
+      <div class="section-body">
+        {{GAP_CLOSING_BODY}}
+      </div>
+    </div>
+
+  </div>
+  <div class="footer">Delta Teams · deltateams.com · Infraestructura de ejecución para equipos en crecimiento</div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════
+     PÁGINA 3: EL PLAN · 6 MESES
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="header">
+    <div class="header-logo">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 85 14.2" height="26" aria-label="Delta Teams">
+        <polygon fill="#FFFFFF" points="12.1 7.3 12.1 7.3 12.1 7.3 12.1 7.3"/>
+        <g>
+          <path fill="#FFFFFF" d="M.7,10.9s1.5-.7,1.5-.7l2.4-5.6,1.5,3.6,1.3-.6L4.7,1.1c0,0-.1,0-.1,0L.1,11.5c.1-.2.3-.4.6-.6Z"/>
+          <polygon fill="#FFFFFF" points="7.2 10.8 8.2 13.1 9.7 13.1 8.3 9.6 7.2 10.8"/>
+          <path fill="#FFFFFF" d="M11.7,5.2l-4.3,2.3-1.4.7-3.9,2s-1.4.7-1.5.7c-.3.1-.5.3-.6.6h0c0,.4-.1.6,0,.9.2.6.9.9,1.5.6,0,0,0,0,.1,0l10.1-7.5c.1,0,0-.3-.1-.2Z"/>
+        </g>
+        <g>
+          <path fill="#FFFFFF" d="M15.2,5.6h2c.9,0,1.7.2,2.3.6s1.1.8,1.3,1.4c.3.6.4,1.2.4,1.8s-.2,1.4-.5,1.9c-.3.6-.8,1-1.4,1.3-.6.3-1.2.4-1.8.4h-2.4v-7.5ZM17.4,12.1c.6,0,1-.1,1.5-.3s.8-.5,1-.9c.2-.4.4-.9.4-1.5s-.1-1.1-.4-1.5-.6-.7-1-1c-.4-.2-.9-.3-1.4-.3h-1.3v5.5h1.2Z"/>
+          <path fill="#FFFFFF" d="M27.8,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M30.7,5.6v6.5h3.8v1h-4.8v-7.5h1Z"/>
+          <path fill="#FFFFFF" d="M39.7,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M44.6,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM44.2,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M55.6,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M62,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M67.8,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM67.5,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M78.6,5.3v7.7h-1v-4.8l-2.7,3.9h0l-2.7-3.8v4.7h-1v-7.7h0l3.7,5.2,3.7-5.2h0Z"/>
+          <path fill="#FFFFFF" d="M83.7,6.5c-.3,0-.6-.1-.9-.1-.4,0-.7,0-1,.3s-.4.4-.4.7.1.6.4.8c.3.2.7.4,1.2.6.4.1.7.3,1,.4.3.2.5.4.7.7.2.3.3.6.3,1.1s0,.8-.3,1.1c-.2.3-.5.6-.9.8-.4.2-.8.3-1.3.3s-.9,0-1.3-.2c-.4-.1-.8-.3-1.1-.6l.4-.8c.3.2.6.4.9.5.4.1.7.2,1,.2s.7-.1,1-.3c.3-.2.4-.5.4-.9s-.1-.6-.4-.8c-.3-.2-.6-.4-1.1-.6-.4-.2-.8-.3-1-.5-.3-.2-.5-.4-.7-.6-.2-.3-.3-.6-.3-1,0-.6.2-1.1.6-1.4.4-.4.9-.6,1.6-.6.8,0,1.6.2,2.2.6l-.4.8c-.3-.1-.6-.3-.9-.4Z"/>
+        </g>
+      </svg>
+    </div>
+    <div class="header-label">El Plan · 6 Meses</div>
+  </div>
+
+  <div class="content">
+
+    <div class="section-heading">Plan de ejecución en 2 trimestres</div>
+    <div class="section-body" style="margin-bottom:16px;">
+      {{PLAN_INTRO}}
+    </div>
+
+    <!-- OKR 1 -->
+    <div class="okr-badge">Q1 · Días 1-90</div>
+    <div class="okr-objetivo">{{OKR_1_OBJETIVO}}</div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:40%">Key Result</th>
+          <th style="width:18%">Hoy</th>
+          <th style="width:18%">Meta Q1</th>
+          <th style="width:18%">Referente</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="td-kr">{{OKR_1_KR_1}}</td>
+          <td class="td-hoy">{{OKR_1_HOY_1}}</td>
+          <td class="td-meta">{{OKR_1_META_1}}</td>
+          <td class="td-refval">{{OKR_1_REF_1}}</td>
+        </tr>
+        <tr>
+          <td class="td-kr">{{OKR_1_KR_2}}</td>
+          <td class="td-hoy">{{OKR_1_HOY_2}}</td>
+          <td class="td-meta">{{OKR_1_META_2}}</td>
+          <td class="td-refval">{{OKR_1_REF_2}}</td>
+        </tr>
+        <tr>
+          <td class="td-kr">{{OKR_1_KR_3}}</td>
+          <td class="td-hoy">{{OKR_1_HOY_3}}</td>
+          <td class="td-meta">{{OKR_1_META_3}}</td>
+          <td class="td-refval">{{OKR_1_REF_3}}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="okr-sep"></div>
+
+    <!-- OKR 2 -->
+    <div class="okr-badge">Q2 · Días 91-180</div>
+    <div class="okr-objetivo">{{OKR_2_OBJETIVO}}</div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:40%">Key Result</th>
+          <th style="width:18%">Hoy</th>
+          <th style="width:18%">Meta Q2</th>
+          <th style="width:18%">Referente</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="td-kr">{{OKR_2_KR_1}}</td>
+          <td class="td-hoy">{{OKR_2_HOY_1}}</td>
+          <td class="td-meta">{{OKR_2_META_1}}</td>
+          <td class="td-refval">{{OKR_2_REF_1}}</td>
+        </tr>
+        <tr>
+          <td class="td-kr">{{OKR_2_KR_2}}</td>
+          <td class="td-hoy">{{OKR_2_HOY_2}}</td>
+          <td class="td-meta">{{OKR_2_META_2}}</td>
+          <td class="td-refval">{{OKR_2_REF_2}}</td>
+        </tr>
+        <tr>
+          <td class="td-kr">{{OKR_2_KR_3}}</td>
+          <td class="td-hoy">{{OKR_2_HOY_3}}</td>
+          <td class="td-meta">{{OKR_2_META_3}}</td>
+          <td class="td-refval">{{OKR_2_REF_3}}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div style="margin-top:18px;">
+      <div class="section-heading">Lo que Delta activa en 90 días</div>
+      <div class="grid-2x2">
+        <div class="card">
+          <div class="card-title">{{BENEFIT_1_TITLE}}</div>
+          <div class="card-desc">{{BENEFIT_1_DESC}}</div>
+        </div>
+        <div class="card">
+          <div class="card-title">{{BENEFIT_2_TITLE}}</div>
+          <div class="card-desc">{{BENEFIT_2_DESC}}</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <div class="footer">Delta Teams · deltateams.com · Infraestructura de ejecución para equipos en crecimiento</div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════
+     PÁGINA 4: PROYECCIÓN Y SIGUIENTE PASO
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="header">
+    <div class="header-logo">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 85 14.2" height="26" aria-label="Delta Teams">
+        <polygon fill="#FFFFFF" points="12.1 7.3 12.1 7.3 12.1 7.3 12.1 7.3"/>
+        <g>
+          <path fill="#FFFFFF" d="M.7,10.9s1.5-.7,1.5-.7l2.4-5.6,1.5,3.6,1.3-.6L4.7,1.1c0,0-.1,0-.1,0L.1,11.5c.1-.2.3-.4.6-.6Z"/>
+          <polygon fill="#FFFFFF" points="7.2 10.8 8.2 13.1 9.7 13.1 8.3 9.6 7.2 10.8"/>
+          <path fill="#FFFFFF" d="M11.7,5.2l-4.3,2.3-1.4.7-3.9,2s-1.4.7-1.5.7c-.3.1-.5.3-.6.6h0c0,.4-.1.6,0,.9.2.6.9.9,1.5.6,0,0,0,0,.1,0l10.1-7.5c.1,0,0-.3-.1-.2Z"/>
+        </g>
+        <g>
+          <path fill="#FFFFFF" d="M15.2,5.6h2c.9,0,1.7.2,2.3.6s1.1.8,1.3,1.4c.3.6.4,1.2.4,1.8s-.2,1.4-.5,1.9c-.3.6-.8,1-1.4,1.3-.6.3-1.2.4-1.8.4h-2.4v-7.5ZM17.4,12.1c.6,0,1-.1,1.5-.3s.8-.5,1-.9c.2-.4.4-.9.4-1.5s-.1-1.1-.4-1.5-.6-.7-1-1c-.4-.2-.9-.3-1.4-.3h-1.3v5.5h1.2Z"/>
+          <path fill="#FFFFFF" d="M27.8,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M30.7,5.6v6.5h3.8v1h-4.8v-7.5h1Z"/>
+          <path fill="#FFFFFF" d="M39.7,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M44.6,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM44.2,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M55.6,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+          <path fill="#FFFFFF" d="M62,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+          <path fill="#FFFFFF" d="M67.8,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM67.5,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+          <path fill="#FFFFFF" d="M78.6,5.3v7.7h-1v-4.8l-2.7,3.9h0l-2.7-3.8v4.7h-1v-7.7h0l3.7,5.2,3.7-5.2h0Z"/>
+          <path fill="#FFFFFF" d="M83.7,6.5c-.3,0-.6-.1-.9-.1-.4,0-.7,0-1,.3s-.4.4-.4.7.1.6.4.8c.3.2.7.4,1.2.6.4.1.7.3,1,.4.3.2.5.4.7.7.2.3.3.6.3,1.1s0,.8-.3,1.1c-.2.3-.5.6-.9.8-.4.2-.8.3-1.3.3s-.9,0-1.3-.2c-.4-.1-.8-.3-1.1-.6l.4-.8c.3.2.6.4.9.5.4.1.7.2,1,.2s.7-.1,1-.3c.3-.2.4-.5.4-.9s-.1-.6-.4-.8c-.3-.2-.6-.4-1.1-.6-.4-.2-.8-.3-1-.5-.3-.2-.5-.4-.7-.6-.2-.3-.3-.6-.3-1,0-.6.2-1.1.6-1.4.4-.4.9-.6,1.6-.6.8,0,1.6.2,2.2.6l-.4.8c-.3-.1-.6-.3-.9-.4Z"/>
+        </g>
+      </svg>
+    </div>
+    <div class="header-label">Proyección y Siguiente Paso</div>
+  </div>
+
+  <div class="content">
+
+    <div class="section-heading">Proyección de costo acumulado a 3 años</div>
+
+    <table>
+      <thead>
+        <tr>
+          <th style="width:28%">Escenario</th>
+          <th style="width:18%">Año 1</th>
+          <th style="width:18%">Año 2</th>
+          <th style="width:18%">Año 3</th>
+          <th style="width:18%">Acumulado 3 años</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="tr-statusquo">
+          <td class="td-dim">Costo status quo</td>
+          <td>{{PROJ_SQ_Y1}}</td>
+          <td>{{PROJ_SQ_Y2}}</td>
+          <td>{{PROJ_SQ_Y3}}</td>
+          <td class="td-acum-blue">{{PROJ_SQ_TOTAL}}</td>
+        </tr>
+        <tr class="tr-cons" style="background:#edf4ff;">
+          <td class="td-dim">Ahorro conservador (60%)</td>
+          <td>{{PROJ_CONS_Y1}}</td>
+          <td>{{PROJ_CONS_Y2}}</td>
+          <td>{{PROJ_CONS_Y3}}</td>
+          <td class="td-acum-blue">{{PROJ_CONS_TOTAL}}</td>
+        </tr>
+        <tr class="tr-opt" style="background:#edf4ff;">
+          <td class="td-dim">Ahorro optimista (80%)</td>
+          <td>{{PROJ_OPT_Y1}}</td>
+          <td>{{PROJ_OPT_Y2}}</td>
+          <td>{{PROJ_OPT_Y3}}</td>
+          <td class="td-acum-blue">{{PROJ_OPT_TOTAL}}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="proy-nota">
+      {{PROJ_NOTA}}
+    </div>
+
+    <!-- QUOTE -->
+    <div class="quote-box">
+      <div class="quote-text">
+        {{QUOTE}}
+      </div>
+    </div>
+
+    <!-- CTA -->
+    <div class="cta-box">
+      <div class="cta-heading">{{CTA_HEADING}}</div>
+      <div class="cta-body">
+        {{CTA_BODY}}
+      </div>
+      <a class="cta-btn" href="https://calendly.com/camilaacosta-squads/30min?utm_source=email&utm_medium=diagnostico&utm_campaign=roi_personalizado">Agendar 20 min</a>
+    </div>
+
+  </div>
+  <div class="footer">Delta Teams · deltateams.com · Infraestructura de ejecución para equipos en crecimiento</div>
+</div>
+
+</body>
+</html>
