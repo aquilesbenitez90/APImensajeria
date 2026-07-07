@@ -1444,6 +1444,9 @@ function _mapFuncion(name){
   // tiene que ser igual a una palabra de un label de función (ej. "marketing" en "Marketing / Comunicación" -> mrkt).
   const words = new Set(n.split(' ').filter(w => w.length >= 3));
   for(const [label,code] of Object.entries(fns)){ const lw=_normTax(label).split(' '); if(lw.some(w => w.length>=3 && words.has(w))) return code; }
+  // alias por PALABRA COMPLETA: ej. "Datos / Analytics / IT" -> palabra "datos" == alias "datos" -> Information Technology.
+  // Palabra completa (no substring), así "operations" NO matchea el alias "ti"/"it". Solo alias-key de >=3 letras.
+  for(const [k,lbl] of Object.entries(al)){ const kn=_normTax(k); if(kn.length>=3 && !kn.includes(' ') && words.has(kn) && fns[lbl]) return fns[lbl]; }
   return null;
 }
 // Sales Navigator NO acepta rangos de headcount arbitrarios: solo estos brackets fijos.
