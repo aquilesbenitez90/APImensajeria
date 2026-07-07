@@ -646,6 +646,13 @@ Respondé SOLO este JSON:
   const router = express.Router();
 
   router.post('/generar', (req, res) => {
+    // GATE DE LANDING (mismo patrón que /generar del GTM): si DELTA_LANDING_KEY (o LANDING_KEY,
+    // para reusar el mismo servicio de landing) está seteada, se exige la clave en el header.
+    // Sin la env no gatea: n8n/producción siguen igual que siempre.
+    const _landingKey = process.env.DELTA_LANDING_KEY || process.env.LANDING_KEY;
+    if (_landingKey && req.header('x-landing-key') !== _landingKey) {
+      return res.status(401).json({ error: 'Clave invalida' });
+    }
     const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug, test } = req.body || {};
     if (!empresa && !dominio && !profileId) return res.status(400).json({ error: 'Falta empresa, dominio o profileId' });
 
