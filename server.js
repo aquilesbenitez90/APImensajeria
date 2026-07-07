@@ -773,7 +773,7 @@ APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concret
 // ---------------------------------------------------------------------------
 // Llamadas a Claude — CON PROMPT CACHING + logging de tokens
 // ---------------------------------------------------------------------------
-async function callClaude({ model, system, messages, tools = [], stopSequences = [], maxTokens = 16000, temperature }) {
+async function callClaude({ model, system, messages, tools = [], stopSequences = [], maxTokens = 16000, temperature, outputConfig }) {
   const body = {
     model,
     max_tokens: maxTokens,
@@ -782,6 +782,11 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
   };
   // Solo se setea si se pasa explícitamente; las llamadas que no la pasan quedan en el default del modelo.
   if (typeof temperature === 'number') body.temperature = temperature;
+  // STRUCTURED OUTPUTS (práctica recomendada de Anthropic para JSON confiable): si el caller pasa
+  // outputConfig ({format:{type:'json_schema', schema}}), la API garantiza que la respuesta valida
+  // contra el schema. Opt-in por llamada: las llamadas existentes (GTM) no cambian en nada.
+  // OJO: incompatible con citations (web_search) → no usar en llamadas con tools de búsqueda.
+  if (outputConfig) body.output_config = outputConfig;
 
   if (tools.length > 0) {
     const cachedTools = tools.map((t, i) => (i === tools.length - 1) ? { ...t, cache_control: { type: 'ephemeral' } } : t);

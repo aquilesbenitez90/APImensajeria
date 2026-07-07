@@ -72,6 +72,43 @@ const _RE_TEPI = [
 
 const _RE_LIDER = /\b(ceo|coo|cfo|cto|cmo|chro|cio|chief|founder|co[- ]?founder|fundador(?:a)?|cofundador(?:a)?|director(?:a)?|gerente|general manager|country manager|head of|vp|vice ?president(?:e)?|presidente|presidenta|managing partner|partner|socio|socia|owner|due[nñ][oa])\b/i;
 
+// ── STRUCTURED OUTPUTS (práctica recomendada de Anthropic para JSON confiable) ──
+// La API garantiza que CONTENT, JUEZ y ACORTE validan contra su schema: se eliminan de raíz
+// los errores de parseo y de forma (pct llega como entero garantizado). Los LARGOS no se pueden
+// garantizar por schema (min/maxLength no está soportado en structured outputs): de eso siguen
+// encargándose las guardas + el recorte determinístico. RESEARCH queda afuera a propósito:
+// usa web_search (citations) y citations + structured outputs son incompatibles (400).
+const _obj = (props) => ({ type: 'object', properties: props, required: Object.keys(props), additionalProperties: false });
+const _arr = (items) => ({ type: 'array', items });
+const _str = { type: 'string' };
+const _bool = { type: 'boolean' };
+const SCHEMA_CONTENT = _obj({
+  headline: _str, subheadline: _str,
+  diagnosis: _obj({ heading: _str, body: _str }),
+  benchmark_nota: _str,
+  ineficiencias: _arr(_obj({ title: _str, desc: _str })),
+  timebars: _obj({ heading: _str, bars: _arr(_obj({ label: _str, pct: { type: 'integer' } })) }),
+  ref_narrativa: _str,
+  gaps: _arr(_obj({ dim: _str, prospect: _str, ref: _str })),
+  gap_closing: _str,
+  plan_intro: _str,
+  okrs: _arr(_obj({ objetivo: _str, krs: _arr(_obj({ kr: _str, hoy: _str, meta: _str, ref: _str })) })),
+  benefits: _arr(_obj({ title: _str, desc: _str })),
+  proj_nota: _str, quote: _str,
+  cta: _obj({ heading: _str, body: _str }),
+});
+const SCHEMA_JUDGE = _obj({
+  veredicto: { type: 'string', enum: ['APROBADO', 'RECHAZADO'] },
+  score: { type: 'integer' },
+  criterios: _obj({
+    anti_invencion: _bool, referente: _bool, patron_industria: _bool, framing_tepi: _bool,
+    idioma: _bool, coherencia_numerica: _bool, honestidad: _bool, cta_marca: _bool,
+  }),
+  fixes: _arr(_str),
+});
+const SCHEMA_ACORTE = _obj({ campos: _arr(_obj({ ruta: _str, texto: _str })) });
+const _FORMATO = (schema) => ({ format: { type: 'json_schema', schema } });
+
 module.exports = function crearDeltaRouter(deps) {
   const {
     callClaude, callMCP, resolverCliente, renderizarPdf, contarPaginas,
@@ -506,14 +543,15 @@ SOLO este JSON (sin markdown):
     const items = largos.map(l => ({ ruta: l.ruta, max: l.max, texto: String(_getRuta(c, l.ruta) || '') }));
     const resp = await callClaude({
       model: MODEL_DELTA_GEN,
-      system: 'Sos el editor de textos de Delta Teams. Recibís campos de un documento que EXCEDEN su máximo de caracteres. Reescribí CADA UNO por debajo de su "max" (apuntá al 85% del max, contando caracteres CON espacios), conservando el sentido y el dato principal. IMPORTANTE: REESCRIBÍ, no cortes. La salida debe ser texto completo con oraciones terminadas y sentido propio. PROHIBIDO devolver frases cortadas a la mitad, números partidos (si el original dice "7.67%" jamás puede quedar "67%"; si dice "3.000" jamás "000") o texto que empiece en mitad de una idea. Preferí ELIMINAR una idea entera antes que mutilar una frase. Reglas duras: sin em dashes, sin montos de dinero nuevos, sin DOS/Rocks/L10/EOS/Traction, español LATAM neutro sin voseo. Respondé SOLO un JSON de la forma {"<ruta>": "<texto nuevo>", ...} con EXACTAMENTE las mismas rutas que recibiste.',
+      system: 'Sos el editor de textos de Delta Teams. Recibís campos de un documento que EXCEDEN su máximo de caracteres. Reescribí CADA UNO por debajo de su "max" (apuntá al 85% del max, contando caracteres CON espacios), conservando el sentido y el dato principal. IMPORTANTE: REESCRIBÍ, no cortes. La salida debe ser texto completo con oraciones terminadas y sentido propio. PROHIBIDO devolver frases cortadas a la mitad, números partidos (si el original dice "7.67%" jamás puede quedar "67%"; si dice "3.000" jamás "000") o texto que empiece en mitad de una idea. Preferí ELIMINAR una idea entera antes que mutilar una frase. Reglas duras: sin em dashes, sin montos de dinero nuevos, sin DOS/Rocks/L10/EOS/Traction, español LATAM neutro sin voseo. Respondé un JSON {"campos":[{"ruta":"...","texto":"..."}]} con EXACTAMENTE las mismas rutas que recibiste.',
       messages: [{ role: 'user', content: JSON.stringify(items) }],
       maxTokens: 3000,
+      outputConfig: _FORMATO(SCHEMA_ACORTE),
     });
     const nuevos = _parseJSON(_textoDe(resp), 'ACORTE');
     const out = JSON.parse(JSON.stringify(c));
-    for (const [ruta, texto] of Object.entries(nuevos)) {
-      if (typeof texto === 'string' && texto.trim()) _setRuta(out, ruta, _sanearDeep(texto));
+    for (const item of (nuevos.campos || [])) {
+      if (item && typeof item.texto === 'string' && item.texto.trim()) _setRuta(out, item.ruta, _sanearDeep(item.texto));
     }
     return out;
   }
@@ -532,6 +570,7 @@ SOLO este JSON (sin markdown):
           role: 'user',
           content: `## Empresa prospecto\n${ctx.empresa} (${research.company.industry}, ${research.company.country}, ${ctx.headcountTotal} personas, ${lidNota}).\nDescripción: ${research.company.descripcion || '-'}\nHechos con fuente: ${JSON.stringify(research.company.hechos || [])}\nPatrón del sector: ${research.sector && research.sector.patron || '-'}\n\n## Referente (research verificado)\n${JSON.stringify(research.referente)}\n\n## Supuestos aplicados\ncosto hora USD ${ctx.supuestos.costoHora} · ${ctx.supuestos.horasPerdidas}h perdidas/semana por líder · ${ctx.liderazgo.cantidad} líderes · Justificación: ${research.supuestos.justificacion || '-'}\n\n## Montos YA calculados (NO escribas ninguno en el copy; solo contexto)\n${numsTxt}\n\n## Fecha del documento\n${ctx.fecha}${feedback}`,
         }],
+        outputConfig: _FORMATO(SCHEMA_CONTENT),
       });
       let c;
       try { c = _sanearDeep(_parseJSON(_textoDe(resp), 'CONTENT')); }
@@ -622,6 +661,7 @@ Respondé SOLO este JSON:
         messages: [{ role: 'user', content: JSON.stringify(payload) }],
         temperature: 0,
         maxTokens: 4000,
+        outputConfig: _FORMATO(SCHEMA_JUDGE),
       });
       const j = _parseJSON(_textoDe(resp), 'JUDGE');
       const veredicto = j.veredicto === 'APROBADO' ? 'APROBADO' : 'RECHAZADO';
