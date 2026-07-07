@@ -109,6 +109,21 @@ const SCHEMA_JUDGE = _obj({
 const SCHEMA_ACORTE = _obj({ campos: _arr(_obj({ ruta: _str, texto: _str })) });
 const _FORMATO = (schema) => ({ format: { type: 'json_schema', schema } });
 
+// PRESUPUESTO PADDING (corrida real 4: 16-22 campos pasados por intento → todo el copy pasaba
+// por la picadora de recortes y salían artefactos). Al modelo se le muestra el 85% del límite:
+// su desborde típico cae DENTRO del límite real y casi nada se recorta. La validación usa LIMITES.
+const _p = (limite) => Math.floor(limite * 0.85);
+
+// Guarda anti-número-roto: la reescritura de un campo no puede contener un número que no
+// estuviera en el original ("15,5%" jamás puede volver como "5%", "4.500" jamás como "500").
+function _numeroRoto(original, nuevo) {
+  const tokens = new Set((String(original).match(/\d[\d.,]*/g) || []).map(t => t.replace(/[.,]+$/, '')));
+  for (const t of (String(nuevo).match(/\d[\d.,]*/g) || [])) {
+    if (!tokens.has(t.replace(/[.,]+$/, ''))) return true;
+  }
+  return false;
+}
+
 module.exports = function crearDeltaRouter(deps) {
   const {
     callClaude, callMCP, resolverCliente, renderizarPdf, contarPaginas,
@@ -308,12 +323,13 @@ Sos el redactor comercial de Delta Teams. Recibís research verificado + montos 
 
 ## IDENTIDAD
 - Delta Teams, categoría TEPI (Team Execution & Performance Infrastructure). Voz ejecutiva, directa, orientada a resultados. Sin motivacional ni genérico.
-- Cifras propias citables (ÚNICAS permitidas como track record): 61.4% avance OKRs (IBT), 81.7% retención (IBT), -30% reuniones improductivas, +20-40% velocidad de ejecución, implementación en 90 días.
+- Cifras propias citables (ÚNICAS permitidas como track record): 61.4% avance OKRs (IBT), 81.7% retención (IBT), -30% reuniones improductivas, +20-40% velocidad de ejecución, implementación en 90 días. Si citás el rango, citalo COMPLETO ("+20-40%"), nunca un extremo suelto.
 
 ## REGLAS DURAS (violarlas = rechazo)
 1. FRAMING TEPI: PROHIBIDO escribir DOS, Rocks, L10, People Analyzer, EOS o Traction. Usá: "infraestructura de ejecución", "sistema de reuniones estructurado", "visibilidad del equipo", "objetivos con dueño y seguimiento", "decisiones con trazabilidad".
 2. SIN EM DASHES: prohibido "—". Usá coma, punto o reestructurá.
-3. DIAGNÓSTICO = PATRÓN DE INDUSTRIA: diagnosis.body habla del patrón del sector ("Las empresas de X en LATAM enfrentan..."), JAMÁS afirma conductas del CEO/founder/contacto específico. No nombres a ninguna persona.
+3. DIAGNÓSTICO = PATRÓN DE INDUSTRIA PURO: diagnosis.body habla del patrón del sector ("Las empresas de X en LATAM enfrentan..."), SIN cifras, países ni hechos específicos del prospecto (esos van en fricciones y gaps), y JAMÁS afirma conductas del CEO/founder/fundadores/contacto. No nombres a ninguna persona en todo el documento.
+3b. PERSONALIZACIÓN CORRECTA: las FRICCIONES (ineficiencias) sí deben anclarse en hechos CONFIRMADOS del research sobre la EMPRESA (producto propio, expansión, adquisiciones, multi-país), nunca sobre personas. Si un hecho no está en el research, NO va (no inventes líneas de servicio, fechas ni "lanzamientos recientes"). En GAPS, el lado prospecto usa SOLO datos confirmados del sistema o hechos del research; sin dato confiable escribí "Sin dato" o una formulación de patrón; nunca mezcles dos fuentes de headcount (usá el confirmado).
 4. MONTOS: NO escribas NINGÚN monto de dinero. Los montos ya están calculados y el sistema los pone en el template. Si necesitás referirte al costo, hacelo sin cifra ("lo que eso cuesta por año"). Únicas excepciones: métricas del REFERENTE que vengan del research (con su valor textual) y el costo hora del supuesto (te lo doy en el contexto), que podés citar en benchmark_nota.
 5. ESPAÑOL LATAM NEUTRO: sin voseo argentino. Términos del sector (OKRs, KPIs, Scorecard, accountability) quedan en inglés.
 6. CTA: cta.body invita a "20 minutos con Camila". NUNCA el nombre del prospecto en el CTA.
@@ -335,9 +351,9 @@ Reuniones que generan decisiones documentadas con seguimiento · Dashboard unifi
 2 OKRs (Q1 días 1-90, Q2 días 91-180) que cierren las brechas identificadas. Cada uno: objetivo + 3 KRs con "hoy" (estado plausible del prospecto, honesto: "Sin dato" o "Línea base" si no sabés), "meta" (Q1/Q2) y "referente" (benchmark del referente o cifra Delta de la whitelist). Celdas hoy/meta/referente ULTRA cortas (máx 20 chars). REGLA: la META nunca puede SUPERAR el benchmark de su columna referente (prometer 85% con referente 81.7% implica que Delta garantiza más que su propio track record: prohibido; la meta debe ser igual o más conservadora que el referente citado).
 plan_intro debe mencionar los DOS trimestres (Q1 días 1-90 y Q2 días 91-180) en frases cortas, sin describir un plan de fases distinto al de la página.
 
-## PRESUPUESTOS DE LONGITUD (chars máx, NO los superes; el sistema rechaza si te pasás)
-Apuntá a ~85% del máximo de cada campo, contando caracteres CON espacios. Ante la duda, MÁS CORTO: un campo corto es válido, uno pasado se rechaza.
-headline 110 · subheadline 240 · diagnosis.heading 60 · diagnosis.body 560 · benchmark_nota 190 · ineficiencias title 55 / desc 240 · timebars.heading 75 / bar label 45 · ref_narrativa 520 · gaps dim 30 / prospect 40 / ref 45 · gap_closing 480 · plan_intro 260 · okr objetivo 80 / kr 80 / celdas 20 · benefits title 55 / desc 170 · proj_nota 340 · quote 280 · cta.heading 90 / cta.body 220.
+## PRESUPUESTOS DE LONGITUD (chars máx CON espacios; NO los superes, el sistema recorta o rechaza)
+Ante la duda, MÁS CORTO: un campo corto es válido, uno pasado se recorta por código y pierde calidad.
+headline ${_p(LIMITES.HEADLINE)} · subheadline ${_p(LIMITES.SUBHEADLINE)} · diagnosis.heading ${_p(LIMITES.DIAGNOSIS_HEADING)} · diagnosis.body ${_p(LIMITES.DIAGNOSIS_BODY)} · benchmark_nota ${_p(LIMITES.BENCHMARK_NOTA)} · ineficiencias title ${_p(LIMITES.INEFF_TITLE)} / desc ${_p(LIMITES.INEFF_DESC)} · timebars.heading ${_p(LIMITES.TIMEBARS_HEADING)} / bar label ${_p(LIMITES.BAR_LABEL)} · ref_narrativa ${_p(LIMITES.REF_NARRATIVA)} · gaps dim ${_p(LIMITES.GAP_DIM)} / prospect ${_p(LIMITES.GAP_PROSPECT)} / ref ${_p(LIMITES.GAP_REF)} · gap_closing ${_p(LIMITES.GAP_CLOSING_BODY)} · plan_intro ${_p(LIMITES.PLAN_INTRO)} · okr objetivo ${_p(LIMITES.OKR_OBJETIVO)} / kr ${_p(LIMITES.OKR_KR)} / celdas ${_p(LIMITES.OKR_CELDA)} · benefits title ${_p(LIMITES.BENEFIT_TITLE)} / desc ${_p(LIMITES.BENEFIT_DESC)} · proj_nota ${_p(LIMITES.PROJ_NOTA)} · quote ${_p(LIMITES.QUOTE)} · cta.heading ${_p(LIMITES.CTA_HEADING)} / cta.body ${_p(LIMITES.CTA_BODY)}.
 
 ## SALIDA
 SOLO este JSON (sin markdown):
@@ -414,10 +430,12 @@ SOLO este JSON (sin markdown):
       out = out.trim();
       if (out.length >= Math.min(40, max * 0.5)) return out;
     }
-    // 2) prosa de una sola oración: última cláusula completa que entre
+    // 2) prosa de una sola oración: última cláusula completa que entre.
+    // OJO español: la coma decimal ("15,5%") NO es límite de cláusula (corrida real: quedó "5%").
+    // Solo cortan , ; : seguidos de espacio.
     if (esProsa) {
       let clausula = '';
-      for (const m of t.matchAll(/[,;:]/g)) {
+      for (const m of t.matchAll(/[,;:](?=\s)/g)) {
         if (m.index + 1 > max) break;
         clausula = t.slice(0, m.index);
       }
@@ -551,7 +569,16 @@ SOLO este JSON (sin markdown):
     const nuevos = _parseJSON(_textoDe(resp), 'ACORTE');
     const out = JSON.parse(JSON.stringify(c));
     for (const item of (nuevos.campos || [])) {
-      if (item && typeof item.texto === 'string' && item.texto.trim()) _setRuta(out, item.ruta, _sanearDeep(item.texto));
+      if (!item || typeof item.texto !== 'string' || !item.texto.trim()) continue;
+      const original = String(_getRuta(c, item.ruta) || '');
+      // GUARDA ANTI-NÚMERO-ROTO (corrida real: "15,5%"→"5%", "4.500"→"500"): si la reescritura
+      // contiene un número que NO estaba en el original, se descarta y ese campo cae al
+      // recorte determinístico. Sacar números está bien; inventar o partir números, jamás.
+      if (_numeroRoto(original, item.texto)) {
+        console.warn(`[DELTA:ACORTE] descartado ${item.ruta}: la reescritura trae un número que no estaba en el original`);
+        continue;
+      }
+      _setRuta(out, item.ruta, _sanearDeep(item.texto));
     }
     return out;
   }
@@ -638,16 +665,18 @@ SOLO este JSON (sin markdown):
   // ── FASE 8: JUEZ (fail-closed, 8 criterios) ────────────────────────────────
   const SYSTEM_PROMPT_JUDGE_DELTA = `Sos un juez de control de calidad EXTREMADAMENTE ESTRICTO para el "Diagnóstico ROI Personalizado" de Delta Teams (documento comercial que un CEO recibe por email). Recibís los DATOS CONFIRMADOS del sistema, los MONTOS CALCULADOS y el CONTENIDO final del documento. Evaluá los 8 criterios; APROBADO exige 8/8.
 
-1. ANTI-INVENCIÓN DEL PROSPECTO: nombre de empresa, industria, headcount y país del documento coinciden con los datos confirmados. FAIL si aparecen hechos del prospecto (años, adquisiciones, metas, tecnologías) que no estén en el research provisto.
-2. REFERENTE VERIFICABLE: el referente es una empresa real del sector, las 4 métricas tienen fuente en el research, la narrativa no agrega cifras nuevas y REF_FUENTE está presente. FAIL si alguna métrica del referente no está respaldada.
-3. PATRÓN DE INDUSTRIA: el diagnóstico habla del patrón del sector, no atribuye conductas a personas específicas del prospecto. FAIL si nombra al CEO/contacto o le atribuye comportamientos.
+1. ANTI-INVENCIÓN DEL PROSPECTO: nombre de empresa, industria, headcount y país del documento coinciden con los datos confirmados. FAIL si aparecen hechos del prospecto que NO estén en el research provisto, o texto roto/truncado (números partidos, frases sin terminar). OJO: usar hechos del research sobre la EMPRESA en las fricciones y gaps ES CORRECTO y deseable (es la personalización del producto); NO lo marques como invención.
+2. REFERENTE VERIFICABLE: el referente es una empresa real del sector, las 4 métricas tienen fuente en el research, la narrativa no agrega cifras nuevas y REF_FUENTE está presente. FAIL si alguna métrica del referente no está respaldada. Omitir contexto del research (ej. no mencionar el origen del referente) NO es falla si lo afirmado es correcto.
+3. PATRÓN DE INDUSTRIA: DIAGNOSIS_BODY habla del patrón del sector sin cifras ni hechos específicos del prospecto, y NINGUNA parte del documento atribuye conductas a personas específicas (CEO, fundadores, contacto) ni las nombra. Las fricciones sí pueden citar hechos de EMPRESA confirmados.
 4. FRAMING TEPI: cero menciones de DOS, Rocks, L10, People Analyzer, EOS, Traction. Lenguaje de "infraestructura de ejecución". Voz ejecutiva, sin motivacional genérico.
 5. IDIOMA: español LATAM neutro, sin voseo argentino, sin em dashes (—), sin errores graves.
-6. COHERENCIA NUMÉRICA: todo monto de dinero del contenido es EXACTAMENTE uno de los montos calculados o una métrica del referente con fuente; las cifras de track record de Delta/IBT son solo de la whitelist (${CIFRAS_DELTA_WHITELIST.join(', ')}); las time bars suman 100.
+6. COHERENCIA NUMÉRICA: todo monto de dinero del contenido es EXACTAMENTE uno de los montos calculados, una métrica del referente con fuente o el costo hora del supuesto; las cifras de track record de Delta/IBT son solo de la whitelist (${CIFRAS_DELTA_WHITELIST.join(', ')}); las time bars suman 100. Una META más conservadora que el benchmark citado en su fila es VÁLIDA y no requiere aclaración; citar el rango completo de la whitelist también.
 7. HONESTIDAD Y DATOS SANOS: si el liderazgo fue estimado (no confirmado), el documento lo declara; sin placeholders rotos ([INSERT], undefined, {{...}}), sin celdas vacías, sin contradicciones internas.
 8. CTA Y MARCA: el CTA invita a 20 minutos con Camila (nunca al prospecto por nombre), tono consistente con Delta Teams.
 
-REGLA DE ORO: ante la duda, RECHAZADO. Este PDF define la credibilidad de Delta Teams.
+QUÉ NO EXIGIR: no pidas agregar notas al pie, fuentes dentro de celdas cortas ni contenido que el template de cantidades fijas no admite. Marcá FAIL únicamente por: hechos sin respaldo en el research, texto roto/truncado, personas nombradas o con conductas atribuidas, framing prohibido, montos que no sean los calculados, contradicciones internas, o errores graves de idioma.
+
+REGLA DE ORO: ante la duda sobre si un HECHO es real, RECHAZADO. Este PDF define la credibilidad de Delta Teams.
 
 Respondé SOLO este JSON:
 {"veredicto":"APROBADO|RECHAZADO","score":0-8,"criterios":{"anti_invencion":true,"referente":true,"patron_industria":true,"framing_tepi":true,"idioma":true,"coherencia_numerica":true,"honestidad":true,"cta_marca":true},"fixes":["instrucción concreta y accionable por cada problema"]}`;
@@ -916,6 +945,6 @@ Respondé SOLO este JSON:
   });
 
   // Helpers puros expuestos para test (convención del repo)
-  router._interno = { validarContenido, validarResearch, resolverLiderazgo, armarData, _empKeyDelta, _fechaEs, _getRuta, _setRuta, _recorteDeterminista, LIMITES };
+  router._interno = { validarContenido, validarResearch, resolverLiderazgo, armarData, _empKeyDelta, _fechaEs, _getRuta, _setRuta, _recorteDeterminista, _numeroRoto, LIMITES };
   return router;
 };
