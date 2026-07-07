@@ -1727,18 +1727,21 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const senalNombres = { funding:new Set(), hiring:new Set(), leadership:new Set(), growth:new Set() };  // _empKey(name) -> flag
   const fundingNombres = senalNombres.funding;   // alias para no tocar los usos posteriores de funding
   const _addNombres = (lista, flag) => { for(const c of (lista||[])){ const k=_empKey(c.name||''); if(k) senalNombres[flag].add(k); } };
-  // ANCLAS SOLO EN EL PAÍS PRINCIPAL para clientes chicos / techo bajo: una búsqueda de EMPRESAS multi-país
-  // (AR+US) ordena por relevancia/tamaño y trae gigantes globales de EE.UU. (Ford, Walmart, PepsiCo…) que el
-  // techo después veta ~100, dejando 0 anclas reales del país del cliente (caso Aenima, 37 empl.). Para un
-  // comprador de boutique las cuentas objetivo están en SU país. Las PERSONAS siguen multi-país (geoLocOrNull)
-  // para no perder 2do grado disperso. Enterprise (headcount alto y sin techo bajo) NO se toca.
+  // ANCLAS SOLO EN EL PAÍS PRINCIPAL para clientes BOUTIQUE (headcount REAL < 150): una búsqueda de EMPRESAS
+  // multi-país (AR+US) ordena por relevancia/tamaño y trae gigantes globales de EE.UU. (Ford, Walmart, PepsiCo…)
+  // que el techo después veta ~100, dejando 0 anclas reales del país del cliente (caso Aenima, 37 empl.). Para
+  // un comprador de boutique las cuentas objetivo están en SU país, aunque el PLAN filtre un país dudoso extra.
+  // Las PERSONAS siguen multi-país (geoLocOrNull) para no perder 2do grado disperso.
+  // OJO (regresión Quales, 174 empl. AR+ES+UY): NO usar tamano_max como proxy de "cliente chico" — tamano_max
+  // describe el tamaño del COMPRADOR objetivo, no el del cliente; un mid-market multi-país que vende a empresas
+  // de ≤5000 disparaba la condición y perdía España/Uruguay (mercados REALES). Solo decide el headcount del
+  // cliente (dato real del MCP). Multi-país legítimo → anclas en TODOS sus países; el techo (tamMax) sigue
+  // vetando gigantes en cualquier país (3 puntos, independiente de la geo).
   const ANCLA_SOLO_HOME_HC  = parseInt(process.env.SOURCE_ANCLA_SOLO_HOME_HC  || '150',  10);
-  const ANCLA_SOLO_HOME_TAM = parseInt(process.env.SOURCE_ANCLA_SOLO_HOME_TAM || '5000', 10);
-  const _clienteChico = (cliente && cliente.headcount != null && cliente.headcount < ANCLA_SOLO_HOME_HC)
-                     || (tamMax > 0 && tamMax <= ANCLA_SOLO_HOME_TAM);
+  const _clienteChico = !!(cliente && cliente.headcount != null && cliente.headcount < ANCLA_SOLO_HOME_HC);
   const geoAncla = (_clienteChico && homeLoc.length) ? homeLoc : geoLocOrNull;
   if(_clienteChico && homeLoc.length && (geoAncla||[]).length < (geoLocOrNull||[]).length){
-    console.log(`[SOURCE] cliente chico (hc=${cliente&&cliente.headcount!=null?cliente.headcount:'?'}, techo=${tamMax||'-'}) → cuentas-ancla SOLO en país principal homeLoc=[${homeLoc.join(',')}] (personas siguen multi-país).`);
+    console.log(`[SOURCE] cliente chico (hc=${cliente.headcount} < ${ANCLA_SOLO_HOME_HC}) → cuentas-ancla SOLO en país principal homeLoc=[${homeLoc.join(',')}] (personas siguen multi-país).`);
   }
   if(indIds.length && geoLocOrNull){
     const baseCo = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoAncla}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
