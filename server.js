@@ -1573,7 +1573,21 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   } else {
     // FUNCIÓN: mapeo LOCAL contra la taxonomía (reemplaza el resolve difuso del MCP). "Marketing / Comunicación" -> "mrkt".
     fnId = _mapFuncion(funcion);
-    if(!fnId && funcion) console.warn(`[TAX] función "${funcion}" no mapeó a un code de LinkedIn; sourcing sin filtro de función (cae a keywords).`);
+    if(!fnId){
+      // FALLBACK (P3): la función del PLAN no mapeó (ej. multi-palabra rara o vocabulario fuera de la taxonomía).
+      // Antes esto tiraba TODO el filtro de función (people search sin function.include -> más roles off-vertical).
+      // Inferimos el code desde los titulos_objetivo: mapeamos CADA título con _mapFuncion (mismo match SEGURO por
+      // palabra completa, no substring -> no reintroduce el bug "ti"/"it" en "operations") y usamos el code MÁS
+      // VOTADO. Solo actúa cuando la función no mapeó; si algún título mapea, recuperamos el filtro de función.
+      const votos = new Map();
+      for(const t of titulos){ const c = _mapFuncion(t); if(c) votos.set(c, (votos.get(c)||0)+1); }
+      if(votos.size){
+        fnId = [...votos.entries()].sort((a,b)=> b[1]-a[1])[0][0];
+        console.log(`[TAX] función "${funcion||'-'}" no mapeó directo; INFERIDA de titulos_objetivo -> ${fnId} (votos: ${[...votos.entries()].map(([c,n])=>`${c}:${n}`).join(', ')}).`);
+      } else if(funcion){
+        console.warn(`[TAX] función "${funcion}" no mapeó (ni directo ni por titulos_objetivo); sourcing sin filtro de función (cae a keywords).`);
+      }
+    }
 
     // INDUSTRIAS ANCLA: verticales del ICP -> IDs OFICIALES V2 (filtro de fit DURO), mapeo LOCAL (no el resolve difuso, que
     // devolvía subcategorías equivocadas). Preferimos icp.industrias_search (inglés canónico que el PLAN emite para la
@@ -1948,8 +1962,13 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   } else if(conSenal){
     console.log('[FUNDING] pre-SELECT (amplio): la búsqueda de funding del nicho no trajo empresas (sin marcas por nombre).');
   }
-  // orden inicial: país y cuenta-ancla mandan; después fit; el grado ya cuenta (warmth) antes que la seniority
-  out.sort((a,b)=> (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.rank-a.rank));
+  // orden inicial (PRE-enriquecimiento, decide QUIÉN entra al top-K a enriquecer): manda la cuenta-ancla (fit de
+  // negocio) y el fit; después warmth y seniority. `cerca` (país principal) es DESEMPATE, no clave dominante:
+  // si dominara, en un cliente multi-país legítimo (Quales: AR+ES+UY) los decisores de cuentas-ancla de país
+  // SECUNDARIO nunca entrarían al top-K y jamás se enriquecerían/puntuarían -> el reporte perdería mercados reales
+  // del cliente. El país principal se sigue prefiriendo (vía _scoreCand +3 y este desempate). Para 1 SOLO país,
+  // `cerca`=1 para todos (unSoloPais) -> mover el desempate es un NO-OP: el orden queda idéntico (safety Aenima).
+  out.sort((a,b)=> (b.ancla-a.ancla) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.rank-a.rank) || (b.cerca-a.cerca));
 
   // enriquecer el top por cargo y tamaño (solo los que no tienen headcount ya de la cuenta-ancla).
   // K bajado de 12 a 8 (rate-limit MCP 60 req/min): SELECT solo elige NUM_CUENTAS (3) y las cuentas-ancla ya
@@ -1957,7 +1976,13 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // que SELECT tenga decisores con tamaño conocido sin quemar get_contact_profile (la llamada CARA, scrape vivo).
   const K = parseInt(process.env.SOURCE_ENRICH_TOP || '8', 10);
   const noCache = String(process.env.SOURCE_ENRICH_NOCACHE||'').toLowerCase()==='true';
-  const PISO   = tamMin > 0 ? tamMin : parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
+  // PISO de tamaño: si el PLAN DERIVÓ tamano_min>0, ese es el piso REAL del comprador. Si lo dejó en 0 (comprador
+  // SMB o "cualquier tamaño" a propósito), NO imponemos un piso alto que excluya PyMEs LEGÍTIMAS: el viejo default
+  // (ICP_MIN_HEADCOUNT=20) dejaba fuera agencias/comercios de 5-19 empl. que SÍ compran, contradiciendo el ICP
+  // derivado del cliente. Para tamano_min=0 usamos un piso anti-ruido BAJO (ICP_MIN_HEADCOUNT_SMB, default 5),
+  // knob DEDICADO (no encadenado al viejo ICP_MIN_HEADCOUNT, que en prod podría estar seteado alto), que solo hunde
+  // microempresas/1-persona. El descarte EGREGIO (25% del piso) y el de tamaño desconocido siguen limpiando shells.
+  const PISO   = tamMin > 0 ? tamMin : parseInt(process.env.ICP_MIN_HEADCOUNT_SMB || '5', 10);
   const top = out.slice(0, K);
   let _skipTop = 0;
   await _mapLimit(top, CONC, async (c) => {
@@ -2000,7 +2025,11 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     if(bajoTecho.length >= NUM_CUENTAS){ topICP = bajoTecho; }
     else if(sobreTecho.length){ console.warn(`[TAM] techo relajado: ${bajoTecho.length}/${NUM_CUENTAS} bajo techo ${tamMax} -> no veto por techo para no quedar corto.`); }
   }
-  topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.score-a.score) || (b.fit-a.fit));
+  // ancla y score mandan (score ya incluye +3 por país principal y +30 por ancla); `cerca` pasa a DESEMPATE (antes
+  // era la clave dominante): así un decisor de cuenta-ancla de país secundario compite en vez de quedar debajo de
+  // TODO el principal (multi-país). Mantengo el orden relativo de las claves no-cerca (ancla->score->fit) y solo
+  // relocalizo `cerca`: para 1 solo país cerca=1 para todos -> orden IDÉNTICO al previo (safety Aenima).
+  topICP.sort((a,b)=> (b.ancla-a.ancla) || (b.score-a.score) || (b.fit-a.fit) || (b.cerca-a.cerca));
 
   // Pasamos MÁS candidatos a la IA (18) para que tenga de dónde elegir cuenta-ancla + warm.
   const N_IA = parseInt(process.env.SOURCE_TO_IA || '18', 10);
@@ -2094,13 +2123,14 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // RANKING FINAL: el pool que ve la IA tiene que estar ordenado por score COMPLETO. Los que entraron por el
   // relleno (out.slice(K)), la cuota de 2do grado o el repoblado egregio y ya traían headcount NUNCA pasaron
   // por el scoring de arriba (score/icSuelto quedaban undefined) → viajaban con su orden de inserción. Acá
-  // garantizamos score+icSuelto para TODOS y ordenamos: país primero (desempate de geo), después score. No
-  // recorta nada → no expulsa a los que la cuota de 2do grado metió, solo los reordena.
+  // garantizamos score+icSuelto para TODOS y ordenamos: score PRIMERO (ya premia país principal +3 y ancla +30),
+  // y `cerca` como DESEMPATE (antes era dominante y aplastaba los mercados secundarios de un cliente multi-país).
+  // Para 1 solo país cerca=1 para todos -> el desempate no cambia el orden (safety Aenima).
   for(const c of final){
     c.icSuelto = pideDecisores && _esICsuelto(c.head);
     c.score = _scoreCand(c);
   }
-  final.sort((a,b)=> (b.cerca-a.cerca) || (b.score-a.score) || (b.ancla-a.ancla));
+  final.sort((a,b)=> (b.score-a.score) || (b.ancla-a.ancla) || (b.cerca-a.cerca));
 
   // ===== GARANTÍA DE AFLORAMIENTO DE LA SEÑAL (Opción A) ====================================
   // Problema observado (brandtrack): el pool tenía 150 recién-cambiados, pero el embudo (pool → 18 → top 3)
@@ -2143,7 +2173,8 @@ async function sourceCandidates(plan, cliente, conSenal = true){
           }
           if(peorIdx >= 0){ final[peorIdx] = e; } else { final.push(e); }   // si no hay desplazable, ampliamos por una vez
         }
-        final.sort((a,b)=> (b.cerca-a.cerca) || (b.score-a.score) || (b.ancla-a.ancla));
+        // score primero; `cerca` como desempate (no dominante) para no aplastar mercados secundarios (multi-país).
+        final.sort((a,b)=> (b.score-a.score) || (b.ancla-a.ancla) || (b.cerca-a.cerca));
         console.log(`[SIGNALS] afloramiento: +${elegibles.length} recién-cambiado(s) ON-FIT reservado(s) al pool a la IA (${elegibles.map(c=>c.name).join(', ')}).`);
       }
     }
@@ -2473,7 +2504,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "context": [ "bullet corto (máx ~16 palabras)", "bullet corto (máx ~16 palabras)", "bullet corto (máx ~16 palabras)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
   "prioridades": [ "Primero: qué tipo de empresa y por qué, en lenguaje plano (máx ~16 palabras)", "Primero: ...", "Después: ...", "También: ..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras", "comprador_ideal": "1-2 oraciones: el MODELO DE COMPRADOR (quién FIRMA EL CHEQUE y podría adoptar esto de forma realista) como test de INCLUSIÓN y EXCLUSIÓN, con ANTI-PATRONES explícitos de los que apliquen: (a) marca propia que no aloja terceros, (b) gigante fuera de rango realista del cliente, (c) contratista/asesor/micro cuando el ICP pide operadores medianos-grandes, (d) mismo sustantivo distinto negocio (flota de camiones ≠ flota de robots). Ej: 'Compran multimarca y grandes almacenes que curan marcas de terceros; NO marcas propias/DTC que solo venden lo suyo'. Ante research pobre, redactalo INCLUSIVO y agregá la exclusión SOLO si el research la respalda", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA del comprador real, EN ESPAÑOL (esto es solo para MOSTRAR en el PDF), ej: Bienes de consumo, Comercio minorista, Seguros, Banca, Automotriz. Evitá industriales amplias tipo Construcción/Manufactura salvo que sean literalmente el comprador"], "industrias_search": ["LAS MISMAS verticales que 'industrias' pero con el NOMBRE CANÓNICO EXACTO EN INGLÉS de la taxonomía oficial de LinkedIn (ESTO es lo que el sistema usa para BUSCAR; el match es contra la lista oficial de LinkedIn, en inglés). Una entrada por cada vertical de 'industrias'. Ejemplos de nombres canónicos válidos: Consumer Goods, Retail, Apparel and Fashion, Food and Beverage Services, Food and Beverage Manufacturing, Cosmetics, Beverage Manufacturing, Banking, Insurance, Financial Services, Automotive, Software Development, IT Services and IT Consulting, Technology, Information and Internet, Hospitals and Health Care, Real Estate, Construction, Manufacturing, Telecommunications, Advertising Services, Pharmaceutical Manufacturing, Hospitality. Usá el nombre EXACTO de LinkedIn en INGLÉS, NO lo traduzcas al español acá"], "competidores": ["NOMBRES de empresas/productos que el comprador compraría EN VEZ del producto del cliente (venden lo mismo), ej: Iké Asistencia, Asissprex. NUNCA la industria/vertical del comprador (ej. para un CRM inmobiliario: otros CRM como Inmovilla/Wasi, NUNCA 'inmobiliaria')"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA la industria/función/vertical donde el cliente VENDE (ej. nunca 'inmobiliaria' si vende a inmobiliarias)"], "verticales_excluir": ["2-5 rubros ADYACENTES-ruido a EXCLUIR del sourcing (comparten palabras con el ICP pero NO compran), ej. para voladura minera: geotecnia, mecanica de suelos, militar, consultoria; NUNCA el vertical del comprador; [] si no aplica"], "tamano_min": 200, "tamano_max": 0 }
+  "_plan": { "funcion": "función del comprador en 1-2 palabras", "comprador_ideal": "1-2 oraciones: el MODELO DE COMPRADOR (quién FIRMA EL CHEQUE y podría adoptar esto de forma realista) como test de INCLUSIÓN y EXCLUSIÓN, con ANTI-PATRONES explícitos de los que apliquen: (a) marca propia que no aloja terceros, (b) gigante fuera de rango realista del cliente, (c) contratista/asesor/micro cuando el ICP pide operadores medianos-grandes, (d) mismo sustantivo distinto negocio (flota de camiones ≠ flota de robots). Ej: 'Compran multimarca y grandes almacenes que curan marcas de terceros; NO marcas propias/DTC que solo venden lo suyo'. Ante research pobre, redactalo INCLUSIVO y agregá la exclusión SOLO si el research la respalda", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA del comprador real, EN ESPAÑOL (esto es solo para MOSTRAR en el PDF), ej: Bienes de consumo, Comercio minorista, Seguros, Banca, Automotriz. Evitá industriales amplias tipo Construcción/Manufactura salvo que sean literalmente el comprador"], "industrias_search": ["LAS MISMAS verticales que 'industrias' pero con el NOMBRE CANÓNICO EXACTO EN INGLÉS de la taxonomía oficial de LinkedIn (ESTO es lo que el sistema usa para BUSCAR; el match es contra la lista oficial de LinkedIn, en inglés). Una entrada por cada vertical de 'industrias'. Ejemplos de nombres canónicos válidos: Consumer Goods, Retail, Apparel and Fashion, Food and Beverage Services, Food and Beverage Manufacturing, Cosmetics, Beverage Manufacturing, Banking, Insurance, Financial Services, Automotive, Software Development, IT Services and IT Consulting, Technology, Information and Internet, Hospitals and Health Care, Real Estate, Construction, Manufacturing, Telecommunications, Advertising Services, Pharmaceutical Manufacturing, Hospitality. Usá el nombre EXACTO de LinkedIn en INGLÉS, NO lo traduzcas al español acá"], "competidores": ["NOMBRES de empresas/productos que el comprador compraría EN VEZ del producto del cliente (venden lo mismo), ej: Iké Asistencia, Asissprex. NUNCA la industria/vertical del comprador (ej. para un CRM inmobiliario: otros CRM como Inmovilla/Wasi, NUNCA 'inmobiliaria')"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA la industria/función/vertical donde el cliente VENDE (ej. nunca 'inmobiliaria' si vende a inmobiliarias)"], "verticales_excluir": ["2-5 rubros ADYACENTES-ruido a EXCLUIR del sourcing (comparten palabras con el ICP pero NO compran), ej. para voladura minera: geotecnia, mecanica de suelos, militar, consultoria; NUNCA el vertical del comprador; [] si no aplica"], "tamano_min": <número de empleados: PISO REAL del comprador, DERIVADO del research (BAJO si el comprador es PyME/SMB, ej. 5 a 10; ALTO si es mediano-grande, ej. 200+); NO uses un valor por defecto ni ancles a un piso alto>, "tamano_max": <número de empleados: TECHO REAL del comprador, DERIVADO del tipo/tamaño del cliente (BOUTIQUE/PyME: holgado pero acotado, ej. 2000 a 5000; ENTERPRISE que sí cierra con gigantes: alto o 0=sin techo); ante research pobre, holgado o 0; si es >0 tiene que ser MAYOR que tamano_min> }
 }
 CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
