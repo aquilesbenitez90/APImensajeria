@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Delta Teams · Diagnóstico ROI</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23084fc1'/%3E%3Cpath d='M32 14 L50 48 L14 48 Z' fill='none' stroke='white' stroke-width='5' stroke-linejoin='round'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#041131">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Josefin+Sans:wght@400;600;700&family=Nunito+Sans:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0A0C14; --ink-2:#374151; --ink-3:#6B717B; --bg:#041131; --panel:#fff;
+    --accent:#084fc1; --accent-soft:rgba(8,79,193,.10); --line:rgba(10,12,20,.10);
+    --font:'Nunito Sans','Inter',sans-serif; --display:'Josefin Sans',sans-serif;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  body{font-family:var(--font); background:var(--bg); color:var(--ink); min-height:100vh; display:flex; flex-direction:column}
+  .hero{background:var(--bg); color:#fff; padding:34px 24px 0; text-align:center}
+  .hero svg{height:34px; display:inline-block}
+  .tag{font-family:var(--display); font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:#7FA7EC; margin-top:20px; font-weight:600}
+  h1{font-family:var(--display); font-size:33px; font-weight:700; letter-spacing:-.01em; margin-top:10px; line-height:1.15}
+  h1 span{color:#7FA7EC}
+  .sub{color:#A9B6CC; font-size:15px; margin-top:12px; max-width:500px; margin-left:auto; margin-right:auto; line-height:1.5}
+  .wrap{flex:1; display:flex; align-items:center; justify-content:center; padding:40px 20px}
+  .card{background:var(--panel); border-radius:16px; box-shadow:0 30px 80px -40px rgba(0,0,0,.5); width:100%; max-width:460px; padding:34px}
+  label{font-family:var(--display); font-size:10px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); display:block; margin-bottom:7px}
+  input{width:100%; font-family:var(--font); font-size:15px; padding:13px 15px; border:1px solid var(--line); border-radius:10px; outline:none; transition:border .15s; background:#fff; -webkit-appearance:none; appearance:none}
+  input:focus{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
+  .field{margin-bottom:18px}
+  button{width:100%; font-family:var(--font); font-size:15px; font-weight:700; color:#fff; background:var(--accent); border:none; border-radius:10px; padding:14px; cursor:pointer; transition:opacity .15s}
+  button:hover{opacity:.9}
+  button:disabled{opacity:.5; cursor:not-allowed}
+  .err{color:#D02B2B; font-size:13px; margin-top:14px; text-align:center; min-height:18px}
+  .hint{color:var(--ink-3); font-size:12px; margin-top:16px; text-align:center; line-height:1.5}
+  .field .hint{margin-top:7px; text-align:left; font-size:11px}
+  .field .hint b{color:var(--ink-2); font-weight:700}
+  /* estados */
+  .stage{display:none}
+  .stage.on{display:block}
+  .prog{text-align:center; padding:14px 0}
+  .spinner{width:46px; height:46px; border:3px solid var(--accent-soft); border-top-color:var(--accent); border-radius:50%; margin:0 auto 22px; animation:spin .9s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .pmsg{font-size:16px; font-weight:600; color:var(--ink); min-height:24px}
+  .ptime{font-family:var(--display); font-size:12px; color:var(--ink-3); margin-top:8px; letter-spacing:.06em}
+  .pbar{height:4px; background:var(--accent-soft); border-radius:99px; margin-top:22px; overflow:hidden}
+  .pbar i{display:block; height:100%; width:30%; background:var(--accent); border-radius:99px; animation:slide 2.2s ease-in-out infinite}
+  @keyframes slide{0%{margin-left:-30%}100%{margin-left:100%}}
+  .ok-ico{width:52px; height:52px; border-radius:50%; background:var(--accent-soft); color:var(--accent); display:flex; align-items:center; justify-content:center; font-size:26px; margin:0 auto 18px}
+  .ok-title{font-family:var(--display); font-size:20px; font-weight:700; text-align:center}
+  .ok-emp{font-family:var(--display); font-size:12px; color:var(--ink-3); text-align:center; margin-top:6px; text-transform:uppercase; letter-spacing:.08em}
+  .dl{display:block; text-align:center; text-decoration:none; margin-top:22px}
+  .linkbtn{background:none; color:var(--accent); font-weight:600; font-size:13px; margin-top:14px}
+  .foot{text-align:center; font-family:var(--display); font-size:10px; letter-spacing:.12em; color:#5A6B8C; padding:18px; text-transform:uppercase}
+</style>
+</head>
+<body>
+  <header class="hero">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 85 14.2" aria-label="Delta Teams">
+      <polygon fill="#FFFFFF" points="12.1 7.3 12.1 7.3 12.1 7.3 12.1 7.3"/>
+      <g>
+        <path fill="#FFFFFF" d="M.7,10.9s1.5-.7,1.5-.7l2.4-5.6,1.5,3.6,1.3-.6L4.7,1.1c0,0-.1,0-.1,0L.1,11.5c.1-.2.3-.4.6-.6Z"/>
+        <polygon fill="#FFFFFF" points="7.2 10.8 8.2 13.1 9.7 13.1 8.3 9.6 7.2 10.8"/>
+        <path fill="#FFFFFF" d="M11.7,5.2l-4.3,2.3-1.4.7-3.9,2s-1.4.7-1.5.7c-.3.1-.5.3-.6.6h0c0,.4-.1.6,0,.9.2.6.9.9,1.5.6,0,0,0,0,.1,0l10.1-7.5c.1,0,0-.3-.1-.2Z"/>
+      </g>
+      <g>
+        <path fill="#FFFFFF" d="M15.2,5.6h2c.9,0,1.7.2,2.3.6s1.1.8,1.3,1.4c.3.6.4,1.2.4,1.8s-.2,1.4-.5,1.9c-.3.6-.8,1-1.4,1.3-.6.3-1.2.4-1.8.4h-2.4v-7.5ZM17.4,12.1c.6,0,1-.1,1.5-.3s.8-.5,1-.9c.2-.4.4-.9.4-1.5s-.1-1.1-.4-1.5-.6-.7-1-1c-.4-.2-.9-.3-1.4-.3h-1.3v5.5h1.2Z"/>
+        <path fill="#FFFFFF" d="M27.8,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+        <path fill="#FFFFFF" d="M30.7,5.6v6.5h3.8v1h-4.8v-7.5h1Z"/>
+        <path fill="#FFFFFF" d="M39.7,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+        <path fill="#FFFFFF" d="M44.6,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM44.2,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+        <path fill="#FFFFFF" d="M55.6,5.6v1h-2v6.5h-1v-6.5h-2v-1h5Z"/>
+        <path fill="#FFFFFF" d="M62,5.6v1h-3.8v2.3h3.4v1h-3.4v2.3h4v1h-5v-7.5h4.9Z"/>
+        <path fill="#FFFFFF" d="M67.8,11.1h-2.9l-.8,2h-1l3.3-7.8h0l3.3,7.8h-1.2l-.8-2ZM67.5,10.2l-1.1-2.7-1.1,2.7h2.2Z"/>
+        <path fill="#FFFFFF" d="M78.6,5.3v7.7h-1v-4.8l-2.7,3.9h0l-2.7-3.8v4.7h-1v-7.7h0l3.7,5.2,3.7-5.2h0Z"/>
+        <path fill="#FFFFFF" d="M83.7,6.5c-.3,0-.6-.1-.9-.1-.4,0-.7,0-1,.3s-.4.4-.4.7.1.6.4.8c.3.2.7.4,1.2.6.4.1.7.3,1,.4.3.2.5.4.7.7.2.3.3.6.3,1.1s0,.8-.3,1.1c-.2.3-.5.6-.9.8-.4.2-.8.3-1.3.3s-.9,0-1.3-.2c-.4-.1-.8-.3-1.1-.6l.4-.8c.3.2.6.4.9.5.4.1.7.2,1,.2s.7-.1,1-.3c.3-.2.4-.5.4-.9s-.1-.6-.4-.8c-.3-.2-.6-.4-1.1-.6-.4-.2-.8-.3-1-.5-.3-.2-.5-.4-.7-.6-.2-.3-.3-.6-.3-1,0-.6.2-1.1.6-1.4.4-.4.9-.6,1.6-.6.8,0,1.6.2,2.2.6l-.4.8c-.3-.1-.6-.3-.9-.4Z"/>
+      </g>
+    </svg>
+    <div class="tag">Diagnóstico ROI Personalizado</div>
+    <h1>Cuantificá el costo de la <span>ineficiencia operativa</span></h1>
+    <p class="sub">Pegá el LinkedIn de la empresa prospecto y generamos su Diagnóstico ROI con investigación real, listo para que Camila o Fede lo envíen.</p>
+  </header>
+
+  <div class="wrap">
+    <div class="card">
+      <!-- FORM -->
+      <div id="stageForm" class="stage on">
+        <div class="field">
+          <label>Empresa prospecto</label>
+          <input id="dominio" type="text" placeholder="linkedin.com/company/optimissa" autocomplete="off">
+          <div class="hint">Pegá el <b>link de LinkedIn</b> de la empresa (más confiable: trae el headcount que usa el cálculo). También funciona el dominio, ej: optimissa.com</div>
+        </div>
+        <div class="field">
+          <label>Clave de acceso</label>
+          <input id="clave" type="password" placeholder="••••••••" autocomplete="off">
+        </div>
+        <button id="go">Generar diagnóstico</button>
+        <div id="err" class="err"></div>
+        <p class="hint">Tarda unos minutos: investigamos la empresa, contamos su equipo directivo en LinkedIn, calculamos el ROI y armamos el PDF de 4 páginas.</p>
+      </div>
+
+      <!-- PROGRESO -->
+      <div id="stageProg" class="stage">
+        <div class="prog">
+          <div class="spinner"></div>
+          <div id="pmsg" class="pmsg">Iniciando diagnóstico...</div>
+          <div id="ptime" class="ptime">0:00</div>
+          <div class="pbar"><i></i></div>
+        </div>
+      </div>
+
+      <!-- LISTO -->
+      <div id="stageOk" class="stage">
+        <div class="ok-ico">↓</div>
+        <div class="ok-title">Tu diagnóstico está listo</div>
+        <div id="okEmp" class="ok-emp"></div>
+        <a id="dlLink" class="dl" href="#"><button>Descargar PDF</button></a>
+        <button id="again" class="linkbtn">Diagnosticar otra empresa</button>
+      </div>
+
+      <!-- ERROR FINAL -->
+      <div id="stageErr" class="stage">
+        <div class="ok-ico" style="background:rgba(208,43,43,.1);color:#D02B2B">!</div>
+        <div class="ok-title">No se pudo generar</div>
+        <div id="errMsg" class="ok-emp" style="text-transform:none;letter-spacing:0;font-size:13px"></div>
+        <button id="retry" style="margin-top:22px">Volver a intentar</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">Delta Teams · deltateams.com · Infraestructura de ejecución para equipos en crecimiento</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const MSGS = [
+  "Investigando la empresa...",
+  "Contando líderes en LinkedIn...",
+  "Buscando el referente del sector...",
+  "Calculando el costo de ineficiencia...",
+  "Redactando el diagnóstico...",
+  "Validando la calidad...",
+  "Casi listo..."
+];
+let t0, timer, msgTimer, msgIdx = 0;
+
+// Persistencia: guardamos el jobId para sobrevivir cierres/refrescos de pestaña (igual que el GTM).
+const LS_KEY = 'delta_job';
+const TTL = 55*60*1000;
+function saveJob(jobId, dominio){ try{ localStorage.setItem(LS_KEY, JSON.stringify({jobId, dominio, ts:Date.now()})); }catch(e){} }
+function loadJob(){ try{ const j = JSON.parse(localStorage.getItem(LS_KEY)||'null'); if(j && j.jobId && (Date.now()-j.ts) < TTL) return j; }catch(e){} return null; }
+function clearJob(){ try{ localStorage.removeItem(LS_KEY); }catch(e){} }
+
+function show(stage){
+  ['stageForm','stageProg','stageOk','stageErr'].forEach(s => $(s).classList.toggle('on', s===stage));
+}
+function fmt(s){ const m=Math.floor(s/60); const r=s%60; return m+':'+String(r).padStart(2,'0'); }
+function normDom(v){
+  let s = v.trim().replace(/^https?:\/\//i,'').replace(/^www\./i,'');
+  if(/linkedin\.com\/(company|school|showcase)\//i.test(s)) return s.replace(/\/+$/,'').trim();
+  return s.replace(/\/.*$/,'').trim();
+}
+
+function startProgress(startTs){
+  t0 = startTs || Date.now(); msgIdx = 0; $('pmsg').textContent = MSGS[0];
+  $('ptime').textContent = fmt(Math.floor((Date.now()-t0)/1000));
+  timer = setInterval(()=>{ $('ptime').textContent = fmt(Math.floor((Date.now()-t0)/1000)); }, 1000);
+  msgTimer = setInterval(()=>{ msgIdx = Math.min(msgIdx+1, MSGS.length-1); $('pmsg').textContent = MSGS[msgIdx]; }, 9000);
+}
+function stopProgress(){ clearInterval(timer); clearInterval(msgTimer); }
+
+function mostrarOk(jobId, empresa){
+  $('okEmp').textContent = empresa || '';
+  $('dlLink').setAttribute('href', '/delta/pdf/'+jobId);
+  show('stageOk');
+}
+
+async function generar(){
+  const dominio = normDom($('dominio').value);
+  const clave = $('clave').value.trim();
+  $('err').textContent = '';
+  if(!dominio){ $('err').textContent = 'Pegá el link de LinkedIn o el dominio de la empresa.'; return; }
+  if(!clave){ $('err').textContent = 'Ingresá la clave de acceso.'; return; }
+
+  let jobId;
+  try{
+    const r = await fetch('/delta/generar', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'x-landing-key': clave },
+      body: JSON.stringify({ dominio })
+    });
+    const j = await r.json().catch(()=>({}));
+    if(r.status === 401){ $('err').textContent = 'Clave incorrecta.'; return; }
+    if(!j.jobId){ $('err').textContent = j.error || 'No se pudo iniciar el diagnóstico.'; return; }
+    jobId = j.jobId;
+  }catch(e){ $('err').textContent = 'Error de conexión. Reintentá.'; return; }
+
+  saveJob(jobId, dominio);
+  show('stageProg'); startProgress();
+  poll(jobId);
+}
+
+async function poll(jobId){
+  const DEADLINE = Date.now() + 11*60*1000; // 11 min (research + juez tardan más que el GTM)
+  while(Date.now() < DEADLINE){
+    await new Promise(r=>setTimeout(r, 5000));
+    let job;
+    try{
+      const r = await fetch('/delta/resultado/'+jobId);
+      if(r.status === 404){ clearJob(); stopProgress(); $('errMsg').textContent='El diagnóstico expiró o el servicio se reinició. Generá uno nuevo.'; show('stageErr'); return; }
+      if(!r.ok) continue;
+      job = await r.json();
+    }catch(e){ continue; }
+    if(!job || job.status === 'processing') continue;
+    stopProgress();
+    if(job.status === 'ok' && job.pdf_base64){
+      mostrarOk(jobId, job.empresa);   // dejamos el job guardado: dentro de la hora se puede re-descargar
+    } else if(job.status === 'ok' && !job.apto_envio){
+      clearJob();
+      $('errMsg').textContent = 'El control de calidad rechazó el diagnóstico (juez ' + (job.juez || '') + '). Probá de nuevo o con otra empresa.';
+      show('stageErr');
+    } else {
+      clearJob();
+      $('errMsg').textContent = job.error || 'No se pudo armar el diagnóstico para esta empresa. Probá con otra.';
+      show('stageErr');
+    }
+    return;
+  }
+  stopProgress();
+  $('errMsg').textContent = 'Está tardando más de lo normal. Volvé a entrar en unos minutos y el diagnóstico va a estar listo para descargar.';
+  show('stageErr');
+}
+
+// Al cargar: si quedó un job guardado (no expirado), lo retomamos sin pedir la clave de nuevo.
+async function init(){
+  const saved = loadJob();
+  if(!saved){ show('stageForm'); return; }
+  try{
+    const r = await fetch('/delta/resultado/'+saved.jobId);
+    if(r.status === 404){ clearJob(); show('stageForm'); return; }
+    const job = await r.json();
+    if(job.status === 'processing'){
+      if(saved.dominio) $('dominio').value = saved.dominio;
+      show('stageProg'); startProgress(saved.ts); poll(saved.jobId); return;
+    }
+    if(job.status === 'ok' && job.pdf_base64){ mostrarOk(saved.jobId, job.empresa); return; }
+    clearJob(); show('stageForm');
+  }catch(e){ show('stageForm'); }
+}
+
+$('go').addEventListener('click', generar);
+$('clave').addEventListener('keydown', e=>{ if(e.key==='Enter') generar(); });
+$('again').addEventListener('click', ()=>{ clearJob(); $('dominio').value=''; $('err').textContent=''; show('stageForm'); });
+$('retry').addEventListener('click', ()=>{ clearJob(); show('stageForm'); });
+init();
+</script>
+</body>
+</html>

@@ -19,6 +19,7 @@
 
 const express = require('express');
 const crypto = require('crypto');
+const path = require('path');
 const {
   numerosParaTemplate, clampCostoHora, clampHorasPerdidas, liderazgoEstimado,
 } = require('./calculo.js');
@@ -34,6 +35,13 @@ const DELTA_LIDER_LIMIT       = parseInt(process.env.DELTA_LIDER_LIMIT || '50', 
 // Fail-closed por default (producto nuevo, prompts sin curtir): solo se adjunta PDF si el juez aprueba.
 // Cuando el escape-rate medido dé confianza, flipear a true para el comportamiento ALWAYS_SEND del GTM.
 const DELTA_ALWAYS_SEND       = String(process.env.DELTA_ALWAYS_SEND || 'false').toLowerCase() === 'true';
+
+// GOOGLE SHEET (opcional): MISMO webhook que el GTM (SHEET_WEBHOOK_URL → apps-script-sheet.gs),
+// pero cada fila viaja con hoja:"Delta" para caer en la pestaña de Delta del Sheet de gastos.
+// Fire-and-forget: jamás bloquea ni rompe el job. A diferencia del GTM, los jobs de TEST también
+// se registran (estado:"test"): sirve para verificar el cableado de la pestaña a costo cero.
+const SHEET_WEBHOOK_URL = process.env.SHEET_WEBHOOK_URL || '';
+const DELTA_SHEET_TAB   = process.env.DELTA_SHEET_TAB || 'Delta';
 
 // ── Identidad de marca (del skill; el CTA/footer viven FIJOS en el template) ─
 const CIFRAS_DELTA_WHITELIST = ['61.4%', '81.7%', '-30%', '+20-40%', '90 días'];
@@ -107,6 +115,25 @@ module.exports = function crearDeltaRouter(deps) {
     return o;
   }
   function _stats() { return statsALS.getStore(); }
+
+  // Una fila por análisis al Google Sheet (pestaña Delta), vía el mismo Apps Script del GTM.
+  function _registrarEnSheet(fila) {
+    if (!SHEET_WEBHOOK_URL) return;
+    try {
+      const ctrl = new AbortController();
+      const _t = setTimeout(() => ctrl.abort(), 10000);
+      fetch(SHEET_WEBHOOK_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hoja: DELTA_SHEET_TAB, fecha: new Date().toISOString(), ...fila }),
+        signal: ctrl.signal,
+      }).catch(e => console.warn('[DELTA:SHEET] no pude registrar en el Google Sheet:', e.message))
+        .finally(() => clearTimeout(_t));
+    } catch (e) { console.warn('[DELTA:SHEET] error:', e.message); }
+  }
+  function _costoUSD() {
+    try { return deps.costoTotal ? Number(deps.costoTotal(_stats()).toFixed(4)) : ''; }
+    catch (e) { return ''; }
+  }
 
   // ── FASE 2: LIDERAZGO (Sales Nav company-first, experiencia del sourcing GTM) ─
   async function buscarLiderazgo(cliente) {
@@ -546,6 +573,7 @@ Respondé SOLO este JSON:
             tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
             finishedAt: Date.now(),
           });
+          _registrarEnSheet({ empresa: empresa || 'Optimissa (fixture)', dominio: dominio || '', estado: 'test', apto_envio: 'SI', paginas, costo_usd: 0, jobId });
           console.log(`===== [DELTA] Job ${jobId} - TEST OK (${paginas} páginas, $0) =====\n`);
           return;
         }
@@ -634,16 +662,34 @@ Respondé SOLO este JSON:
           tokens: { ...(st ? st.total : {}) },
           finishedAt: Date.now(),
         });
+        _registrarEnSheet({
+          empresa: empresaFinal, dominio: dominio || '', estado: 'ok',
+          veredicto: judge.veredicto, score: judge.score,
+          apto_envio: aptoEnvio ? 'SI' : 'NO',
+          lideres: `${liderazgo.cantidad} (${liderazgo.fuente})`,
+          costo_ineficiencia: ctx.nums.INEFF_COST_ANNUAL,
+          paginas: r.paginas,
+          motivo: aptoEnvio ? 'ok' : (r.paginas !== DELTA_EXPECTED_PAGES ? 'paginas' : 'juez'),
+          costo_usd: _costoUSD(), jobId,
+        });
         console.log(`===== [DELTA] Job ${jobId} - ${aptoEnvio ? `OK ${r.paginas} páginas` : 'NO apto'}, juez ${judge.veredicto} ${judge.score}/8 =====\n`);
       } catch (err) {
         console.error(`[DELTA] Job ${jobId} Error:`, err);
         jobs.set(jobId, { status: 'error', producto: 'delta_roi', error: err.message, finishedAt: Date.now() });
+        _registrarEnSheet({
+          empresa: empresa || '', dominio: dominio || '', estado: 'error',
+          apto_envio: 'NO', motivo: String(err.message || err).slice(0, 180),
+          costo_usd: _costoUSD(), jobId,
+        });
       }
     });
   }
 
   // ── Router (espejo de /generar + /resultado + /pdf + /health del GTM) ──────
   const router = express.Router();
+
+  // Landing web de Delta (misma mecánica que index.html del GTM, branding Delta Teams).
+  router.get('/', (req, res) => res.sendFile(path.join(__dirname, 'landing.html')));
 
   router.post('/generar', (req, res) => {
     // GATE DE LANDING (mismo patrón que /generar del GTM): si DELTA_LANDING_KEY (o LANDING_KEY,

@@ -4132,6 +4132,7 @@ try {
     callClaude, callMCP, resolverCliente, renderizarPdf, contarPaginas,
     statsALS: _statsALS, nuevoStats: _nuevoStats, setStage: _setStage, logTokenCost,
     sinGuiones: _sinGuiones, extraerJSON: _extraerJSON, parsePeople: _parsePeople,
+    costoTotal: _costoTotal,
     MODEL_GEN, MODEL_JUDGE, WEB_SEARCH_TOOL
   }));
   console.log('[DELTA] Router montado en /delta (generar, resultado, pdf, health).');
