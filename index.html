@@ -187,14 +187,14 @@ async function generar(){
   if(!dominio){ $('err').textContent = 'Pegá el link de LinkedIn o el dominio de la empresa.'; return; }
   if(!clave){ $('err').textContent = 'Ingresá la clave de acceso.'; return; }
 
-  let jobId;
+  let jobId, j;
   try{
     const r = await fetch('/generar', {
       method:'POST',
       headers:{ 'Content-Type':'application/json', 'x-landing-key': clave },
       body: JSON.stringify({ dominio, idioma })
     });
-    const j = await r.json().catch(()=>({}));
+    j = await r.json().catch(()=>({}));
     if(r.status === 401){ $('err').textContent = 'Clave incorrecta.'; return; }
     if(!j.jobId){ $('err').textContent = j.error || 'No se pudo iniciar el análisis.'; return; }
     jobId = j.jobId;
