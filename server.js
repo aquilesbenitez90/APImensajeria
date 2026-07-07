@@ -368,10 +368,39 @@ function _costoTotal(st){ return ['gen','signals','judge','fix'].reduce((c,e)=> 
 // Si no, escribe junto al server y se pierde al redeploy.
 // ---------------------------------------------------------------------------
 const RESULT_LOG = process.env.RESULT_LOG_PATH || path.join(__dirname, 'resultados.jsonl');
+// GOOGLE SHEET (opcional): si SHEET_WEBHOOK_URL apunta a un Web App de Google Apps Script, mandamos UNA fila
+// por análisis (empresa, dominio, resultado, costo aprox). Fire-and-forget: NO bloquea el job ni lo rompe si
+// falla. Si el env no está seteado → no-op. Los jobs de TEST no llegan acá (cortan antes de _registrarResultado).
+const SHEET_WEBHOOK_URL = process.env.SHEET_WEBHOOK_URL || '';
+function _enviarASheet(rec){
+  if(!SHEET_WEBHOOK_URL) return;
+  try{
+    const fila = {
+      fecha: rec.ts,
+      empresa: rec.empresa || '',
+      dominio: rec.dominio || '',
+      estado: rec.status || '',
+      veredicto: rec.veredicto || '',
+      score: rec.score ?? '',
+      apto_envio: rec.apto_envio ? 'SI' : 'NO',
+      cards: rec.cards_validas ?? '',
+      paginas: rec.paginas ?? '',
+      motivo: rec.motivo_rechazo || '',
+      costo_usd: rec.costo ?? '',
+      jobId: rec.jobId || ''
+    };
+    const ctrl = new AbortController();
+    const _t = setTimeout(() => ctrl.abort(), 10000);
+    fetch(SHEET_WEBHOOK_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(fila), signal: ctrl.signal })
+      .catch(e => console.warn('[SHEET] no pude registrar en el Google Sheet:', e.message))
+      .finally(() => clearTimeout(_t));
+  }catch(e){ console.warn('[SHEET] error:', e.message); }
+}
 function _registrarResultado(rec){
   try{
     fs.appendFile(RESULT_LOG, JSON.stringify(rec) + '\n', e => { if(e) console.warn('[LOG] no pude escribir resultado:', e.message); });
   }catch(e){ console.warn('[LOG] error registrando resultado:', e.message); }
+  _enviarASheet(rec);   // además, una fila en el Google Sheet (si SHEET_WEBHOOK_URL está seteado)
 }
 // Motivo de rechazo canónico y AGREGABLE (para contar patrones de falla en resultados.jsonl).
 // Devuelve el PRIMER motivo determinístico que disparó, en orden de prioridad:
@@ -1415,6 +1444,9 @@ function _mapFuncion(name){
   // tiene que ser igual a una palabra de un label de función (ej. "marketing" en "Marketing / Comunicación" -> mrkt).
   const words = new Set(n.split(' ').filter(w => w.length >= 3));
   for(const [label,code] of Object.entries(fns)){ const lw=_normTax(label).split(' '); if(lw.some(w => w.length>=3 && words.has(w))) return code; }
+  // alias por PALABRA COMPLETA: ej. "Datos / Analytics / IT" -> palabra "datos" == alias "datos" -> Information Technology.
+  // Palabra completa (no substring), así "operations" NO matchea el alias "ti"/"it". Solo alias-key de >=3 letras.
+  for(const [k,lbl] of Object.entries(al)){ const kn=_normTax(k); if(kn.length>=3 && !kn.includes(' ') && words.has(kn) && fns[lbl]) return fns[lbl]; }
   return null;
 }
 // Sales Navigator NO acepta rangos de headcount arbitrarios: solo estos brackets fijos.
@@ -1541,7 +1573,21 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   } else {
     // FUNCIÓN: mapeo LOCAL contra la taxonomía (reemplaza el resolve difuso del MCP). "Marketing / Comunicación" -> "mrkt".
     fnId = _mapFuncion(funcion);
-    if(!fnId && funcion) console.warn(`[TAX] función "${funcion}" no mapeó a un code de LinkedIn; sourcing sin filtro de función (cae a keywords).`);
+    if(!fnId){
+      // FALLBACK (P3): la función del PLAN no mapeó (ej. multi-palabra rara o vocabulario fuera de la taxonomía).
+      // Antes esto tiraba TODO el filtro de función (people search sin function.include -> más roles off-vertical).
+      // Inferimos el code desde los titulos_objetivo: mapeamos CADA título con _mapFuncion (mismo match SEGURO por
+      // palabra completa, no substring -> no reintroduce el bug "ti"/"it" en "operations") y usamos el code MÁS
+      // VOTADO. Solo actúa cuando la función no mapeó; si algún título mapea, recuperamos el filtro de función.
+      const votos = new Map();
+      for(const t of titulos){ const c = _mapFuncion(t); if(c) votos.set(c, (votos.get(c)||0)+1); }
+      if(votos.size){
+        fnId = [...votos.entries()].sort((a,b)=> b[1]-a[1])[0][0];
+        console.log(`[TAX] función "${funcion||'-'}" no mapeó directo; INFERIDA de titulos_objetivo -> ${fnId} (votos: ${[...votos.entries()].map(([c,n])=>`${c}:${n}`).join(', ')}).`);
+      } else if(funcion){
+        console.warn(`[TAX] función "${funcion}" no mapeó (ni directo ni por titulos_objetivo); sourcing sin filtro de función (cae a keywords).`);
+      }
+    }
 
     // INDUSTRIAS ANCLA: verticales del ICP -> IDs OFICIALES V2 (filtro de fit DURO), mapeo LOCAL (no el resolve difuso, que
     // devolvía subcategorías equivocadas). Preferimos icp.industrias_search (inglés canónico que el PLAN emite para la
@@ -1695,18 +1741,21 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const senalNombres = { funding:new Set(), hiring:new Set(), leadership:new Set(), growth:new Set() };  // _empKey(name) -> flag
   const fundingNombres = senalNombres.funding;   // alias para no tocar los usos posteriores de funding
   const _addNombres = (lista, flag) => { for(const c of (lista||[])){ const k=_empKey(c.name||''); if(k) senalNombres[flag].add(k); } };
-  // ANCLAS SOLO EN EL PAÍS PRINCIPAL para clientes chicos / techo bajo: una búsqueda de EMPRESAS multi-país
-  // (AR+US) ordena por relevancia/tamaño y trae gigantes globales de EE.UU. (Ford, Walmart, PepsiCo…) que el
-  // techo después veta ~100, dejando 0 anclas reales del país del cliente (caso Aenima, 37 empl.). Para un
-  // comprador de boutique las cuentas objetivo están en SU país. Las PERSONAS siguen multi-país (geoLocOrNull)
-  // para no perder 2do grado disperso. Enterprise (headcount alto y sin techo bajo) NO se toca.
+  // ANCLAS SOLO EN EL PAÍS PRINCIPAL para clientes BOUTIQUE (headcount REAL < 150): una búsqueda de EMPRESAS
+  // multi-país (AR+US) ordena por relevancia/tamaño y trae gigantes globales de EE.UU. (Ford, Walmart, PepsiCo…)
+  // que el techo después veta ~100, dejando 0 anclas reales del país del cliente (caso Aenima, 37 empl.). Para
+  // un comprador de boutique las cuentas objetivo están en SU país, aunque el PLAN filtre un país dudoso extra.
+  // Las PERSONAS siguen multi-país (geoLocOrNull) para no perder 2do grado disperso.
+  // OJO (regresión Quales, 174 empl. AR+ES+UY): NO usar tamano_max como proxy de "cliente chico" — tamano_max
+  // describe el tamaño del COMPRADOR objetivo, no el del cliente; un mid-market multi-país que vende a empresas
+  // de ≤5000 disparaba la condición y perdía España/Uruguay (mercados REALES). Solo decide el headcount del
+  // cliente (dato real del MCP). Multi-país legítimo → anclas en TODOS sus países; el techo (tamMax) sigue
+  // vetando gigantes en cualquier país (3 puntos, independiente de la geo).
   const ANCLA_SOLO_HOME_HC  = parseInt(process.env.SOURCE_ANCLA_SOLO_HOME_HC  || '150',  10);
-  const ANCLA_SOLO_HOME_TAM = parseInt(process.env.SOURCE_ANCLA_SOLO_HOME_TAM || '5000', 10);
-  const _clienteChico = (cliente && cliente.headcount != null && cliente.headcount < ANCLA_SOLO_HOME_HC)
-                     || (tamMax > 0 && tamMax <= ANCLA_SOLO_HOME_TAM);
+  const _clienteChico = !!(cliente && cliente.headcount != null && cliente.headcount < ANCLA_SOLO_HOME_HC);
   const geoAncla = (_clienteChico && homeLoc.length) ? homeLoc : geoLocOrNull;
   if(_clienteChico && homeLoc.length && (geoAncla||[]).length < (geoLocOrNull||[]).length){
-    console.log(`[SOURCE] cliente chico (hc=${cliente&&cliente.headcount!=null?cliente.headcount:'?'}, techo=${tamMax||'-'}) → cuentas-ancla SOLO en país principal homeLoc=[${homeLoc.join(',')}] (personas siguen multi-país).`);
+    console.log(`[SOURCE] cliente chico (hc=${cliente.headcount} < ${ANCLA_SOLO_HOME_HC}) → cuentas-ancla SOLO en país principal homeLoc=[${homeLoc.join(',')}] (personas siguen multi-país).`);
   }
   if(indIds.length && geoLocOrNull){
     const baseCo = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoAncla}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
@@ -1913,8 +1962,13 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   } else if(conSenal){
     console.log('[FUNDING] pre-SELECT (amplio): la búsqueda de funding del nicho no trajo empresas (sin marcas por nombre).');
   }
-  // orden inicial: país y cuenta-ancla mandan; después fit; el grado ya cuenta (warmth) antes que la seniority
-  out.sort((a,b)=> (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.rank-a.rank));
+  // orden inicial (PRE-enriquecimiento, decide QUIÉN entra al top-K a enriquecer): manda la cuenta-ancla (fit de
+  // negocio) y el fit; después warmth y seniority. `cerca` (país principal) es DESEMPATE, no clave dominante:
+  // si dominara, en un cliente multi-país legítimo (Quales: AR+ES+UY) los decisores de cuentas-ancla de país
+  // SECUNDARIO nunca entrarían al top-K y jamás se enriquecerían/puntuarían -> el reporte perdería mercados reales
+  // del cliente. El país principal se sigue prefiriendo (vía _scoreCand +3 y este desempate). Para 1 SOLO país,
+  // `cerca`=1 para todos (unSoloPais) -> mover el desempate es un NO-OP: el orden queda idéntico (safety Aenima).
+  out.sort((a,b)=> (b.ancla-a.ancla) || (b.fit-a.fit) || (_warmth(b.dist)-_warmth(a.dist)) || (b.rank-a.rank) || (b.cerca-a.cerca));
 
   // enriquecer el top por cargo y tamaño (solo los que no tienen headcount ya de la cuenta-ancla).
   // K bajado de 12 a 8 (rate-limit MCP 60 req/min): SELECT solo elige NUM_CUENTAS (3) y las cuentas-ancla ya
@@ -1922,7 +1976,13 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // que SELECT tenga decisores con tamaño conocido sin quemar get_contact_profile (la llamada CARA, scrape vivo).
   const K = parseInt(process.env.SOURCE_ENRICH_TOP || '8', 10);
   const noCache = String(process.env.SOURCE_ENRICH_NOCACHE||'').toLowerCase()==='true';
-  const PISO   = tamMin > 0 ? tamMin : parseInt(process.env.ICP_MIN_HEADCOUNT || '20', 10);
+  // PISO de tamaño: si el PLAN DERIVÓ tamano_min>0, ese es el piso REAL del comprador. Si lo dejó en 0 (comprador
+  // SMB o "cualquier tamaño" a propósito), NO imponemos un piso alto que excluya PyMEs LEGÍTIMAS: el viejo default
+  // (ICP_MIN_HEADCOUNT=20) dejaba fuera agencias/comercios de 5-19 empl. que SÍ compran, contradiciendo el ICP
+  // derivado del cliente. Para tamano_min=0 usamos un piso anti-ruido BAJO (ICP_MIN_HEADCOUNT_SMB, default 5),
+  // knob DEDICADO (no encadenado al viejo ICP_MIN_HEADCOUNT, que en prod podría estar seteado alto), que solo hunde
+  // microempresas/1-persona. El descarte EGREGIO (25% del piso) y el de tamaño desconocido siguen limpiando shells.
+  const PISO   = tamMin > 0 ? tamMin : parseInt(process.env.ICP_MIN_HEADCOUNT_SMB || '5', 10);
   const top = out.slice(0, K);
   let _skipTop = 0;
   await _mapLimit(top, CONC, async (c) => {
@@ -1965,7 +2025,11 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     if(bajoTecho.length >= NUM_CUENTAS){ topICP = bajoTecho; }
     else if(sobreTecho.length){ console.warn(`[TAM] techo relajado: ${bajoTecho.length}/${NUM_CUENTAS} bajo techo ${tamMax} -> no veto por techo para no quedar corto.`); }
   }
-  topICP.sort((a,b)=> (b.cerca-a.cerca) || (b.ancla-a.ancla) || (b.score-a.score) || (b.fit-a.fit));
+  // ancla y score mandan (score ya incluye +3 por país principal y +30 por ancla); `cerca` pasa a DESEMPATE (antes
+  // era la clave dominante): así un decisor de cuenta-ancla de país secundario compite en vez de quedar debajo de
+  // TODO el principal (multi-país). Mantengo el orden relativo de las claves no-cerca (ancla->score->fit) y solo
+  // relocalizo `cerca`: para 1 solo país cerca=1 para todos -> orden IDÉNTICO al previo (safety Aenima).
+  topICP.sort((a,b)=> (b.ancla-a.ancla) || (b.score-a.score) || (b.fit-a.fit) || (b.cerca-a.cerca));
 
   // Pasamos MÁS candidatos a la IA (18) para que tenga de dónde elegir cuenta-ancla + warm.
   const N_IA = parseInt(process.env.SOURCE_TO_IA || '18', 10);
@@ -2059,13 +2123,14 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // RANKING FINAL: el pool que ve la IA tiene que estar ordenado por score COMPLETO. Los que entraron por el
   // relleno (out.slice(K)), la cuota de 2do grado o el repoblado egregio y ya traían headcount NUNCA pasaron
   // por el scoring de arriba (score/icSuelto quedaban undefined) → viajaban con su orden de inserción. Acá
-  // garantizamos score+icSuelto para TODOS y ordenamos: país primero (desempate de geo), después score. No
-  // recorta nada → no expulsa a los que la cuota de 2do grado metió, solo los reordena.
+  // garantizamos score+icSuelto para TODOS y ordenamos: score PRIMERO (ya premia país principal +3 y ancla +30),
+  // y `cerca` como DESEMPATE (antes era dominante y aplastaba los mercados secundarios de un cliente multi-país).
+  // Para 1 solo país cerca=1 para todos -> el desempate no cambia el orden (safety Aenima).
   for(const c of final){
     c.icSuelto = pideDecisores && _esICsuelto(c.head);
     c.score = _scoreCand(c);
   }
-  final.sort((a,b)=> (b.cerca-a.cerca) || (b.score-a.score) || (b.ancla-a.ancla));
+  final.sort((a,b)=> (b.score-a.score) || (b.ancla-a.ancla) || (b.cerca-a.cerca));
 
   // ===== GARANTÍA DE AFLORAMIENTO DE LA SEÑAL (Opción A) ====================================
   // Problema observado (brandtrack): el pool tenía 150 recién-cambiados, pero el embudo (pool → 18 → top 3)
@@ -2108,7 +2173,8 @@ async function sourceCandidates(plan, cliente, conSenal = true){
           }
           if(peorIdx >= 0){ final[peorIdx] = e; } else { final.push(e); }   // si no hay desplazable, ampliamos por una vez
         }
-        final.sort((a,b)=> (b.cerca-a.cerca) || (b.score-a.score) || (b.ancla-a.ancla));
+        // score primero; `cerca` como desempate (no dominante) para no aplastar mercados secundarios (multi-país).
+        final.sort((a,b)=> (b.score-a.score) || (b.ancla-a.ancla) || (b.cerca-a.cerca));
         console.log(`[SIGNALS] afloramiento: +${elegibles.length} recién-cambiado(s) ON-FIT reservado(s) al pool a la IA (${elegibles.map(c=>c.name).join(', ')}).`);
       }
     }
@@ -2438,7 +2504,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
   "context": [ "bullet corto (máx ~16 palabras)", "bullet corto (máx ~16 palabras)", "bullet corto (máx ~16 palabras)" ],
   "apertura": [ "hook 1", "hook 2", "hook 3" ],
   "prioridades": [ "Primero: qué tipo de empresa y por qué, en lenguaje plano (máx ~16 palabras)", "Primero: ...", "Después: ...", "También: ..." ],
-  "_plan": { "funcion": "función del comprador en 1-2 palabras", "comprador_ideal": "1-2 oraciones: el MODELO DE COMPRADOR (quién FIRMA EL CHEQUE y podría adoptar esto de forma realista) como test de INCLUSIÓN y EXCLUSIÓN, con ANTI-PATRONES explícitos de los que apliquen: (a) marca propia que no aloja terceros, (b) gigante fuera de rango realista del cliente, (c) contratista/asesor/micro cuando el ICP pide operadores medianos-grandes, (d) mismo sustantivo distinto negocio (flota de camiones ≠ flota de robots). Ej: 'Compran multimarca y grandes almacenes que curan marcas de terceros; NO marcas propias/DTC que solo venden lo suyo'. Ante research pobre, redactalo INCLUSIVO y agregá la exclusión SOLO si el research la respalda", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA del comprador real, EN ESPAÑOL (esto es solo para MOSTRAR en el PDF), ej: Bienes de consumo, Comercio minorista, Seguros, Banca, Automotriz. Evitá industriales amplias tipo Construcción/Manufactura salvo que sean literalmente el comprador"], "industrias_search": ["LAS MISMAS verticales que 'industrias' pero con el NOMBRE CANÓNICO EXACTO EN INGLÉS de la taxonomía oficial de LinkedIn (ESTO es lo que el sistema usa para BUSCAR; el match es contra la lista oficial de LinkedIn, en inglés). Una entrada por cada vertical de 'industrias'. Ejemplos de nombres canónicos válidos: Consumer Goods, Retail, Apparel and Fashion, Food and Beverage Services, Food and Beverage Manufacturing, Cosmetics, Beverage Manufacturing, Banking, Insurance, Financial Services, Automotive, Software Development, IT Services and IT Consulting, Technology, Information and Internet, Hospitals and Health Care, Real Estate, Construction, Manufacturing, Telecommunications, Advertising Services, Pharmaceutical Manufacturing, Hospitality. Usá el nombre EXACTO de LinkedIn en INGLÉS, NO lo traduzcas al español acá"], "competidores": ["NOMBRES de empresas/productos que el comprador compraría EN VEZ del producto del cliente (venden lo mismo), ej: Iké Asistencia, Asissprex. NUNCA la industria/vertical del comprador (ej. para un CRM inmobiliario: otros CRM como Inmovilla/Wasi, NUNCA 'inmobiliaria')"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA la industria/función/vertical donde el cliente VENDE (ej. nunca 'inmobiliaria' si vende a inmobiliarias)"], "verticales_excluir": ["2-5 rubros ADYACENTES-ruido a EXCLUIR del sourcing (comparten palabras con el ICP pero NO compran), ej. para voladura minera: geotecnia, mecanica de suelos, militar, consultoria; NUNCA el vertical del comprador; [] si no aplica"], "tamano_min": 200, "tamano_max": 0 }
+  "_plan": { "funcion": "función del comprador en 1-2 palabras", "comprador_ideal": "1-2 oraciones: el MODELO DE COMPRADOR (quién FIRMA EL CHEQUE y podría adoptar esto de forma realista) como test de INCLUSIÓN y EXCLUSIÓN, con ANTI-PATRONES explícitos de los que apliquen: (a) marca propia que no aloja terceros, (b) gigante fuera de rango realista del cliente, (c) contratista/asesor/micro cuando el ICP pide operadores medianos-grandes, (d) mismo sustantivo distinto negocio (flota de camiones ≠ flota de robots). Ej: 'Compran multimarca y grandes almacenes que curan marcas de terceros; NO marcas propias/DTC que solo venden lo suyo'. Ante research pobre, redactalo INCLUSIVO y agregá la exclusión SOLO si el research la respalda", "titulos_objetivo": ["PALABRAS SUELTAS del cargo de quien COMPRA: roles de facilities (operaciones, mantenimiento, administrador) Y roles del producto/canal del cliente (ej. hogar, asistencia, vivienda, copropiedad), ES+EN+abreviaturas"], "geografia": "el país real del cliente (prioritario)", "geografias": ["País del cliente PRIMERO, después SOLO países donde el cliente HOY opera"], "industrias": ["VERTICALES ANCLA del comprador real, EN ESPAÑOL (esto es solo para MOSTRAR en el PDF), ej: Bienes de consumo, Comercio minorista, Seguros, Banca, Automotriz. Evitá industriales amplias tipo Construcción/Manufactura salvo que sean literalmente el comprador"], "industrias_search": ["LAS MISMAS verticales que 'industrias' pero con el NOMBRE CANÓNICO EXACTO EN INGLÉS de la taxonomía oficial de LinkedIn (ESTO es lo que el sistema usa para BUSCAR; el match es contra la lista oficial de LinkedIn, en inglés). Una entrada por cada vertical de 'industrias'. Ejemplos de nombres canónicos válidos: Consumer Goods, Retail, Apparel and Fashion, Food and Beverage Services, Food and Beverage Manufacturing, Cosmetics, Beverage Manufacturing, Banking, Insurance, Financial Services, Automotive, Software Development, IT Services and IT Consulting, Technology, Information and Internet, Hospitals and Health Care, Real Estate, Construction, Manufacturing, Telecommunications, Advertising Services, Pharmaceutical Manufacturing, Hospitality. Usá el nombre EXACTO de LinkedIn en INGLÉS, NO lo traduzcas al español acá"], "competidores": ["NOMBRES de empresas/productos que el comprador compraría EN VEZ del producto del cliente (venden lo mismo), ej: Iké Asistencia, Asissprex. NUNCA la industria/vertical del comprador (ej. para un CRM inmobiliario: otros CRM como Inmovilla/Wasi, NUNCA 'inmobiliaria')"], "competidor_terminos": ["0-4 términos del PRODUCTO que delatan a un proveedor/competidor en el nombre de su empresa, ej: explosivos, voladura, staffing; NUNCA la industria/función/vertical donde el cliente VENDE (ej. nunca 'inmobiliaria' si vende a inmobiliarias)"], "verticales_excluir": ["2-5 rubros ADYACENTES-ruido a EXCLUIR del sourcing (comparten palabras con el ICP pero NO compran), ej. para voladura minera: geotecnia, mecanica de suelos, militar, consultoria; NUNCA el vertical del comprador; [] si no aplica"], "tamano_min": <número de empleados: PISO REAL del comprador, DERIVADO del research (BAJO si el comprador es PyME/SMB, ej. 5 a 10; ALTO si es mediano-grande, ej. 200+); NO uses un valor por defecto ni ancles a un piso alto>, "tamano_max": <número de empleados: TECHO REAL del comprador, DERIVADO del tipo/tamaño del cliente (BOUTIQUE/PyME: holgado pero acotado, ej. 2000 a 5000; ENTERPRISE que sí cierra con gigantes: alto o 0=sin techo); ante research pobre, holgado o 0; si es >0 tiene que ser MAYOR que tamano_min> }
 }
 CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
@@ -3526,6 +3592,9 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
     if (test === true || String(test).toLowerCase() === 'on' || String(process.env.TEST_MODE || '').toLowerCase() === 'on') {
       const _emp = empresa || dominio || 'Empresa de prueba';
       console.log(`[TEST] Job ${jobId}: MODO PRUEBA n8n — NO se llama Claude ni el MCP, devuelvo un PDF falso (0 tokens, $0).`);
+      // TEST_DELAY_MS (opcional): simula un job lento para load-testear la cola de concurrencia sin gastar.
+      const _tdelay = parseInt(process.env.TEST_DELAY_MS || '0', 10) || 0;
+      if (_tdelay > 0) await new Promise(r => setTimeout(r, _tdelay));
       const pdfB64 = await _pdfDePrueba(_emp);
       jobs.set(jobId, {
         status: 'ok', test: true, apto_envio: true,
@@ -3742,6 +3811,26 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000);
 
+// ===== COLA CON LÍMITE DE CONCURRENCIA =====
+// Sin esto, N diagnósticos simultáneos = N pipelines en paralelo → se pasa el tope de 60 req/min del MCP
+// (cada reporte ~40 llamadas) y se acumulan instancias de Chromium en RAM (riesgo de OOM y caída del server).
+// Con la cola, solo MAX_CONCURRENT_JOBS corren a la vez; el resto espera turno con status 'queued'. NADIE recibe
+// error por carga: la web/n8n ya hacen polling y el job arranca cuando se libera un slot. El timeout global de
+// cada job arranca cuando EMPIEZA a procesar (dentro de `run`), no mientras espera en la cola.
+const MAX_CONCURRENT_JOBS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_JOBS || '2', 10));
+let _jobsActivos = 0;
+const _cola = [];   // [{ jobId, run }] — pendientes de arrancar (FIFO)
+function _dispatchCola(){
+  while (_jobsActivos < MAX_CONCURRENT_JOBS && _cola.length) {
+    const item = _cola.shift();
+    const prev = jobs.get(item.jobId);
+    if (!prev) continue;   // el job expiró/desapareció del Map antes de arrancar → saltar
+    _jobsActivos++;
+    if (prev.status === 'queued') jobs.set(item.jobId, { ...prev, status: 'processing', startedAt: Date.now() });
+    Promise.resolve().then(item.run).catch(()=>{}).finally(() => { _jobsActivos--; _dispatchCola(); });
+  }
+}
+
 app.post('/generar', (req, res) => {
   // GATE DE LA LANDING (uso privado): si LANDING_KEY está seteada (solo en el servicio de la landing,
   // NO en el de producción que usa n8n), exigimos la clave en el header. Si no está seteada, no gatea
@@ -3767,51 +3856,55 @@ app.post('/generar', (req, res) => {
   }
 
   const jobId = crypto.randomUUID();
-  jobs.set(jobId, { status: 'processing', createdAt: Date.now() });
+  // ¿arranca ya o va a la cola? Si hay slot libre (menos de MAX corriendo Y nada esperando), arranca; si no, 'queued'.
+  const arrancaYa = _jobsActivos < MAX_CONCURRENT_JOBS && _cola.length === 0;
+  jobs.set(jobId, { status: arrancaYa ? 'processing' : 'queued', createdAt: Date.now() });
   if (key) enProgreso.set(key, jobId);
-  res.status(202).json({ jobId, status: 'processing' });
+  res.status(202).json({ jobId, status: arrancaYa ? 'processing' : 'queued', en_cola: !arrancaYa, por_delante: arrancaYa ? 0 : _cola.length });
 
-  // CINTURÓN GLOBAL: cualquier await sin timeout (presente o futuro) podía dejar el job en "processing"
-  // para siempre; el TTL del Map limpia el registro a 1h pero NO mata el promise de fondo, e infla
-  // jobs_activos. Promise.race contra JOB_TIMEOUT_MS garantiza que el job SIEMPRE cierra.
-  // No rompe el flujo normal: los jobs que terminan antes resuelven primero y este timeout queda inerte.
-  // procesar() maneja sus propios errores internamente (status:'error'); este race solo cubre el cuelgue total.
-  // 12 min (no 8): con la fase de señales web (~1-2 min) + MCP lento, el job legítimamente tarda más y el
-  // belt lo marcaba error ANTES de terminar (el PDF salía en background pero la landing ya mostraba timeout).
-  // El async NO está atado a los 300s de Railway (eso es para requests sync), así que 12 min es seguro.
-  const JOB_TIMEOUT_MS = parseInt(process.env.JOB_TIMEOUT_MS || '720000', 10);
-  let jobTimer;
-  const timeoutGlobal = new Promise((resolve) => {
-    jobTimer = setTimeout(() => {
-      console.error(`[Job ${jobId}] TIMEOUT GLOBAL (>${JOB_TIMEOUT_MS}ms). Se marca error; el promise de fondo puede seguir, pero el job ya no queda zombie.`);
-      jobs.set(jobId, { status: 'error', error: 'timeout global del job (>8min)', finishedAt: Date.now() });
-      resolve();
-    }, JOB_TIMEOUT_MS);
-  });
-
-  Promise.race([
-    procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug, idioma, test }),
-    timeoutGlobal
-  ])
-  // CATCH DEFENSIVO: procesar() maneja sus errores internamente (try/catch -> status:'error'),
-  // pero si alguna vez rechaza (o rechaza el rewrite de países / seleccionarConRetry sin atrapar),
-  // sin este .catch sería un unhandledRejection. Marcamos el job en error y NO re-lanzamos.
-  .catch((err) => {
-    console.error(`[Job ${jobId}] Rechazo no atrapado en el path async (lo absorbo, no tumbo el server):`, err?.stack || err);
-    const prev = jobs.get(jobId);
-    if (!prev || prev.status === 'processing') {
-      jobs.set(jobId, { status: 'error', error: err?.message || String(err), finishedAt: Date.now() });
-    }
-  })
-  .finally(() => {
-    clearTimeout(jobTimer);
-    if (key && enProgreso.get(key) === jobId) enProgreso.delete(key);
-  });
+  // EL TRABAJO REAL: se ejecuta cuando la cola le da un slot (máx MAX_CONCURRENT_JOBS a la vez). El CINTURÓN
+  // GLOBAL (Promise.race vs JOB_TIMEOUT_MS) arranca acá dentro, o sea cuando el job EMPIEZA a procesar, no
+  // mientras espera en la cola: así un job que esperó su turno tiene sus 12 min completos. procesar() maneja
+  // sus errores internamente (status:'error'); este race solo cubre el cuelgue total. El async NO está atado a
+  // los 300s de Railway (eso es para requests sync), así que 12 min es seguro.
+  const run = () => {
+    const JOB_TIMEOUT_MS = parseInt(process.env.JOB_TIMEOUT_MS || '720000', 10);
+    let jobTimer;
+    const timeoutGlobal = new Promise((resolve) => {
+      jobTimer = setTimeout(() => {
+        console.error(`[Job ${jobId}] TIMEOUT GLOBAL (>${JOB_TIMEOUT_MS}ms). Se marca error; el promise de fondo puede seguir, pero el job ya no queda zombie.`);
+        jobs.set(jobId, { status: 'error', error: 'timeout global del job', finishedAt: Date.now() });
+        resolve();
+      }, JOB_TIMEOUT_MS);
+    });
+    return Promise.race([
+      procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug, idioma, test }),
+      timeoutGlobal
+    ])
+    .catch((err) => {   // CATCH DEFENSIVO: si procesar() rechaza sin atrapar, no tumbamos el server.
+      console.error(`[Job ${jobId}] Rechazo no atrapado en el path async (lo absorbo, no tumbo el server):`, err?.stack || err);
+      const prev = jobs.get(jobId);
+      if (!prev || prev.status === 'processing') {
+        jobs.set(jobId, { status: 'error', error: err?.message || String(err), finishedAt: Date.now() });
+      }
+    })
+    .finally(() => {
+      clearTimeout(jobTimer);
+      if (key && enProgreso.get(key) === jobId) enProgreso.delete(key);
+    });
+  };
+  _cola.push({ jobId, run });   // encolar y despachar: arranca ya si hay slot, o espera turno.
+  _dispatchCola();
 });
 
 app.get('/resultado/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'jobId no encontrado o expirado' });
+  // Si está esperando en la cola, agregamos cuántos tiene por delante (para mostrarlo en el front).
+  if (job.status === 'queued') {
+    const idx = _cola.findIndex(q => q.jobId === req.params.jobId);
+    return res.json({ ...job, en_cola: true, por_delante: idx < 0 ? 0 : idx });
+  }
   res.json(job);
 });
 
@@ -4010,7 +4103,7 @@ app.get('/health', (req, res) => {
   // jobs_activos = jobs corriendo AHORA (termómetro de zombies); jobs_en_cache = total en el Map
   // (incluye terminados ok/error hasta el barrido de 1h). jobs.size mezclaba ambos y confundía.
   let activos = 0; for (const j of jobs.values()) if (j.status === 'processing') activos++;
-  res.json({ ok: true, jobs_activos: activos, jobs_en_cache: jobs.size, cuentas: NUM_CUENTAS, signals_mode: SIGNALS_MODE });
+  res.json({ ok: true, jobs_activos: activos, jobs_procesando: _jobsActivos, en_cola: _cola.length, max_concurrent: MAX_CONCURRENT_JOBS, jobs_en_cache: jobs.size, cuentas: NUM_CUENTAS, signals_mode: SIGNALS_MODE });
 });
 
 // Descarga del log de resultados (JSONL). ?tail=N devuelve solo las últimas N líneas.
