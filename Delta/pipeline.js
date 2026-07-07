@@ -842,7 +842,12 @@ Respondé SOLO este JSON:
 
   router.get('/health', (req, res) => {
     let activos = 0; for (const j of jobs.values()) if (j.status === 'processing') activos++;
-    res.json({ ok: true, producto: 'delta_roi', jobs_activos: activos, jobs_en_cache: jobs.size, paginas_esperadas: DELTA_EXPECTED_PAGES, always_send: DELTA_ALWAYS_SEND });
+    res.json({
+      ok: true, producto: 'delta_roi', jobs_activos: activos, jobs_en_cache: jobs.size,
+      paginas_esperadas: DELTA_EXPECTED_PAGES, always_send: DELTA_ALWAYS_SEND,
+      // Railway inyecta el SHA del commit deployado: corta la duda de "¿qué versión corre?"
+      commit: String(process.env.RAILWAY_GIT_COMMIT_SHA || 'local').slice(0, 7),
+    });
   });
 
   // Helpers puros expuestos para test (convención del repo)
