@@ -3794,6 +3794,12 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
 // ---------------------------------------------------------------------------
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+// FRONT POR PRODUCTO: en el contenedor de Delta (LANDING_PRODUCT=delta) la RAÍZ sirve la landing
+// de Delta en vez del index.html del GTM. Va ANTES del static (si no, static gana con index.html).
+// Sin la env, nada cambia: el GTM sigue sirviendo su landing en la raíz como siempre.
+if ((process.env.LANDING_PRODUCT || '').toLowerCase() === 'delta') {
+  app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'Delta', 'landing.html')));
+}
 app.use(express.static('.'));
 
 const jobs = new Map();
