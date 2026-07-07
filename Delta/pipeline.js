@@ -297,6 +297,7 @@ Reuniones que generan decisiones documentadas con seguimiento · Dashboard unifi
 2 OKRs (Q1 días 1-90, Q2 días 91-180) que cierren las brechas identificadas. Cada uno: objetivo + 3 KRs con "hoy" (estado plausible del prospecto, honesto: "Sin dato" o "Línea base" si no sabés), "meta" (Q1/Q2) y "referente" (benchmark del referente o cifra Delta de la whitelist). Celdas hoy/meta/referente ULTRA cortas (máx 15 chars).
 
 ## PRESUPUESTOS DE LONGITUD (chars máx, NO los superes; el sistema rechaza si te pasás)
+Apuntá a ~85% del máximo de cada campo, contando caracteres CON espacios. Ante la duda, MÁS CORTO: un campo corto es válido, uno pasado se rechaza.
 headline 110 · subheadline 220 · diagnosis.heading 60 · diagnosis.body 520 · benchmark_nota 160 · ineficiencias title 55 / desc 220 · timebars.heading 70 / bar label 45 · ref_narrativa 480 · gaps dim 30 / prospect 40 / ref 45 · gap_closing 440 · plan_intro 220 · okr objetivo 80 / kr 70 / celdas 15 · benefits title 55 / desc 150 · proj_nota 320 · quote 260 · cta.heading 90 / cta.body 200.
 
 ## SALIDA
@@ -322,12 +323,32 @@ SOLO este JSON (sin markdown):
   function _len(p, campo, txt, max) {
     const n = String(txt || '').length;
     if (n === 0) p.push(`${campo} vacío`);
-    else if (n > max) p.push(`${campo} demasiado largo (${n}/${max} chars): recortalo`);
+    else if (n > max) {
+      p.push(`${campo} demasiado largo (${n}/${max} chars): recortalo`);
+      if (p._largos) p._largos.push({ ruta: campo, actual: n, max });
+    }
+  }
+
+  // Acceso por ruta ("okrs[0].krs[1].kr") para el pase de acorte dirigido.
+  function _partesRuta(ruta) {
+    return String(ruta).split('.').flatMap(seg => {
+      const m = seg.match(/^([^[\]]+)((?:\[\d+\])*)$/);
+      if (!m) return [seg];
+      return [m[1], ...((m[2].match(/\d+/g) || []).map(Number))];
+    });
+  }
+  function _getRuta(o, ruta) { return _partesRuta(ruta).reduce((a, k) => (a == null ? a : a[k]), o); }
+  function _setRuta(o, ruta, v) {
+    const ps = _partesRuta(ruta);
+    let a = o;
+    for (let i = 0; i < ps.length - 1; i++) { if (a == null) return; a = a[ps[i]]; }
+    if (a != null) a[ps[ps.length - 1]] = v;
   }
 
   // GUARDAS determinísticas sobre el copy (el juez NO puede saltarlas).
   function validarContenido(c, ctx) {
     const p = [];
+    p._largos = [];   // desbordes de largo estructurados, para el pase de acorte dirigido
     if (!c || typeof c !== 'object') return ['CONTENT no devolvió un objeto'];
 
     _len(p, 'headline', c.headline, LIMITES.HEADLINE);
@@ -351,9 +372,9 @@ SOLO este JSON (sin markdown):
     _chk(p, bars.length === 4, `timebars.bars debe tener EXACTAMENTE 4 (vinieron ${bars.length})`);
     if (bars.length === 4) {
       bars.forEach((b, i) => {
-        _len(p, `bars[${i}].label`, b && b.label, LIMITES.BAR_LABEL);
+        _len(p, `timebars.bars[${i}].label`, b && b.label, LIMITES.BAR_LABEL);
         const v = Number(b && b.pct);
-        if (!Number.isInteger(v) || v < 5 || v > 60) p.push(`bars[${i}].pct debe ser entero entre 5 y 60 (vino ${b && b.pct})`);
+        if (!Number.isInteger(v) || v < 5 || v > 60) p.push(`timebars.bars[${i}].pct debe ser entero entre 5 y 60 (vino ${b && b.pct})`);
       });
       const suma = bars.reduce((a, b) => a + (Number(b && b.pct) || 0), 0);
       if (suma !== 100) p.push(`los pct de las bars deben sumar EXACTAMENTE 100 (suman ${suma})`);
@@ -426,6 +447,25 @@ SOLO este JSON (sin markdown):
     return p;
   }
 
+  // Pase de ACORTE DIRIGIDO: cuando lo ÚNICO que falla son largos, no regeneramos todo el copy
+  // (visto en la primera corrida real: regenerar arreglaba unos campos y rompía otros); una llamada
+  // barata reescribe SOLO los campos excedidos y el resto queda intacto.
+  async function acortarCampos(c, largos) {
+    const items = largos.map(l => ({ ruta: l.ruta, max: l.max, texto: String(_getRuta(c, l.ruta) || '') }));
+    const resp = await callClaude({
+      model: MODEL_DELTA_GEN,
+      system: 'Sos el editor de textos de Delta Teams. Recibís campos de un documento que EXCEDEN su máximo de caracteres. Reescribí CADA UNO por debajo de su "max" (apuntá al 85% del max, contando caracteres CON espacios), conservando el sentido y el dato principal. Reglas duras: sin em dashes, sin montos de dinero nuevos, sin DOS/Rocks/L10/EOS/Traction, español LATAM neutro sin voseo. Respondé SOLO un JSON de la forma {"<ruta>": "<texto nuevo>", ...} con EXACTAMENTE las mismas rutas que recibiste.',
+      messages: [{ role: 'user', content: JSON.stringify(items) }],
+      maxTokens: 3000,
+    });
+    const nuevos = _parseJSON(_textoDe(resp), 'ACORTE');
+    const out = JSON.parse(JSON.stringify(c));
+    for (const [ruta, texto] of Object.entries(nuevos)) {
+      if (typeof texto === 'string' && texto.trim()) _setRuta(out, ruta, _sanearDeep(texto));
+    }
+    return out;
+  }
+
   async function contentConRetry(ctx, research, fixes) {
     const numsTxt = Object.entries(ctx.nums).map(([k, v]) => `${k}: ${v}`).join('\n');
     const lidNota = ctx.liderazgo.fuente === 'sales_nav'
@@ -444,7 +484,14 @@ SOLO este JSON (sin markdown):
       let c;
       try { c = _sanearDeep(_parseJSON(_textoDe(resp), 'CONTENT')); }
       catch (e) { feedback = `\n\nEL INTENTO ANTERIOR FALLÓ: ${e.message}. Devolvé SOLO el JSON pedido.`; continue; }
-      const problemas = validarContenido(c, ctx);
+      let problemas = validarContenido(c, ctx);
+      // Si TODOS los problemas son de largo → acorte dirigido (hasta 2 pases) en vez de regenerar.
+      for (let pase = 1; pase <= 2 && problemas.length && problemas._largos && problemas.length === problemas._largos.length; pase++) {
+        console.warn(`[DELTA:CONTENT] ${problemas.length} campos exceden el largo → acorte dirigido ${pase}/2 (${problemas._largos.map(l => l.ruta).join(', ')})`);
+        try { c = await acortarCampos(c, problemas._largos); }
+        catch (e) { console.warn('[DELTA:CONTENT] acorte dirigido falló:', e.message); break; }
+        problemas = validarContenido(c, ctx);
+      }
       if (!problemas.length) return c;
       console.warn(`[DELTA:CONTENT] intento ${intento}/${DELTA_CONTENT_TRIES}: ${problemas.length} problemas: ${problemas.slice(0, 6).join(' | ')}${problemas.length > 6 ? ' | ...' : ''}`);
       feedback = `${fixes && fixes.length ? `\n\nCORRECCIONES DEL JUEZ (aplicalas TODAS):\n- ${fixes.join('\n- ')}` : ''}\n\nEL INTENTO ANTERIOR VIOLÓ ESTAS GUARDAS (corregilas TODAS):\n- ${problemas.join('\n- ')}`;
@@ -764,6 +811,6 @@ Respondé SOLO este JSON:
   });
 
   // Helpers puros expuestos para test (convención del repo)
-  router._interno = { validarContenido, validarResearch, resolverLiderazgo, armarData, _empKeyDelta, _fechaEs, LIMITES };
+  router._interno = { validarContenido, validarResearch, resolverLiderazgo, armarData, _empKeyDelta, _fechaEs, _getRuta, _setRuta, LIMITES };
   return router;
 };
