@@ -4106,15 +4106,68 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, jobs_activos: activos, jobs_procesando: _jobsActivos, en_cola: _cola.length, max_concurrent: MAX_CONCURRENT_JOBS, jobs_en_cache: jobs.size, cuentas: NUM_CUENTAS, signals_mode: SIGNALS_MODE });
 });
 
+// GATE de los endpoints de datos (mismo criterio que /generar): si LANDING_KEY está seteada, exigimos la
+// clave por header x-landing-key O por querystring ?key= (para poder abrirlo desde el navegador).
+function _gateDatos(req, res){
+  if (process.env.LANDING_KEY && req.header('x-landing-key') !== process.env.LANDING_KEY && req.query.key !== process.env.LANDING_KEY) {
+    res.status(401).json({ error: 'Clave invalida' });
+    return false;
+  }
+  return true;
+}
+
 // Descarga del log de resultados (JSONL). ?tail=N devuelve solo las últimas N líneas.
 // Cada línea es un job estructurado, listo para analizar con IA.
 app.get('/resultados-log', (req, res) => {
+  if (!_gateDatos(req, res)) return;   // trae emails/leads: no lo dejamos público
   try {
     if (!fs.existsSync(RESULT_LOG)) return res.status(404).json({ error: 'sin resultados todavía', path: RESULT_LOG });
     let txt = fs.readFileSync(RESULT_LOG, 'utf8');
     const tail = parseInt(req.query.tail || '0', 10);
     if (tail > 0) txt = txt.trim().split('\n').slice(-tail).join('\n') + '\n';
     res.type('text/plain').send(txt);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// RESUMEN CONTADO del histórico (lee resultados.jsonl del volumen): cuántos diagnósticos se hicieron,
+// aprobados/rechazados/errores, costo total y desglose por día y por empresa. ?dias=N filtra a los últimos
+// N días (default: todo el archivo). Abrilo en el navegador: /stats?key=LA_CLAVE
+app.get('/stats', (req, res) => {
+  if (!_gateDatos(req, res)) return;
+  try {
+    if (!fs.existsSync(RESULT_LOG)) return res.status(404).json({ error: 'sin resultados todavía', path: RESULT_LOG });
+    const dias = parseInt(req.query.dias || '0', 10);
+    const desde = dias > 0 ? Date.now() - dias * 24 * 60 * 60 * 1000 : 0;
+    const lineas = fs.readFileSync(RESULT_LOG, 'utf8').trim().split('\n');
+    const porDia = {}, porEmpresa = {};
+    let total = 0, aprobados = 0, rechazados = 0, errores = 0, aptos = 0, costoTotal = 0, malParseadas = 0;
+    for (const ln of lineas) {
+      if (!ln.trim()) continue;
+      let r; try { r = JSON.parse(ln); } catch { malParseadas++; continue; }
+      const ts = Date.parse(r.ts || '') || 0;
+      if (desde && ts && ts < desde) continue;
+      total++;
+      const costo = Number(r.costo) || 0; costoTotal += costo;
+      if (r.status === 'error') errores++;
+      else if (r.veredicto === 'APROBADO') aprobados++;
+      else rechazados++;
+      if (r.apto_envio) aptos++;
+      const dia = (r.ts || '').slice(0, 10) || 'sin-fecha';
+      (porDia[dia] = porDia[dia] || { diagnosticos: 0, costo_usd: 0 });
+      porDia[dia].diagnosticos++; porDia[dia].costo_usd = +(porDia[dia].costo_usd + costo).toFixed(4);
+      const emp = r.empresa || r.dominio || '?';
+      porEmpresa[emp] = (porEmpresa[emp] || 0) + 1;
+    }
+    res.json({
+      periodo: dias > 0 ? `últimos ${dias} días` : 'todo el histórico',
+      diagnosticos_totales: total,
+      aprobados, rechazados, errores, aptos_para_envio: aptos,
+      costo_total_usd: +costoTotal.toFixed(2),
+      costo_promedio_usd: total ? +(costoTotal / total).toFixed(3) : 0,
+      por_dia: porDia,
+      por_empresa: porEmpresa,
+      lineas_mal_parseadas: malParseadas || undefined
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
