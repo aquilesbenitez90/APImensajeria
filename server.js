@@ -1169,6 +1169,24 @@ function _matchVerticalExcluir(txt, excluir){
 // Solo reintenta ante timeout/red (AbortError o falla de fetch), NO ante respuesta inservible. Costo de
 // latencia: 1 reintento = hasta 2x MCP_TIMEOUT_MS (~90s) en el peor caso, aceptable dentro del cinturón
 // global de 8 min. NO se usa en `corroborar` (enriquecimiento, no crítico) para no sumar latencia ahí.
+// PAÍS SEDE desde la página de LinkedIn de la empresa (structuredContent.locations del lookup_company).
+// CASO TRANSUR (bug real): LinkedIn decía sede Cali/CO + website .com.co + descripción "compañía Colombiana",
+// pero solo leíamos website/headcount → el PLAN "dedujo" el país por web_search y cayó a Argentina → cards
+// argentinas para una empresa colombiana. El país sede es un DATO DURO que LinkedIn nos da: usarlo siempre.
+const _ISO_PAIS = { AR:'Argentina', BR:'Brasil', CL:'Chile', CO:'Colombia', MX:'México', PE:'Perú', UY:'Uruguay', PY:'Paraguay', BO:'Bolivia', EC:'Ecuador', VE:'Venezuela', CR:'Costa Rica', PA:'Panamá', GT:'Guatemala', SV:'El Salvador', HN:'Honduras', NI:'Nicaragua', DO:'República Dominicana', CU:'Cuba', PR:'Puerto Rico', US:'Estados Unidos', CA:'Canadá', ES:'España', PT:'Portugal', FR:'Francia', DE:'Alemania', GB:'Reino Unido', UK:'Reino Unido', IT:'Italia', NL:'Países Bajos', IE:'Irlanda', CH:'Suiza', BE:'Bélgica', SE:'Suecia', NO:'Noruega', DK:'Dinamarca', PL:'Polonia', IN:'India', CN:'China', JP:'Japón', KR:'Corea del Sur', SG:'Singapur', AU:'Australia', NZ:'Nueva Zelanda', IL:'Israel', AE:'Emiratos Árabes Unidos', ZA:'Sudáfrica', TR:'Turquía' };
+function _sedeDeLookup(res){
+  try{
+    const sc = res && res.structuredContent;
+    const locs = (sc && Array.isArray(sc.locations)) ? sc.locations : [];
+    if(!locs.length) return null;
+    const hq = locs.find(l => l && l.headquarter) || locs.find(l => l && l.country) || locs[0];
+    if(!hq || !hq.country) return null;
+    const iso = String(hq.country).toUpperCase().trim();
+    const pais = _ISO_PAIS[iso] || null;   // ISO desconocido → null (no adivinar)
+    return pais ? { pais, ciudad: String(hq.city || '').trim() || null } : null;
+  }catch(e){ return null; }
+}
+
 async function _callMCPClienteConRetry(toolName, args) {
   try {
     return await callMCP(toolName, args);
@@ -1192,11 +1210,12 @@ async function resolverCliente({ profileId, dominio, empresa }) {
       const empLI = _empresaDeLookup(txt) || empresa || slugLI.replace(/[-_]+/g,' ').trim();
       const domLI = _dominioDeLookup(txt);
       const hcLI  = _headcountDe(txt);
-      console.log(`[CLIENTE] link LinkedIn "${slugLI}" -> empresa "${empLI}" (dominio ${domLI || 'no disponible'}, ${hcLI ?? '?'} empleados)`);
+      const sede  = _sedeDeLookup(txt);   // país/ciudad SEDE de la página de LinkedIn (dato duro, caso Transur)
+      console.log(`[CLIENTE] link LinkedIn "${slugLI}" -> empresa "${empLI}" (dominio ${domLI || 'no disponible'}, ${hcLI ?? '?'} empleados${sede ? `, sede ${sede.ciudad ? sede.ciudad + ', ' : ''}${sede.pais}` : ''})`);
       // Anclamos DIRECTO con los datos de la página de la empresa en LinkedIn (nombre + headcount = confiables).
       // NO re-consultamos el dominio: el lookup POR-DOMINIO puede estar roto aunque la empresa exista (visto:
       // robotic-crew.com -> 500 "company no longer exists", pero el slug /company/robotic-crew sí resuelve).
-      return { empresa: empLI, dominio: domLI || '', headcount: hcLI, tier: _tier(hcLI), anclado: true, fuente: 'linkedin_company', confianza: hcLI ? 'alta' : 'media' };
+      return { empresa: empLI, dominio: domLI || '', headcount: hcLI, tier: _tier(hcLI), anclado: true, fuente: 'linkedin_company', confianza: hcLI ? 'alta' : 'media', pais: sede && sede.pais, ciudad: sede && sede.ciudad };
     }catch(e){
       console.warn(`[CLIENTE] lookup_company para link LinkedIn "${slugLI}" falló:`, e.message);
       // Aun fallando: el slug es mejor cliente que "linkedin.com". Lo usamos como nombre (lo agarra el fallback
@@ -1212,10 +1231,11 @@ async function resolverCliente({ profileId, dominio, empresa }) {
     try {
       const txt = await callMCP('lookup_company', { companyUrlOrName: dominio });
       const empD = _empresaDeLookup(txt), hcD = _headcountDe(txt);
+      const sedeD = _sedeDeLookup(txt);
       if (empD && _mismaEmpresa(base.empresa, empD)) {
         const hc = base.headcount ?? hcD;
-        console.log(`[CLIENTE] ✓ corroborado: perfil "${base.empresa}" == dominio "${empD}" -> confianza ALTA`);
-        return { ...base, headcount: hc, tier: _tier(hc), confianza: 'alta', corroborado: true };
+        console.log(`[CLIENTE] ✓ corroborado: perfil "${base.empresa}" == dominio "${empD}" -> confianza ALTA${sedeD ? ` (sede ${sedeD.pais})` : ''}`);
+        return { ...base, headcount: hc, tier: _tier(hc), confianza: 'alta', corroborado: true, pais: base.pais || (sedeD && sedeD.pais), ciudad: base.ciudad || (sedeD && sedeD.ciudad) };
       }
       if (empD) {
         console.warn(`[CLIENTE] ⚠️ discrepancia: perfil="${base.empresa}" vs dominio="${empD}" -> confianza media + flag`);
@@ -1241,8 +1261,9 @@ async function resolverCliente({ profileId, dominio, empresa }) {
       const txt = await _callMCPClienteConRetry('lookup_company', { companyUrlOrName: dominio });
       const emp = _empresaDeLookup(txt) || empresa || dominio;
       const hc = _headcountDe(txt);
-      console.log(`[CLIENTE] anclado por dominio ${dominio} -> "${emp}" (${hc ?? '?'} empleados, tier ${_tier(hc)})`);
-      return { empresa: emp, dominio, headcount: hc, tier: _tier(hc), anclado: true, fuente: 'dominio', confianza: 'media' };
+      const sede = _sedeDeLookup(txt);
+      console.log(`[CLIENTE] anclado por dominio ${dominio} -> "${emp}" (${hc ?? '?'} empleados, tier ${_tier(hc)}${sede ? `, sede ${sede.pais}` : ''})`);
+      return { empresa: emp, dominio, headcount: hc, tier: _tier(hc), anclado: true, fuente: 'dominio', confianza: 'media', pais: sede && sede.pais, ciudad: sede && sede.ciudad };
     } catch (e) { console.warn(`[CLIENTE] dominio ${dominio} no resolvió:`, e.message); }
   }
   // FALLBACK por NOMBRE (Sales Navigator): no anclamos por perfil ni por dominio. Antes de rendirnos,
@@ -1636,7 +1657,9 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     try{ const txt = String(await callMCP('search_sales_navigator_filtered', f)); if(!txtPeopleSenal) txtPeopleSenal = txt; return _parsePeople(txt); }catch{ return []; }
   }
   // Une los resultados de buscar cada término de rol por separado (dedupe por id), en PARALELO con tope CONC.
-  const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '4', 10);
+  // Default 8 (era 4 por el tope de 60 req/min del gateway del MCP, ELIMINADO en su actualización; verificado
+  // 2026-07-13 con 20 llamadas concurrentes → todo 200, latencia estable ~1.3s). Bajable por env si vuelve.
+  const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '8', 10);
   async function buscar(locIds, conIndustria, soloRecienCambio){
     if(!terminos.length) return await buscarUno(locIds, conIndustria, null, soloRecienCambio);
     const listas = await _mapLimit(terminos, CONC, t => buscarUno(locIds, conIndustria, t, soloRecienCambio));
@@ -1852,20 +1875,32 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const anclaSenales = new Map(cuentas.map(c=>[_empKey(c.name), coSenales.get(c.id) || null]).filter(([,s])=>s));
   console.log(`[SOURCE] cuentas-ancla: ${cuentas.length}${cuentas.length?` (${cuentas.slice(0,8).map(c=>c.name).join(', ')}${cuentas.length>8?'…':''})`:''}.`);
 
-  // ===== PASADA B — DECISORES dentro de las cuentas-ancla (fit alto, empresa controlada) =====
-  let enCuentas = [];
+  // ===== PASADAS B + C + D EN PARALELO =====
+  // Eran secuenciales por el tope de 60 req/min del gateway del MCP, que YA NO EXISTE (verificado 2026-07-13:
+  // 30 req concurrentes → todo 200, latencia estable). B (decisores en cuentas-ancla), C (barrido amplio) y
+  // D (changedJobsLast90Days) son INDEPENDIENTES entre sí (todas dependen solo de la Pasada A / resolves),
+  // así que correrlas juntas ahorra ~30-60s de reloj por reporte sin cambiar ningún resultado.
   const idsEnCuenta = new Set();   // ids que vinieron de company:{include:anclaIds} → ancla por CONSTRUCCIÓN (no por match de nombre)
-  if(anclaIds.length){
+  const _pasadaB = (async () => {
+    if(!anclaIds.length) return [];
     const f={ category:'people', profilesLimit:SOURCE_PROFILES_LIMIT, company:{include: anclaIds} };
     if(geoLocOrNull) f.location={include:geoLocOrNull};
     if(terminos.length) f.jobPosition={ include: terminos };   // acota a los cargos objetivo dentro de la cuenta
-    try{ enCuentas = _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{}
-    for(const p of enCuentas) if(p.id) idsEnCuenta.add(p.id);
-  }
-
-  // ===== PASADA C — BARRIDO people-first amplio (captura el 2do grado DISPERSO de la red) =====
-  let barrido = await buscar(geoLocOrNull, true);
-  if(_validosHome(barrido) < HOME_MIN) barrido = barrido.concat(await buscar(geoLocOrNull, false));
+    try{ return _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{ return []; }
+  })();
+  const _pasadaC = (async () => {
+    let b = await buscar(geoLocOrNull, true);
+    if(_validosHome(b) < HOME_MIN) b = b.concat(await buscar(geoLocOrNull, false));
+    return b;
+  })();
+  const _pasadaD = (async () => {
+    // Señal de compra (ADITIVA): recién-cambiaron de trabajo. Solo en pasada 1 (conSenal): es realce, no recall.
+    if(!conSenal){ console.log('[SIGNALS] Pasada D (changedJobsLast90Days) SALTADA (pasada de recall; la señal es realce, no recall).'); return []; }
+    try{ return await buscar(geoLocOrNull, true, true); }
+    catch(e){ console.warn('[SIGNALS] pasada changedJobsLast90Days falló:', e.message); return []; }
+  })();
+  let [enCuentas, barrido, recienCambio] = await Promise.all([_pasadaB, _pasadaC, _pasadaD]);
+  for(const p of enCuentas) if(p.id) idsEnCuenta.add(p.id);
   // COMPANY-FIRST (flag ON): el barrido amplio es la FUENTE DE RUIDO (mete gente de CUALQUIER empresa, incl.
   // gigantes off-ICP). Con company-first priorizamos las cuentas-ancla VETADAS (Pasada A/B, ya filtradas por
   // techo) y usamos el barrido SOLO como FALLBACK de relleno si las cuentas-ancla no alcanzan para llenar el
@@ -1884,21 +1919,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     console.log(`[SOURCE] company-first: ${anclaFit} decisores en cuentas-ancla < ${N_IA_TARGET} → barrido amplio entra como FALLBACK de relleno.`);
   }
 
-  // ===== PASADA D — SEÑAL DE COMPRA (ADITIVA): recién-cambiaron de trabajo (changedJobsLast90Days) =====
-  // Misma búsqueda people que el barrido (mismos keywords/location/industria) pero filtrada a los que
-  // asumieron el rol en los últimos 90 días. NO reemplaza nada: se MERGEA al pool para que esos candidatos
-  // (recientes = ventana de compra abierta) COMPITAN en el ranking sin sesgarlo a puro recién-cambiado.
-  // Una sola pasada (MCP es gratis; el costo es latencia): si trae con industria, no repetimos sin ella.
-  // LATENCIA (fix robotic-crew/300s Railway): la Pasada D corre 1 vez por cada llamada a sourceCandidates,
-  // y el multi-pass invoca esto hasta SOURCE_MAX_PASSES veces -> hasta 18 round-trips MCP extra SOLO por la
-  // señal. La señal es REALCE (sube en el ranking), no RECALL (no agrega cuentas nuevas que falten); no hace
-  // falta re-buscarla en las pasadas 2/3 de recall. Solo la corremos cuando conSenal=true (pasada 1).
-  let recienCambio = [];
-  if(conSenal){
-    try{ recienCambio = await buscar(geoLocOrNull, true, true); }catch(e){ console.warn('[SIGNALS] pasada changedJobsLast90Days falló:', e.message); }
-  } else {
-    console.log('[SIGNALS] Pasada D (changedJobsLast90Days) SALTADA (pasada de recall; la señal es realce, no recall).');
-  }
+  // (La Pasada D ya corrió en paralelo con B y C, arriba.)
   // BLINDAJE: los candidatos de esta pasada pasaron el filtro changedJobsLast90Days:true del Sales Navigator,
   // así que son recién-cambiados POR DEFINICIÓN. Forzamos recienAsumio=true en TODOS sin depender de que
   // _parsePeople haya logrado extraer recentlyHired del texto (no confirmado en el endpoint de texto del MCP).
@@ -1996,11 +2017,17 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       // de enriquecimiento, NO lanzamos más get_contact_profile; el candidato queda con headcount=null (tolerado).
       if(!_enrichTienePresupuesto()){ _skipTop++; }
       else try{
-        const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
+        const _raw = await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache });
+        const prof=_parseProfile(_raw);
         if(prof.headcount!=null) c.headcount=prof.headcount;
         if(prof.headRich && prof.headRich.length>=3){
           c.head=prof.headRich; c.empresa=_empresaDeHeadline(prof.headRich) || c.empresa; c.fit=_rankFit(prof.headRich, titulos);
         }
+        // ABOUT del perfil (nuevo en el MCP actualizado): el "Acerca de" que la persona escribió en LinkedIn.
+        // Viene GRATIS en esta misma llamada; se lo pasamos al SELECT para personalizar ángulo/hook con las
+        // PALABRAS REALES del lead (anti-invención perfecto). Recortado para no inflar el prompt.
+        const _about = _raw && _raw.structuredContent && _raw.structuredContent.about;
+        if(_about) c.about = String(_about).replace(/\s+/g,' ').trim().slice(0, 300);
         // SEÑAL sobre el FINALISTA: si el perfil expone recién-cambió/antigüedad-corta, marcamos recienAsumio
         // (OR: nunca pisamos una señal previa de la Pasada D con un null/desconocido del perfil).
         if(prof.recienAsumio===true) c.recienAsumio = true;
@@ -2516,7 +2543,7 @@ CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades
 async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
   _setStage('gen');
   const bloqueCliente = (cliente && cliente.anclado)
-    ? `\n\nDATOS VERIFICADOS DEL CLIENTE (NO inventes otra empresa, usá ESTOS): Empresa: ${cliente.empresa}; Tamaño: ${cliente.headcount ?? '?'} empleados${cliente.tier ? ` (tier ${cliente.tier})` : ''}.`
+    ? `\n\nDATOS VERIFICADOS DEL CLIENTE (NO inventes otra empresa, usá ESTOS): Empresa: ${cliente.empresa}; Tamaño: ${cliente.headcount ?? '?'} empleados${cliente.tier ? ` (tier ${cliente.tier})` : ''}.${cliente.pais ? ` PAÍS SEDE (dato DURO de la página de LinkedIn de la empresa, NO lo contradigas): ${cliente.pais}${cliente.ciudad ? ` (${cliente.ciudad})` : ''}. "geografia" TIENE que ser ${cliente.pais}; solo agregá otros países a "geografias" si el research confirma que el cliente HOY también opera ahí.` : ''}`
     : '';
   const messages = [{ role:'user', content:`Cliente a analizar:\n- Empresa: ${empresa}\n- Dominio: ${dominio}\n- Email contacto: ${email}\n- Nombre contacto: ${nombre}${bloqueCliente}\n\nFecha de hoy (usala en "fecha"): ${fechaHoy}\n\nInvestigá la empresa con web_search y devolvé SOLO el JSON del schema.` }];
   const MAX = parseInt(process.env.PLAN_MAX_TOOL_ITERS || '8', 10);
@@ -2542,6 +2569,36 @@ async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
 // el costo extra de tokens es marginal. El CAMINO FELIZ (PLAN válido a la primera) hace UNA sola llamada y
 // devuelve igual que runPlan, sin overhead. Si agota los intentos, deja propagar el error (fail-closed: no se
 // inventa un PLAN). NO toca el prompt ni validarPlan.
+// GUARDA DE PAÍS SEDE (determinística, caso Transur): si la página de LinkedIn del cliente declara un país
+// sede y el PLAN derivó OTRO (web_search confundido por nombre genérico → caía a Argentina), el dato duro
+// MANDA. Si el país sede NI FIGURA en geografias → la derivación entera de geo es sospechosa: la reemplazamos
+// por [sede]. Si figura pero no es el principal → lo promovemos a principal conservando el resto. También
+// corregimos el país en h1_post; el resto de superficies (cinta, stat, lead) se reconcilian después contra
+// las cards, como siempre. Muta el plan in-place; devuelve true si corrigió (para tests).
+function _corregirGeoSede(plan, sedePais){
+  if(!sedePais || !plan || !plan._plan) return false;
+  const icp = plan._plan;
+  const geos = Array.isArray(icp.geografias) ? icp.geografias : [];
+  const enLista = geos.some(g => _norm(g) === _norm(sedePais));
+  const esPrincipal = _norm(icp.geografia || '') === _norm(sedePais);
+  if(esPrincipal) return false;
+  const geoVieja = icp.geografia || '';
+  if(!enLista){
+    console.warn(`[GEO] PLAN derivó "${geoVieja}" pero LinkedIn declara sede "${sedePais}" (dato duro) → geografia/geografias corregidas a la sede.`);
+    icp.geografias = [sedePais];
+  } else {
+    console.warn(`[GEO] sede "${sedePais}" estaba en geografias pero no como principal → promovida (antes "${geoVieja}").`);
+    icp.geografias = [sedePais, ...geos.filter(g => _norm(g) !== _norm(sedePais))];
+  }
+  icp.geografia = sedePais;
+  // h1: swap del país viejo por la sede, SALVO que la sede ya figure en el título (evita "Colombia y Colombia";
+  // en ese caso lo dejan prolijo las reconciliaciones posteriores contra las cards).
+  if(geoVieja && typeof plan.h1_post === 'string' && plan.h1_post && !new RegExp(sedePais.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'i').test(plan.h1_post)){
+    plan.h1_post = plan.h1_post.replace(new RegExp(geoVieja.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'i'), sedePais);
+  }
+  return true;
+}
+
 async function runPlanConRetry(args){
   const MAX   = Math.max(1, parseInt(process.env.PLAN_MAX_TRIES || '2', 10));
   const delay = parseInt(process.env.PLAN_RETRY_DELAY_MS || '2000', 10);
@@ -2550,6 +2607,7 @@ async function runPlanConRetry(args){
     try{
       const plan = await runPlan(args);
       validarPlan(plan);   // idempotente: confirma que el PLAN está completo antes de seguir
+      _corregirGeoSede(plan, args && args.cliente && args.cliente.pais);   // guarda determinística de país sede (caso Transur)
       return plan;
     }catch(e){
       ultimoError = e;
@@ -2585,6 +2643,7 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 - LOS ${pedir} ids tienen que ser DISTINTOS. Prohibido repetir la misma persona.
 - EMPRESAS DISTINTAS: cada cuenta es de una empresa DIFERENTE. Si dos son de la misma empresa, quedate con el de mejor fit y completá con otra empresa.
 - PROHIBIDO inventar o inflar el cargo: usá EXACTAMENTE el que figura en la lista. Si dice "Project Manager", es "Project Manager" — no lo asciendas a "Manager de Mantenimiento" ni le inventes MBA, estudios, especialidad ni un rol que no está. No le atribuyas datos (seniority, área, formación) que no estén en lo que te paso.
+- BIO (si la línea del candidato trae 'BIO (texto real de su perfil)'): es el "Acerca de" que ESA persona escribió en su propio LinkedIn. Es ORO para personalizar: usalo para que el ángulo y el hook conecten con lo que a la persona le importa (su enfoque, sus temas, cómo describe su trabajo) — un mensaje que refleja lo que el lead mismo dice de sí convierte mucho más que uno genérico. REGLAS: (1) podés parafrasear o hacer eco de SUS temas, pero PROHIBIDO atribuirle afirmaciones, logros o datos que no estén textuales en la bio; (2) no cites la bio entre comillas como si lo hubieras entrevistado; integralo natural ("veo que tu foco está en X"); (3) si la bio no aporta al pitch, ignorala (no fuerces la referencia); (4) la bio NUNCA pisa el cargo/empresa de la lista (esos mandan).
 - PROHIBIDO atribuir un ÁREA, DEPARTAMENTO, INICIATIVA o ESPECIALIDAD que no aparezca LITERAL en el cargo de la lista. Si el cargo dice solo "Executive Director", NO escribas que "dirige Automation", "lidera Innovation" ni que está "a cargo de Automation e Innovation": esa área NO está en el cargo, te la estás inventando. Hablá del rol GENÉRICO tal como figura ("como Executive Director", "desde su rol de dirección"), NO inventes el QUÉ específico que dirige. Misma regla para el ángulo y para el hook.
 - PROHIBIDO RE-ENCUADRAR EL ROL HACIA EL COMPRADOR (defecto sutil): NO le atribuyas a la persona la responsabilidad de COMPRA, DECISIÓN o LIDERAZGO de un área que su cargo real NO implica. Un "Head of Design" NO "lidera las compras de [X]"; un "People & Culture Director" NO "decide alianzas/expansión/proveedores"; un "Marketing Manager" NO "gestiona la operación de mantenimiento". Si el cargo es de OTRA función y claramente NO es el comprador del producto del cliente, NO lo fuerces a parecerlo: conectá con lo que ESE rol SÍ hace, o mejor elegí otro candidato cuyo cargo sí sea del comprador. Forzar el encuadre quema el reporte cuando el prospecto lee que le atribuís algo que no es lo suyo.
 - PROHIBIDO AFIRMAR UN FIT DE NEGOCIO QUE NO CONSTA (anti-invención, defecto que MAQUILLA un mismatch): el ángulo y el hook NO pueden AFIRMAR que la empresa de la card COMPRA, ALOJA, REVENDE o INTEGRA lo del cliente si eso no está respaldado por lo que sabés de esa empresa. PROHIBIDO frases tipo "incorpora marcas externas", "aloja proveedores de terceros", "integra robótica", "suma soluciones como la de [cliente]" sobre una empresa donde NO hay evidencia de que lo haga (peor aún si es justo lo que esa empresa NO hace, ej. una marca propia que solo vende lo suyo). Si NO sabés si la empresa compra/aloja lo del cliente, NO lo afirmes: conectá con lo que ESE rol/empresa SÍ hace de forma genérica y verificable ("como responsable de [área] en [empresa], usted maneja [lo que el rol SÍ toca]"), sin atribuirle una adopción que no consta. Afirmar un fit inexistente quema el reporte apenas el prospecto lo lee.
@@ -2653,7 +2712,9 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
       + `${s.leadership?' · SEÑAL: cambio de liderazgo en la empresa':''}`
       + `${s.growth?' · SEÑAL: la empresa está creciendo en plantilla':''}`
       + `${p.posts>0?' · activo en LinkedIn':''}`;
-    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}${senal}${hookLang}`;
+    // BIO: el "Acerca de" REAL que el candidato escribió en su LinkedIn (viene del enriquecimiento, solo top-K).
+    const bio = p.about ? ` | BIO (texto real de su perfil): "${p.about}"` : '';
+    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}${senal}${hookLang}${bio}`;
   }).join('\n');
   const _pisoTam = (plan._plan && parseInt(plan._plan.tamano_min||0,10)) || 0;
   const vertAlta = (plan._plan && Array.isArray(plan._plan.industrias) ? plan._plan.industrias.filter(Boolean) : []);
@@ -3501,7 +3562,7 @@ const COMPANY_SIGNALS = (process.env.COMPANY_SIGNALS || 'on').toLowerCase();
 async function enriquecerSenalesEmpresa(data){
   if(COMPANY_SIGNALS !== 'on') return;
   const cards = (data && Array.isArray(data.cards)) ? data.cards : [];
-  const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '4', 10);
+  const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '8', 10);   // gateway sin tope de 60/min (ver sourceCandidates)
   // flag -> etiqueta legible (las MISMAS que _senalesVisibles, para no duplicar texto) + filtro MCP.
   const filtros = [
     ['funding',    'Levantó financiamiento', { fundingEvents: true }],
@@ -4117,15 +4178,71 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, jobs_activos: activos, jobs_procesando: _jobsActivos, en_cola: _cola.length, max_concurrent: MAX_CONCURRENT_JOBS, jobs_en_cache: jobs.size, cuentas: NUM_CUENTAS, signals_mode: SIGNALS_MODE });
 });
 
+// GATE de los endpoints de datos (/stats, /resultados-log): acepta LANDING_KEY o STATS_KEY, por header
+// x-landing-key o querystring ?key= (para abrirlo del navegador). STATS_KEY existe para PRODUCCIÓN (n8n):
+// ahí LANDING_KEY no puede setearse (gatearía /generar y rompería n8n), pero estos endpoints exponen emails
+// de leads y costos → con STATS_KEY se protegen sin tocar /generar. Sin ninguna de las dos → no gatea (dev).
+function _gateDatos(req, res){
+  const claves = [process.env.LANDING_KEY, process.env.STATS_KEY].filter(Boolean);
+  if (claves.length && !claves.includes(req.header('x-landing-key')) && !claves.includes(req.query.key)) {
+    res.status(401).json({ error: 'Clave invalida' });
+    return false;
+  }
+  return true;
+}
+
 // Descarga del log de resultados (JSONL). ?tail=N devuelve solo las últimas N líneas.
 // Cada línea es un job estructurado, listo para analizar con IA.
 app.get('/resultados-log', (req, res) => {
+  if (!_gateDatos(req, res)) return;   // trae emails/leads: no lo dejamos público
   try {
     if (!fs.existsSync(RESULT_LOG)) return res.status(404).json({ error: 'sin resultados todavía', path: RESULT_LOG });
     let txt = fs.readFileSync(RESULT_LOG, 'utf8');
     const tail = parseInt(req.query.tail || '0', 10);
     if (tail > 0) txt = txt.trim().split('\n').slice(-tail).join('\n') + '\n';
     res.type('text/plain').send(txt);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// RESUMEN CONTADO del histórico (lee resultados.jsonl del volumen): cuántos diagnósticos se hicieron,
+// aprobados/rechazados/errores, costo total y desglose por día y por empresa. ?dias=N filtra a los últimos
+// N días (default: todo el archivo). Abrilo en el navegador: /stats?key=LA_CLAVE
+app.get('/stats', (req, res) => {
+  if (!_gateDatos(req, res)) return;
+  try {
+    if (!fs.existsSync(RESULT_LOG)) return res.status(404).json({ error: 'sin resultados todavía', path: RESULT_LOG });
+    const dias = parseInt(req.query.dias || '0', 10);
+    const desde = dias > 0 ? Date.now() - dias * 24 * 60 * 60 * 1000 : 0;
+    const lineas = fs.readFileSync(RESULT_LOG, 'utf8').trim().split('\n');
+    const porDia = {}, porEmpresa = {};
+    let total = 0, aprobados = 0, rechazados = 0, errores = 0, aptos = 0, costoTotal = 0, malParseadas = 0;
+    for (const ln of lineas) {
+      if (!ln.trim()) continue;
+      let r; try { r = JSON.parse(ln); } catch { malParseadas++; continue; }
+      const ts = Date.parse(r.ts || '') || 0;
+      if (desde && ts && ts < desde) continue;
+      total++;
+      const costo = Number(r.costo) || 0; costoTotal += costo;
+      if (r.status === 'error') errores++;
+      else if (r.veredicto === 'APROBADO') aprobados++;
+      else rechazados++;
+      if (r.apto_envio) aptos++;
+      const dia = (r.ts || '').slice(0, 10) || 'sin-fecha';
+      (porDia[dia] = porDia[dia] || { diagnosticos: 0, costo_usd: 0 });
+      porDia[dia].diagnosticos++; porDia[dia].costo_usd = +(porDia[dia].costo_usd + costo).toFixed(4);
+      const emp = r.empresa || r.dominio || '?';
+      porEmpresa[emp] = (porEmpresa[emp] || 0) + 1;
+    }
+    res.json({
+      periodo: dias > 0 ? `últimos ${dias} días` : 'todo el histórico',
+      diagnosticos_totales: total,
+      aprobados, rechazados, errores, aptos_para_envio: aptos,
+      costo_total_usd: +costoTotal.toFixed(2),
+      costo_promedio_usd: total ? +(costoTotal / total).toFixed(3) : 0,
+      por_dia: porDia,
+      por_empresa: porEmpresa,
+      lineas_mal_parseadas: malParseadas || undefined
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -4168,5 +4285,6 @@ module.exports = {
   callREST, _parsePeople, _parseCompanies,
   _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS,
   _reconciliarTitulo, _reconciliarGeoVisible, _geoIncoherente, callMCP, resolverCliente, _nuevoStats,
-  _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN
+  _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN,
+  _sedeDeLookup, _corregirGeoSede
 };
