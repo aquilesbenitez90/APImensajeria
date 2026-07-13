@@ -4167,10 +4167,13 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, jobs_activos: activos, jobs_procesando: _jobsActivos, en_cola: _cola.length, max_concurrent: MAX_CONCURRENT_JOBS, jobs_en_cache: jobs.size, cuentas: NUM_CUENTAS, signals_mode: SIGNALS_MODE });
 });
 
-// GATE de los endpoints de datos (mismo criterio que /generar): si LANDING_KEY está seteada, exigimos la
-// clave por header x-landing-key O por querystring ?key= (para poder abrirlo desde el navegador).
+// GATE de los endpoints de datos (/stats, /resultados-log): acepta LANDING_KEY o STATS_KEY, por header
+// x-landing-key o querystring ?key= (para abrirlo del navegador). STATS_KEY existe para PRODUCCIÓN (n8n):
+// ahí LANDING_KEY no puede setearse (gatearía /generar y rompería n8n), pero estos endpoints exponen emails
+// de leads y costos → con STATS_KEY se protegen sin tocar /generar. Sin ninguna de las dos → no gatea (dev).
 function _gateDatos(req, res){
-  if (process.env.LANDING_KEY && req.header('x-landing-key') !== process.env.LANDING_KEY && req.query.key !== process.env.LANDING_KEY) {
+  const claves = [process.env.LANDING_KEY, process.env.STATS_KEY].filter(Boolean);
+  if (claves.length && !claves.includes(req.header('x-landing-key')) && !claves.includes(req.query.key)) {
     res.status(401).json({ error: 'Clave invalida' });
     return false;
   }
