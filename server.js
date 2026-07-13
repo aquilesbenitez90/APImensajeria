@@ -1652,7 +1652,9 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     try{ const txt = String(await callMCP('search_sales_navigator_filtered', f)); if(!txtPeopleSenal) txtPeopleSenal = txt; return _parsePeople(txt); }catch{ return []; }
   }
   // Une los resultados de buscar cada término de rol por separado (dedupe por id), en PARALELO con tope CONC.
-  const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '4', 10);
+  // Default 8 (era 4 por el tope de 60 req/min del gateway del MCP, ELIMINADO en su actualización; verificado
+  // 2026-07-13 con 20 llamadas concurrentes → todo 200, latencia estable ~1.3s). Bajable por env si vuelve.
+  const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '8', 10);
   async function buscar(locIds, conIndustria, soloRecienCambio){
     if(!terminos.length) return await buscarUno(locIds, conIndustria, null, soloRecienCambio);
     const listas = await _mapLimit(terminos, CONC, t => buscarUno(locIds, conIndustria, t, soloRecienCambio));
@@ -1868,20 +1870,32 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const anclaSenales = new Map(cuentas.map(c=>[_empKey(c.name), coSenales.get(c.id) || null]).filter(([,s])=>s));
   console.log(`[SOURCE] cuentas-ancla: ${cuentas.length}${cuentas.length?` (${cuentas.slice(0,8).map(c=>c.name).join(', ')}${cuentas.length>8?'…':''})`:''}.`);
 
-  // ===== PASADA B — DECISORES dentro de las cuentas-ancla (fit alto, empresa controlada) =====
-  let enCuentas = [];
+  // ===== PASADAS B + C + D EN PARALELO =====
+  // Eran secuenciales por el tope de 60 req/min del gateway del MCP, que YA NO EXISTE (verificado 2026-07-13:
+  // 30 req concurrentes → todo 200, latencia estable). B (decisores en cuentas-ancla), C (barrido amplio) y
+  // D (changedJobsLast90Days) son INDEPENDIENTES entre sí (todas dependen solo de la Pasada A / resolves),
+  // así que correrlas juntas ahorra ~30-60s de reloj por reporte sin cambiar ningún resultado.
   const idsEnCuenta = new Set();   // ids que vinieron de company:{include:anclaIds} → ancla por CONSTRUCCIÓN (no por match de nombre)
-  if(anclaIds.length){
+  const _pasadaB = (async () => {
+    if(!anclaIds.length) return [];
     const f={ category:'people', profilesLimit:SOURCE_PROFILES_LIMIT, company:{include: anclaIds} };
     if(geoLocOrNull) f.location={include:geoLocOrNull};
     if(terminos.length) f.jobPosition={ include: terminos };   // acota a los cargos objetivo dentro de la cuenta
-    try{ enCuentas = _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{}
-    for(const p of enCuentas) if(p.id) idsEnCuenta.add(p.id);
-  }
-
-  // ===== PASADA C — BARRIDO people-first amplio (captura el 2do grado DISPERSO de la red) =====
-  let barrido = await buscar(geoLocOrNull, true);
-  if(_validosHome(barrido) < HOME_MIN) barrido = barrido.concat(await buscar(geoLocOrNull, false));
+    try{ return _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{ return []; }
+  })();
+  const _pasadaC = (async () => {
+    let b = await buscar(geoLocOrNull, true);
+    if(_validosHome(b) < HOME_MIN) b = b.concat(await buscar(geoLocOrNull, false));
+    return b;
+  })();
+  const _pasadaD = (async () => {
+    // Señal de compra (ADITIVA): recién-cambiaron de trabajo. Solo en pasada 1 (conSenal): es realce, no recall.
+    if(!conSenal){ console.log('[SIGNALS] Pasada D (changedJobsLast90Days) SALTADA (pasada de recall; la señal es realce, no recall).'); return []; }
+    try{ return await buscar(geoLocOrNull, true, true); }
+    catch(e){ console.warn('[SIGNALS] pasada changedJobsLast90Days falló:', e.message); return []; }
+  })();
+  let [enCuentas, barrido, recienCambio] = await Promise.all([_pasadaB, _pasadaC, _pasadaD]);
+  for(const p of enCuentas) if(p.id) idsEnCuenta.add(p.id);
   // COMPANY-FIRST (flag ON): el barrido amplio es la FUENTE DE RUIDO (mete gente de CUALQUIER empresa, incl.
   // gigantes off-ICP). Con company-first priorizamos las cuentas-ancla VETADAS (Pasada A/B, ya filtradas por
   // techo) y usamos el barrido SOLO como FALLBACK de relleno si las cuentas-ancla no alcanzan para llenar el
@@ -1900,21 +1914,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     console.log(`[SOURCE] company-first: ${anclaFit} decisores en cuentas-ancla < ${N_IA_TARGET} → barrido amplio entra como FALLBACK de relleno.`);
   }
 
-  // ===== PASADA D — SEÑAL DE COMPRA (ADITIVA): recién-cambiaron de trabajo (changedJobsLast90Days) =====
-  // Misma búsqueda people que el barrido (mismos keywords/location/industria) pero filtrada a los que
-  // asumieron el rol en los últimos 90 días. NO reemplaza nada: se MERGEA al pool para que esos candidatos
-  // (recientes = ventana de compra abierta) COMPITAN en el ranking sin sesgarlo a puro recién-cambiado.
-  // Una sola pasada (MCP es gratis; el costo es latencia): si trae con industria, no repetimos sin ella.
-  // LATENCIA (fix robotic-crew/300s Railway): la Pasada D corre 1 vez por cada llamada a sourceCandidates,
-  // y el multi-pass invoca esto hasta SOURCE_MAX_PASSES veces -> hasta 18 round-trips MCP extra SOLO por la
-  // señal. La señal es REALCE (sube en el ranking), no RECALL (no agrega cuentas nuevas que falten); no hace
-  // falta re-buscarla en las pasadas 2/3 de recall. Solo la corremos cuando conSenal=true (pasada 1).
-  let recienCambio = [];
-  if(conSenal){
-    try{ recienCambio = await buscar(geoLocOrNull, true, true); }catch(e){ console.warn('[SIGNALS] pasada changedJobsLast90Days falló:', e.message); }
-  } else {
-    console.log('[SIGNALS] Pasada D (changedJobsLast90Days) SALTADA (pasada de recall; la señal es realce, no recall).');
-  }
+  // (La Pasada D ya corrió en paralelo con B y C, arriba.)
   // BLINDAJE: los candidatos de esta pasada pasaron el filtro changedJobsLast90Days:true del Sales Navigator,
   // así que son recién-cambiados POR DEFINICIÓN. Forzamos recienAsumio=true en TODOS sin depender de que
   // _parsePeople haya logrado extraer recentlyHired del texto (no confirmado en el endpoint de texto del MCP).
@@ -2012,11 +2012,17 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       // de enriquecimiento, NO lanzamos más get_contact_profile; el candidato queda con headcount=null (tolerado).
       if(!_enrichTienePresupuesto()){ _skipTop++; }
       else try{
-        const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
+        const _raw = await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache });
+        const prof=_parseProfile(_raw);
         if(prof.headcount!=null) c.headcount=prof.headcount;
         if(prof.headRich && prof.headRich.length>=3){
           c.head=prof.headRich; c.empresa=_empresaDeHeadline(prof.headRich) || c.empresa; c.fit=_rankFit(prof.headRich, titulos);
         }
+        // ABOUT del perfil (nuevo en el MCP actualizado): el "Acerca de" que la persona escribió en LinkedIn.
+        // Viene GRATIS en esta misma llamada; se lo pasamos al SELECT para personalizar ángulo/hook con las
+        // PALABRAS REALES del lead (anti-invención perfecto). Recortado para no inflar el prompt.
+        const _about = _raw && _raw.structuredContent && _raw.structuredContent.about;
+        if(_about) c.about = String(_about).replace(/\s+/g,' ').trim().slice(0, 300);
         // SEÑAL sobre el FINALISTA: si el perfil expone recién-cambió/antigüedad-corta, marcamos recienAsumio
         // (OR: nunca pisamos una señal previa de la Pasada D con un null/desconocido del perfil).
         if(prof.recienAsumio===true) c.recienAsumio = true;
@@ -2632,6 +2638,7 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 - LOS ${pedir} ids tienen que ser DISTINTOS. Prohibido repetir la misma persona.
 - EMPRESAS DISTINTAS: cada cuenta es de una empresa DIFERENTE. Si dos son de la misma empresa, quedate con el de mejor fit y completá con otra empresa.
 - PROHIBIDO inventar o inflar el cargo: usá EXACTAMENTE el que figura en la lista. Si dice "Project Manager", es "Project Manager" — no lo asciendas a "Manager de Mantenimiento" ni le inventes MBA, estudios, especialidad ni un rol que no está. No le atribuyas datos (seniority, área, formación) que no estén en lo que te paso.
+- BIO (si la línea del candidato trae 'BIO (texto real de su perfil)'): es el "Acerca de" que ESA persona escribió en su propio LinkedIn. Es ORO para personalizar: usalo para que el ángulo y el hook conecten con lo que a la persona le importa (su enfoque, sus temas, cómo describe su trabajo) — un mensaje que refleja lo que el lead mismo dice de sí convierte mucho más que uno genérico. REGLAS: (1) podés parafrasear o hacer eco de SUS temas, pero PROHIBIDO atribuirle afirmaciones, logros o datos que no estén textuales en la bio; (2) no cites la bio entre comillas como si lo hubieras entrevistado; integralo natural ("veo que tu foco está en X"); (3) si la bio no aporta al pitch, ignorala (no fuerces la referencia); (4) la bio NUNCA pisa el cargo/empresa de la lista (esos mandan).
 - PROHIBIDO atribuir un ÁREA, DEPARTAMENTO, INICIATIVA o ESPECIALIDAD que no aparezca LITERAL en el cargo de la lista. Si el cargo dice solo "Executive Director", NO escribas que "dirige Automation", "lidera Innovation" ni que está "a cargo de Automation e Innovation": esa área NO está en el cargo, te la estás inventando. Hablá del rol GENÉRICO tal como figura ("como Executive Director", "desde su rol de dirección"), NO inventes el QUÉ específico que dirige. Misma regla para el ángulo y para el hook.
 - PROHIBIDO RE-ENCUADRAR EL ROL HACIA EL COMPRADOR (defecto sutil): NO le atribuyas a la persona la responsabilidad de COMPRA, DECISIÓN o LIDERAZGO de un área que su cargo real NO implica. Un "Head of Design" NO "lidera las compras de [X]"; un "People & Culture Director" NO "decide alianzas/expansión/proveedores"; un "Marketing Manager" NO "gestiona la operación de mantenimiento". Si el cargo es de OTRA función y claramente NO es el comprador del producto del cliente, NO lo fuerces a parecerlo: conectá con lo que ESE rol SÍ hace, o mejor elegí otro candidato cuyo cargo sí sea del comprador. Forzar el encuadre quema el reporte cuando el prospecto lee que le atribuís algo que no es lo suyo.
 - PROHIBIDO AFIRMAR UN FIT DE NEGOCIO QUE NO CONSTA (anti-invención, defecto que MAQUILLA un mismatch): el ángulo y el hook NO pueden AFIRMAR que la empresa de la card COMPRA, ALOJA, REVENDE o INTEGRA lo del cliente si eso no está respaldado por lo que sabés de esa empresa. PROHIBIDO frases tipo "incorpora marcas externas", "aloja proveedores de terceros", "integra robótica", "suma soluciones como la de [cliente]" sobre una empresa donde NO hay evidencia de que lo haga (peor aún si es justo lo que esa empresa NO hace, ej. una marca propia que solo vende lo suyo). Si NO sabés si la empresa compra/aloja lo del cliente, NO lo afirmes: conectá con lo que ESE rol/empresa SÍ hace de forma genérica y verificable ("como responsable de [área] en [empresa], usted maneja [lo que el rol SÍ toca]"), sin atribuirle una adopción que no consta. Afirmar un fit inexistente quema el reporte apenas el prospecto lo lee.
@@ -2700,7 +2707,9 @@ async function runSelectWrite({ cliente, plan, pool, fixes }){
       + `${s.leadership?' · SEÑAL: cambio de liderazgo en la empresa':''}`
       + `${s.growth?' · SEÑAL: la empresa está creciendo en plantilla':''}`
       + `${p.posts>0?' · activo en LinkedIn':''}`;
-    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}${senal}${hookLang}`;
+    // BIO: el "Acerca de" REAL que el candidato escribió en su LinkedIn (viene del enriquecimiento, solo top-K).
+    const bio = p.about ? ` | BIO (texto real de su perfil): "${p.about}"` : '';
+    return `${i+1}. id=${p.id} | ${p.name} | ${p.head} | empresa: ${p.empresa||'?'}${tam}${loc}${home} | grado ${p.dist===9?'fuera de red':p.dist+'°'}${ctx}${senal}${hookLang}${bio}`;
   }).join('\n');
   const _pisoTam = (plan._plan && parseInt(plan._plan.tamano_min||0,10)) || 0;
   const vertAlta = (plan._plan && Array.isArray(plan._plan.industrias) ? plan._plan.industrias.filter(Boolean) : []);
@@ -3548,7 +3557,7 @@ const COMPANY_SIGNALS = (process.env.COMPANY_SIGNALS || 'on').toLowerCase();
 async function enriquecerSenalesEmpresa(data){
   if(COMPANY_SIGNALS !== 'on') return;
   const cards = (data && Array.isArray(data.cards)) ? data.cards : [];
-  const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '4', 10);
+  const CONC = parseInt(process.env.SOURCE_CONCURRENCY || '8', 10);   // gateway sin tope de 60/min (ver sourceCandidates)
   // flag -> etiqueta legible (las MISMAS que _senalesVisibles, para no duplicar texto) + filtro MCP.
   const filtros = [
     ['funding',    'Levantó financiamiento', { fundingEvents: true }],
