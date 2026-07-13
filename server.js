@@ -1181,6 +1181,21 @@ function _sedeDeLookup(res){
     return pais ? { pais, ciudad: String(hq.city || '').trim() || null } : null;
   }catch(e){ return null; }
 }
+// QUÉ HACE la empresa, según SU PROPIA página de LinkedIn (structuredContent.description + specialities).
+// CASO TRANSUR parte 2 (bug real): "Transur" lo comparten un transporte de pasajeros colombiano (el cliente),
+// un transporte argentino, una chapa-y-pintura de Comodoro y una autopartista de Cali. El PLAN investigaba por
+// NOMBRE en la web, agarraba la homónima equivocada y describía al cliente como fábrica de pinturas. La
+// descripción de LinkedIn es el "qué hace" AUTORITATIVO: se la pasamos al PLAN como dato duro anti-homónimo.
+function _descDeLookup(res){
+  try{
+    const sc = res && res.structuredContent;
+    if(!sc) return null;
+    const desc = String(sc.description || '').replace(/\s+/g,' ').trim().slice(0, 500);
+    const espec = String(sc.specialities || '').replace(/\s+/g,' ').trim().slice(0, 150);
+    if(!desc && !espec) return null;
+    return { descripcion: desc || null, especialidades: espec || null };
+  }catch(e){ return null; }
+}
 
 async function _callMCPClienteConRetry(toolName, args) {
   try {
@@ -1206,11 +1221,12 @@ async function resolverCliente({ profileId, dominio, empresa }) {
       const domLI = _dominioDeLookup(txt);
       const hcLI  = _headcountDe(txt);
       const sede  = _sedeDeLookup(txt);   // país/ciudad SEDE de la página de LinkedIn (dato duro, caso Transur)
-      console.log(`[CLIENTE] link LinkedIn "${slugLI}" -> empresa "${empLI}" (dominio ${domLI || 'no disponible'}, ${hcLI ?? '?'} empleados${sede ? `, sede ${sede.ciudad ? sede.ciudad + ', ' : ''}${sede.pais}` : ''})`);
+      const que   = _descDeLookup(txt);   // QUÉ HACE según su propia página (dato duro anti-homónimo, caso Transur 2)
+      console.log(`[CLIENTE] link LinkedIn "${slugLI}" -> empresa "${empLI}" (dominio ${domLI || 'no disponible'}, ${hcLI ?? '?'} empleados${sede ? `, sede ${sede.ciudad ? sede.ciudad + ', ' : ''}${sede.pais}` : ''}${que && que.descripcion ? `, desc LinkedIn ✓` : ''})`);
       // Anclamos DIRECTO con los datos de la página de la empresa en LinkedIn (nombre + headcount = confiables).
       // NO re-consultamos el dominio: el lookup POR-DOMINIO puede estar roto aunque la empresa exista (visto:
       // robotic-crew.com -> 500 "company no longer exists", pero el slug /company/robotic-crew sí resuelve).
-      return { empresa: empLI, dominio: domLI || '', headcount: hcLI, tier: _tier(hcLI), anclado: true, fuente: 'linkedin_company', confianza: hcLI ? 'alta' : 'media', pais: sede && sede.pais, ciudad: sede && sede.ciudad };
+      return { empresa: empLI, dominio: domLI || '', headcount: hcLI, tier: _tier(hcLI), anclado: true, fuente: 'linkedin_company', confianza: hcLI ? 'alta' : 'media', pais: sede && sede.pais, ciudad: sede && sede.ciudad, descripcion: que && que.descripcion, especialidades: que && que.especialidades };
     }catch(e){
       console.warn(`[CLIENTE] lookup_company para link LinkedIn "${slugLI}" falló:`, e.message);
       // Aun fallando: el slug es mejor cliente que "linkedin.com". Lo usamos como nombre (lo agarra el fallback
@@ -1229,8 +1245,9 @@ async function resolverCliente({ profileId, dominio, empresa }) {
       const sedeD = _sedeDeLookup(txt);
       if (empD && _mismaEmpresa(base.empresa, empD)) {
         const hc = base.headcount ?? hcD;
+        const queD = _descDeLookup(txt);
         console.log(`[CLIENTE] ✓ corroborado: perfil "${base.empresa}" == dominio "${empD}" -> confianza ALTA${sedeD ? ` (sede ${sedeD.pais})` : ''}`);
-        return { ...base, headcount: hc, tier: _tier(hc), confianza: 'alta', corroborado: true, pais: base.pais || (sedeD && sedeD.pais), ciudad: base.ciudad || (sedeD && sedeD.ciudad) };
+        return { ...base, headcount: hc, tier: _tier(hc), confianza: 'alta', corroborado: true, pais: base.pais || (sedeD && sedeD.pais), ciudad: base.ciudad || (sedeD && sedeD.ciudad), descripcion: base.descripcion || (queD && queD.descripcion), especialidades: base.especialidades || (queD && queD.especialidades) };
       }
       if (empD) {
         console.warn(`[CLIENTE] ⚠️ discrepancia: perfil="${base.empresa}" vs dominio="${empD}" -> confianza media + flag`);
@@ -1257,8 +1274,9 @@ async function resolverCliente({ profileId, dominio, empresa }) {
       const emp = _empresaDeLookup(txt) || empresa || dominio;
       const hc = _headcountDe(txt);
       const sede = _sedeDeLookup(txt);
-      console.log(`[CLIENTE] anclado por dominio ${dominio} -> "${emp}" (${hc ?? '?'} empleados, tier ${_tier(hc)}${sede ? `, sede ${sede.pais}` : ''})`);
-      return { empresa: emp, dominio, headcount: hc, tier: _tier(hc), anclado: true, fuente: 'dominio', confianza: 'media', pais: sede && sede.pais, ciudad: sede && sede.ciudad };
+      const que  = _descDeLookup(txt);
+      console.log(`[CLIENTE] anclado por dominio ${dominio} -> "${emp}" (${hc ?? '?'} empleados, tier ${_tier(hc)}${sede ? `, sede ${sede.pais}` : ''}${que && que.descripcion ? ', desc LinkedIn ✓' : ''})`);
+      return { empresa: emp, dominio, headcount: hc, tier: _tier(hc), anclado: true, fuente: 'dominio', confianza: 'media', pais: sede && sede.pais, ciudad: sede && sede.ciudad, descripcion: que && que.descripcion, especialidades: que && que.especialidades };
     } catch (e) { console.warn(`[CLIENTE] dominio ${dominio} no resolvió:`, e.message); }
   }
   // FALLBACK por NOMBRE (Sales Navigator): no anclamos por perfil ni por dominio. Antes de rendirnos,
@@ -2538,7 +2556,7 @@ CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades
 async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
   _setStage('gen');
   const bloqueCliente = (cliente && cliente.anclado)
-    ? `\n\nDATOS VERIFICADOS DEL CLIENTE (NO inventes otra empresa, usá ESTOS): Empresa: ${cliente.empresa}; Tamaño: ${cliente.headcount ?? '?'} empleados${cliente.tier ? ` (tier ${cliente.tier})` : ''}.${cliente.pais ? ` PAÍS SEDE (dato DURO de la página de LinkedIn de la empresa, NO lo contradigas): ${cliente.pais}${cliente.ciudad ? ` (${cliente.ciudad})` : ''}. "geografia" TIENE que ser ${cliente.pais}; solo agregá otros países a "geografias" si el research confirma que el cliente HOY también opera ahí.` : ''}`
+    ? `\n\nDATOS VERIFICADOS DEL CLIENTE (NO inventes otra empresa, usá ESTOS): Empresa: ${cliente.empresa}; Tamaño: ${cliente.headcount ?? '?'} empleados${cliente.tier ? ` (tier ${cliente.tier})` : ''}.${cliente.pais ? ` PAÍS SEDE (dato DURO de la página de LinkedIn de la empresa, NO lo contradigas): ${cliente.pais}${cliente.ciudad ? ` (${cliente.ciudad})` : ''}. "geografia" TIENE que ser ${cliente.pais}; solo agregá otros países a "geografias" si el research confirma que el cliente HOY también opera ahí.` : ''}${cliente.descripcion ? `\nQUÉ HACE LA EMPRESA (descripción TEXTUAL de su propia página de LinkedIn — este es el rubro REAL del cliente, dato DURO): «${cliente.descripcion}»${cliente.especialidades ? ` (especialidades: ${cliente.especialidades})` : ''}.\nANTI-HOMÓNIMO (CRÍTICO): "${cliente.empresa}" es un nombre que pueden compartir varias empresas de distintos rubros y países. TODO tu análisis (qué hace, a quién le vende, el ICP entero) tiene que ser coherente con ESTA descripción y ESTE país. Si una fuente de web_search habla de una empresa del mismo nombre pero de OTRO rubro u OTRO país, es OTRA empresa: DESCARTÁ esa fuente por completo (no mezcles rubros ni datos de homónimas). Si el research no aporta nada de ESTA empresa, derivá el ICP desde la descripción de LinkedIn sola.` : ''}`
     : '';
   const messages = [{ role:'user', content:`Cliente a analizar:\n- Empresa: ${empresa}\n- Dominio: ${dominio}\n- Email contacto: ${email}\n- Nombre contacto: ${nombre}${bloqueCliente}\n\nFecha de hoy (usala en "fecha"): ${fechaHoy}\n\nInvestigá la empresa con web_search y devolvé SOLO el JSON del schema.` }];
   const MAX = parseInt(process.env.PLAN_MAX_TOOL_ITERS || '8', 10);
