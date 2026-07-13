@@ -1164,6 +1164,24 @@ function _matchVerticalExcluir(txt, excluir){
 // Solo reintenta ante timeout/red (AbortError o falla de fetch), NO ante respuesta inservible. Costo de
 // latencia: 1 reintento = hasta 2x MCP_TIMEOUT_MS (~90s) en el peor caso, aceptable dentro del cinturón
 // global de 8 min. NO se usa en `corroborar` (enriquecimiento, no crítico) para no sumar latencia ahí.
+// PAÍS SEDE desde la página de LinkedIn de la empresa (structuredContent.locations del lookup_company).
+// CASO TRANSUR (bug real): LinkedIn decía sede Cali/CO + website .com.co + descripción "compañía Colombiana",
+// pero solo leíamos website/headcount → el PLAN "dedujo" el país por web_search y cayó a Argentina → cards
+// argentinas para una empresa colombiana. El país sede es un DATO DURO que LinkedIn nos da: usarlo siempre.
+const _ISO_PAIS = { AR:'Argentina', BR:'Brasil', CL:'Chile', CO:'Colombia', MX:'México', PE:'Perú', UY:'Uruguay', PY:'Paraguay', BO:'Bolivia', EC:'Ecuador', VE:'Venezuela', CR:'Costa Rica', PA:'Panamá', GT:'Guatemala', SV:'El Salvador', HN:'Honduras', NI:'Nicaragua', DO:'República Dominicana', CU:'Cuba', PR:'Puerto Rico', US:'Estados Unidos', CA:'Canadá', ES:'España', PT:'Portugal', FR:'Francia', DE:'Alemania', GB:'Reino Unido', UK:'Reino Unido', IT:'Italia', NL:'Países Bajos', IE:'Irlanda', CH:'Suiza', BE:'Bélgica', SE:'Suecia', NO:'Noruega', DK:'Dinamarca', PL:'Polonia', IN:'India', CN:'China', JP:'Japón', KR:'Corea del Sur', SG:'Singapur', AU:'Australia', NZ:'Nueva Zelanda', IL:'Israel', AE:'Emiratos Árabes Unidos', ZA:'Sudáfrica', TR:'Turquía' };
+function _sedeDeLookup(res){
+  try{
+    const sc = res && res.structuredContent;
+    const locs = (sc && Array.isArray(sc.locations)) ? sc.locations : [];
+    if(!locs.length) return null;
+    const hq = locs.find(l => l && l.headquarter) || locs.find(l => l && l.country) || locs[0];
+    if(!hq || !hq.country) return null;
+    const iso = String(hq.country).toUpperCase().trim();
+    const pais = _ISO_PAIS[iso] || null;   // ISO desconocido → null (no adivinar)
+    return pais ? { pais, ciudad: String(hq.city || '').trim() || null } : null;
+  }catch(e){ return null; }
+}
+
 async function _callMCPClienteConRetry(toolName, args) {
   try {
     return await callMCP(toolName, args);
@@ -1187,11 +1205,12 @@ async function resolverCliente({ profileId, dominio, empresa }) {
       const empLI = _empresaDeLookup(txt) || empresa || slugLI.replace(/[-_]+/g,' ').trim();
       const domLI = _dominioDeLookup(txt);
       const hcLI  = _headcountDe(txt);
-      console.log(`[CLIENTE] link LinkedIn "${slugLI}" -> empresa "${empLI}" (dominio ${domLI || 'no disponible'}, ${hcLI ?? '?'} empleados)`);
+      const sede  = _sedeDeLookup(txt);   // país/ciudad SEDE de la página de LinkedIn (dato duro, caso Transur)
+      console.log(`[CLIENTE] link LinkedIn "${slugLI}" -> empresa "${empLI}" (dominio ${domLI || 'no disponible'}, ${hcLI ?? '?'} empleados${sede ? `, sede ${sede.ciudad ? sede.ciudad + ', ' : ''}${sede.pais}` : ''})`);
       // Anclamos DIRECTO con los datos de la página de la empresa en LinkedIn (nombre + headcount = confiables).
       // NO re-consultamos el dominio: el lookup POR-DOMINIO puede estar roto aunque la empresa exista (visto:
       // robotic-crew.com -> 500 "company no longer exists", pero el slug /company/robotic-crew sí resuelve).
-      return { empresa: empLI, dominio: domLI || '', headcount: hcLI, tier: _tier(hcLI), anclado: true, fuente: 'linkedin_company', confianza: hcLI ? 'alta' : 'media' };
+      return { empresa: empLI, dominio: domLI || '', headcount: hcLI, tier: _tier(hcLI), anclado: true, fuente: 'linkedin_company', confianza: hcLI ? 'alta' : 'media', pais: sede && sede.pais, ciudad: sede && sede.ciudad };
     }catch(e){
       console.warn(`[CLIENTE] lookup_company para link LinkedIn "${slugLI}" falló:`, e.message);
       // Aun fallando: el slug es mejor cliente que "linkedin.com". Lo usamos como nombre (lo agarra el fallback
@@ -1207,10 +1226,11 @@ async function resolverCliente({ profileId, dominio, empresa }) {
     try {
       const txt = await callMCP('lookup_company', { companyUrlOrName: dominio });
       const empD = _empresaDeLookup(txt), hcD = _headcountDe(txt);
+      const sedeD = _sedeDeLookup(txt);
       if (empD && _mismaEmpresa(base.empresa, empD)) {
         const hc = base.headcount ?? hcD;
-        console.log(`[CLIENTE] ✓ corroborado: perfil "${base.empresa}" == dominio "${empD}" -> confianza ALTA`);
-        return { ...base, headcount: hc, tier: _tier(hc), confianza: 'alta', corroborado: true };
+        console.log(`[CLIENTE] ✓ corroborado: perfil "${base.empresa}" == dominio "${empD}" -> confianza ALTA${sedeD ? ` (sede ${sedeD.pais})` : ''}`);
+        return { ...base, headcount: hc, tier: _tier(hc), confianza: 'alta', corroborado: true, pais: base.pais || (sedeD && sedeD.pais), ciudad: base.ciudad || (sedeD && sedeD.ciudad) };
       }
       if (empD) {
         console.warn(`[CLIENTE] ⚠️ discrepancia: perfil="${base.empresa}" vs dominio="${empD}" -> confianza media + flag`);
@@ -1236,8 +1256,9 @@ async function resolverCliente({ profileId, dominio, empresa }) {
       const txt = await _callMCPClienteConRetry('lookup_company', { companyUrlOrName: dominio });
       const emp = _empresaDeLookup(txt) || empresa || dominio;
       const hc = _headcountDe(txt);
-      console.log(`[CLIENTE] anclado por dominio ${dominio} -> "${emp}" (${hc ?? '?'} empleados, tier ${_tier(hc)})`);
-      return { empresa: emp, dominio, headcount: hc, tier: _tier(hc), anclado: true, fuente: 'dominio', confianza: 'media' };
+      const sede = _sedeDeLookup(txt);
+      console.log(`[CLIENTE] anclado por dominio ${dominio} -> "${emp}" (${hc ?? '?'} empleados, tier ${_tier(hc)}${sede ? `, sede ${sede.pais}` : ''})`);
+      return { empresa: emp, dominio, headcount: hc, tier: _tier(hc), anclado: true, fuente: 'dominio', confianza: 'media', pais: sede && sede.pais, ciudad: sede && sede.ciudad };
     } catch (e) { console.warn(`[CLIENTE] dominio ${dominio} no resolvió:`, e.message); }
   }
   // FALLBACK por NOMBRE (Sales Navigator): no anclamos por perfil ni por dominio. Antes de rendirnos,
@@ -2511,7 +2532,7 @@ CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades
 async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
   _setStage('gen');
   const bloqueCliente = (cliente && cliente.anclado)
-    ? `\n\nDATOS VERIFICADOS DEL CLIENTE (NO inventes otra empresa, usá ESTOS): Empresa: ${cliente.empresa}; Tamaño: ${cliente.headcount ?? '?'} empleados${cliente.tier ? ` (tier ${cliente.tier})` : ''}.`
+    ? `\n\nDATOS VERIFICADOS DEL CLIENTE (NO inventes otra empresa, usá ESTOS): Empresa: ${cliente.empresa}; Tamaño: ${cliente.headcount ?? '?'} empleados${cliente.tier ? ` (tier ${cliente.tier})` : ''}.${cliente.pais ? ` PAÍS SEDE (dato DURO de la página de LinkedIn de la empresa, NO lo contradigas): ${cliente.pais}${cliente.ciudad ? ` (${cliente.ciudad})` : ''}. "geografia" TIENE que ser ${cliente.pais}; solo agregá otros países a "geografias" si el research confirma que el cliente HOY también opera ahí.` : ''}`
     : '';
   const messages = [{ role:'user', content:`Cliente a analizar:\n- Empresa: ${empresa}\n- Dominio: ${dominio}\n- Email contacto: ${email}\n- Nombre contacto: ${nombre}${bloqueCliente}\n\nFecha de hoy (usala en "fecha"): ${fechaHoy}\n\nInvestigá la empresa con web_search y devolvé SOLO el JSON del schema.` }];
   const MAX = parseInt(process.env.PLAN_MAX_TOOL_ITERS || '8', 10);
@@ -2537,6 +2558,36 @@ async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
 // el costo extra de tokens es marginal. El CAMINO FELIZ (PLAN válido a la primera) hace UNA sola llamada y
 // devuelve igual que runPlan, sin overhead. Si agota los intentos, deja propagar el error (fail-closed: no se
 // inventa un PLAN). NO toca el prompt ni validarPlan.
+// GUARDA DE PAÍS SEDE (determinística, caso Transur): si la página de LinkedIn del cliente declara un país
+// sede y el PLAN derivó OTRO (web_search confundido por nombre genérico → caía a Argentina), el dato duro
+// MANDA. Si el país sede NI FIGURA en geografias → la derivación entera de geo es sospechosa: la reemplazamos
+// por [sede]. Si figura pero no es el principal → lo promovemos a principal conservando el resto. También
+// corregimos el país en h1_post; el resto de superficies (cinta, stat, lead) se reconcilian después contra
+// las cards, como siempre. Muta el plan in-place; devuelve true si corrigió (para tests).
+function _corregirGeoSede(plan, sedePais){
+  if(!sedePais || !plan || !plan._plan) return false;
+  const icp = plan._plan;
+  const geos = Array.isArray(icp.geografias) ? icp.geografias : [];
+  const enLista = geos.some(g => _norm(g) === _norm(sedePais));
+  const esPrincipal = _norm(icp.geografia || '') === _norm(sedePais);
+  if(esPrincipal) return false;
+  const geoVieja = icp.geografia || '';
+  if(!enLista){
+    console.warn(`[GEO] PLAN derivó "${geoVieja}" pero LinkedIn declara sede "${sedePais}" (dato duro) → geografia/geografias corregidas a la sede.`);
+    icp.geografias = [sedePais];
+  } else {
+    console.warn(`[GEO] sede "${sedePais}" estaba en geografias pero no como principal → promovida (antes "${geoVieja}").`);
+    icp.geografias = [sedePais, ...geos.filter(g => _norm(g) !== _norm(sedePais))];
+  }
+  icp.geografia = sedePais;
+  // h1: swap del país viejo por la sede, SALVO que la sede ya figure en el título (evita "Colombia y Colombia";
+  // en ese caso lo dejan prolijo las reconciliaciones posteriores contra las cards).
+  if(geoVieja && typeof plan.h1_post === 'string' && plan.h1_post && !new RegExp(sedePais.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'i').test(plan.h1_post)){
+    plan.h1_post = plan.h1_post.replace(new RegExp(geoVieja.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'i'), sedePais);
+  }
+  return true;
+}
+
 async function runPlanConRetry(args){
   const MAX   = Math.max(1, parseInt(process.env.PLAN_MAX_TRIES || '2', 10));
   const delay = parseInt(process.env.PLAN_RETRY_DELAY_MS || '2000', 10);
@@ -2545,6 +2596,7 @@ async function runPlanConRetry(args){
     try{
       const plan = await runPlan(args);
       validarPlan(plan);   // idempotente: confirma que el PLAN está completo antes de seguir
+      _corregirGeoSede(plan, args && args.cliente && args.cliente.pais);   // guarda determinística de país sede (caso Transur)
       return plan;
     }catch(e){
       ultimoError = e;
@@ -4188,5 +4240,6 @@ module.exports = {
   callREST, _parsePeople, _parseCompanies,
   _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS,
   _reconciliarTitulo, _reconciliarGeoVisible, _geoIncoherente, callMCP, resolverCliente, _nuevoStats,
-  _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN
+  _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN,
+  _sedeDeLookup, _corregirGeoSede
 };
