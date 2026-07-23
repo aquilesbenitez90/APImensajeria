@@ -1579,7 +1579,27 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   // devuelve VACÍO (confirmado: "Estados Unidos"->[] vs "United States"->id 103644278) -> homeLoc quedaba
   // vacío -> SIN filtro de país -> se colaban empresas de otros países (visto: una española). Traducimos los
   // países más comunes a inglés para el resolve y el match país-level. Si no está en el mapa, usamos el original.
-  const _PAIS_ES_EN = { 'estados unidos':'United States','eeuu':'United States','ee uu':'United States','usa':'United States','espana':'Spain','mexico':'Mexico','brasil':'Brazil','reino unido':'United Kingdom','alemania':'Germany','francia':'France','italia':'Italy','holanda':'Netherlands','paises bajos':'Netherlands','canada':'Canada','colombia':'Colombia','argentina':'Argentina','chile':'Chile','peru':'Peru','uruguay':'Uruguay','ecuador':'Ecuador' };
+  // Cubre TODOS los países de _ISO_PAIS (la sede sale de ahí): un país en _ISO_PAIS pero NO acá resolvía VACÍO
+  // en Sales Navigator (indexa en inglés) → homeLoc vacío → sin filtro de país → geo incoherente → RECHAZADO.
+  // Bug real (Banfondesa, sede DO): "República Dominicana"->[] vs "Dominican Republic"->id 105057336. Claves en
+  // forma _norm (minúsculas, sin acentos); valor = nombre EXACTO de la ubicación en LinkedIn (inglés).
+  const _PAIS_ES_EN = {
+    // LatAm
+    'argentina':'Argentina','brasil':'Brazil','chile':'Chile','colombia':'Colombia','mexico':'Mexico','peru':'Peru',
+    'uruguay':'Uruguay','paraguay':'Paraguay','bolivia':'Bolivia','ecuador':'Ecuador','venezuela':'Venezuela',
+    'costa rica':'Costa Rica','panama':'Panama','guatemala':'Guatemala','el salvador':'El Salvador','honduras':'Honduras',
+    'nicaragua':'Nicaragua','republica dominicana':'Dominican Republic','cuba':'Cuba','puerto rico':'Puerto Rico',
+    // Norteamérica
+    'estados unidos':'United States','eeuu':'United States','ee uu':'United States','usa':'United States','canada':'Canada',
+    // Europa
+    'espana':'Spain','portugal':'Portugal','francia':'France','alemania':'Germany','reino unido':'United Kingdom',
+    'italia':'Italy','holanda':'Netherlands','paises bajos':'Netherlands','irlanda':'Ireland','suiza':'Switzerland',
+    'belgica':'Belgium','suecia':'Sweden','noruega':'Norway','dinamarca':'Denmark','polonia':'Poland',
+    // Asia-Pacífico / MEA
+    'india':'India','china':'China','japon':'Japan','corea del sur':'South Korea','singapur':'Singapore',
+    'australia':'Australia','nueva zelanda':'New Zealand','israel':'Israel','emiratos arabes unidos':'United Arab Emirates',
+    'sudafrica':'South Africa','turquia':'Turkey'
+  };
   async function locIds(nombrePais){
     try{
       const objetivoEs = _norm(nombrePais);
