@@ -4379,7 +4379,7 @@ app.get('/stats', (req, res) => {
 try {
   const crearDeltaRouter = require('./Delta/pipeline.js');
   app.use('/delta', crearDeltaRouter({
-    callClaude, callMCP, resolverCliente, renderizarPdf, contarPaginas,
+    callClaude, callMCP, callMCPReintento, resolverCliente, renderizarPdf, contarPaginas,
     statsALS: _statsALS, nuevoStats: _nuevoStats, setStage: _setStage, logTokenCost,
     sinGuiones: _sinGuiones, extraerJSON: _extraerJSON, parsePeople: _parsePeople,
     costoTotal: _costoTotal,

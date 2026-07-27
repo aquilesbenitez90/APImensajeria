@@ -129,11 +129,15 @@ function _numeroRoto(original, nuevo) {
 
 module.exports = function crearDeltaRouter(deps) {
   const {
-    callClaude, callMCP, resolverCliente, renderizarPdf, contarPaginas,
+    callClaude, callMCP, callMCPReintento, resolverCliente, renderizarPdf, contarPaginas,
     statsALS, nuevoStats, setStage, logTokenCost,
     sinGuiones, extraerJSON, parsePeople,
     MODEL_GEN, MODEL_JUDGE, WEB_SEARCH_TOOL,
   } = deps;
+  // Consultas al MCP CON 1 reintento ante fallo transitorio (timeout / stream cortado): el MCP de IBT se
+  // enfría y la primera consulta muere, y acá eso significaba caer a la tabla ESTIMADA de liderazgo teniendo
+  // el dato real disponible. Si el server no inyecta el helper (versión vieja), caemos a callMCP: no rompe.
+  const _mcp = callMCPReintento || callMCP;
 
   const MODEL_DELTA_GEN   = process.env.DELTA_MODEL_GEN || MODEL_GEN;
   const MODEL_DELTA_JUDGE = process.env.DELTA_MODEL_JUDGE || MODEL_JUDGE;
@@ -196,7 +200,7 @@ module.exports = function crearDeltaRouter(deps) {
     const nombreEmp = cliente && cliente.empresa;
     if (!nombreEmp) return { lideres: [], fuente: 'sin_empresa' };
     try {
-      const txt = String(await callMCP('resolve_sales_navigator_id', { type: 'COMPANY', keywords: nombreEmp, limit: 5 }));
+      const txt = String(await _mcp('resolve_sales_navigator_id', { type: 'COMPANY', keywords: nombreEmp, limit: 5 }));
       const cands = [...txt.matchAll(/id="?([0-9]+)"?\s+"([^"]+)"/g)].map(m => ({ id: m[1], name: m[2] }));
       // ANTI-EMPRESA-EQUIVOCADA (memoria: el resolve por nombre trae la equivocada): exigimos match de
       // nombre; sin match NO contamos líderes ajenos, caemos a la tabla estimada (y se declara estimado).
@@ -207,7 +211,7 @@ module.exports = function crearDeltaRouter(deps) {
         console.warn(`[DELTA:LID] resolve no matcheó "${nombreEmp}" (candidatos: ${cands.map(c => c.name).join(', ') || '-'}) → liderazgo por tabla.`);
         return { lideres: [], fuente: 'sin_match' };
       }
-      const gente = parsePeople(String(await callMCP('search_sales_navigator_filtered', {
+      const gente = parsePeople(String(await _mcp('search_sales_navigator_filtered', {
         category: 'people', profilesLimit: DELTA_LIDER_LIMIT, company: { include: [hit.id] },
       })));
       const vistos = new Set(); const lideres = [];
