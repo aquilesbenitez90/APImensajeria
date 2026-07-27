@@ -308,6 +308,12 @@ function _nuevoStats() {
     _signalsCache: null,
     // Idioma del DOCUMENTO (lo pisa el endpoint con el valor elegido en la landing). Default español.
     idiomaDoc: 'es',
+    // SALUD DEL MCP dentro del job (aislado por AsyncLocalStorage, NUNCA global mutable): cuántas consultas
+    // se hicieron y cuántas FALLARON (timeout, respuesta no parseable, isError del propio MCP). Sin esto un
+    // MCP caído se veía como "mercado vacío": cada búsqueda hace catch{return []} y el job moría diciendo
+    // "revisar términos de rol / industria / geografía" (caso 27-jul-2026: 4 diagnósticos chilenos perdidos
+    // con el mensaje apuntando al ICP cuando el MCP timeouteaba y devolvía respuestas cortadas).
+    mcp: { llamadas: 0, fallos: 0, ultimoError: null },
     total:  { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
     stages: {
       gen:     { input: 0, output: 0, cache_write: 0, cache_read: 0, web_searches: 0 },
@@ -429,10 +435,15 @@ function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnv
     ubicacion: c.ubicacion, urn: c.urn, headcount: (c.headcount ?? null)
   }));
   const warm = cards.filter(c => /1er|2do/.test(c.grado || '')).length;
-  // motivo canónico AGREGABLE. En el branch de error derivamos sourcing_vacio del mensaje
-  // (el pool vacío lanza "Sourcing devolvió 0 candidatos"); el resto lo pasa el endpoint.
+  // motivo canónico AGREGABLE. En el branch de error derivamos el motivo del mensaje; el resto lo pasa el
+  // endpoint. 'mcp_caido' se separa de 'sourcing_vacio' A PROPÓSITO: no es un nicho sin gente (problema de
+  // ICP, que se arregla cambiando el PLAN) sino la fuente de datos caída (se arregla reintentando). Mezclarlos
+  // en /stats hacía ver como "mercados vacíos" lo que eran caídas del MCP.
   const motivo = motivo_rechazo
-    || (error ? (/0 candidatos/i.test(error) ? 'sourcing_vacio' : 'error') : undefined);
+    || (error
+        ? (/la fuente de datos \(MCP\) fall/i.test(error) ? 'mcp_caido'
+          : /0 candidatos/i.test(error) ? 'sourcing_vacio' : 'error')
+        : undefined);
   return {
     ts: new Date().toISOString(),
     jobId: jobId || null,
@@ -548,8 +559,56 @@ function _profileCacheKey(args) {
   return k != null ? String(k) : null;
 }
 
+// ===== SALUD DEL MCP POR JOB =================================================================
+// Los callers del sourcing envuelven cada consulta en `catch{ return [] }` (correcto: una búsqueda que
+// falla no debe matar el reporte). El efecto colateral era que un MCP CAÍDO era indistinguible de un
+// mercado VACÍO, y el job culpaba al ICP. Contamos llamadas y fallos para poder decir la verdad.
+function _mcpContarLlamada(){ const st = _statsALS.getStore(); if (st && st.mcp) st.mcp.llamadas++; }
+function _mcpFallo(toolName, motivo){
+  const st = _statsALS.getStore();
+  if (st && st.mcp) { st.mcp.fallos++; st.mcp.ultimoError = `${toolName}: ${String(motivo || 'sin detalle').slice(0, 120)}`; }
+}
+function _mcpSalud(){
+  const st = _statsALS.getStore();
+  return (st && st.mcp) ? st.mcp : { llamadas: 0, fallos: 0, ultimoError: null };
+}
+// Mensaje HONESTO cuando el sourcing queda sin candidatos. Si hubo fallos de MCP, la causa es la FUENTE DE
+// DATOS y el usuario no tiene que tocar nada del ICP (mandarlo a "revisar industria/rol/geografía" cuando el
+// MCP estaba caído lo hace perseguir un problema que no existe). Un solo helper para los DOS endpoints
+// (/generar y /generar-reporte duplican la evaluación: si cambia el texto, cambia en los dos a la vez).
+// La frase "la fuente de datos (MCP) falló" es el marcador que lee _recResultado para el motivo 'mcp_caido'.
+function _msgSourcingVacio(plan){
+  const icp = (plan && plan._plan) || {};
+  const ctx = `geo=${icp.geografia || '?'}, industrias=[${(Array.isArray(icp.industrias) ? icp.industrias : []).join(', ') || '-'}]`;
+  const s = _mcpSalud();
+  if (s.fallos) {
+    return `Sourcing sin candidatos porque la fuente de datos (MCP) falló: ${s.fallos} de ${s.llamadas} consultas cayeron (última: ${s.ultimoError}). El ICP (${ctx}) NO es el problema: reintentá en unos minutos.`;
+  }
+  return `Sourcing devolvió 0 candidatos (${ctx}). Revisar términos de rol / industria / geografía.`;
+}
+
+// REINTENTO de una consulta de SOURCING que falló por causa TRANSITORIA (timeout, respuesta cortada, red).
+// El MCP de IBT se enfría y la primera consulta muere a los MCP_TIMEOUT_MS: sin reintento, cada búsqueda
+// devolvía [] y el pool quedaba vacío (27-jul-2026: `lookup_company falló (AbortError)` + dos
+// `no se pudo parsear respuesta` -> 4 jobs perdidos aunque el nicho tenía 18 candidatos).
+// Solo para las tools de BÚSQUEDA/RESOLVE: get_contact_profile tiene cache NEGATIVA por job (reintentarlo
+// solo quemaría el presupuesto de enriquecimiento) y su fallo ya se tolera con headcount=null.
+const MCP_RETRY_MS = parseInt(process.env.MCP_RETRY_MS || '1500', 10);
+async function callMCPReintento(toolName, args){
+  try { return await callMCP(toolName, args); }
+  catch (e) {
+    const transitorio = !!(e && (e.name === 'AbortError' || e.name === 'TypeError'
+      || /no se pudo parsear|fetch|network|ECONN|socket|closed/i.test(e.message || '')));
+    if (!transitorio) throw e;
+    console.warn(`[MCP] ${toolName} falló (${e.name || ''} ${e.message}); 1 reintento en ${MCP_RETRY_MS}ms (MCP posiblemente frío).`);
+    await new Promise(r => setTimeout(r, MCP_RETRY_MS));
+    return await callMCP(toolName, args);
+  }
+}
+
 async function callMCP(toolName, args) {
   console.log(`[MCP] Llamando ${toolName} con args:`, JSON.stringify(args).substring(0, 200));
+  _mcpContarLlamada();
   // DESPACHO A REST (flag SOURCE_BACKEND='rest'): mismo timeout/cache-por-job que el MCP. callREST devuelve
   // el MISMO texto que el parser espera, así que el resto de callMCP (cache, structured, return) NO se ejecuta.
   if (SOURCE_BACKEND === 'rest') {
@@ -589,6 +648,7 @@ async function callMCP(toolName, args) {
       } else {
         console.error(`[MCP] ${toolName} ERROR [rest]: ${e.message}`);
       }
+      _mcpFallo(toolName, e && e.name === 'AbortError' ? `timeout ${msR}ms [rest]` : e.message);
       throw e;
     } finally { clearTimeout(timerR); }
   }
@@ -648,6 +708,7 @@ async function callMCP(toolName, args) {
         if (cache) cache.set(_ckey, { ok: false });
       }
     }
+    _mcpFallo(toolName, e && e.name === 'AbortError' ? `timeout ${ms}ms` : e.message);
     throw e;
   } finally {
     clearTimeout(timer);
@@ -655,9 +716,22 @@ async function callMCP(toolName, args) {
   const match = text.match(/data: ({.*})\n\n/);
   if (!match) {
     console.error(`[MCP] ERROR: no se pudo parsear respuesta de ${toolName}`);
-    throw new Error('No se pudo parsear respuesta MCP');
+    _mcpFallo(toolName, 'respuesta no parseable (stream cortado o cuerpo vacío)');
+    throw new Error(`No se pudo parsear respuesta MCP de ${toolName}`);
   }
   const parsed = JSON.parse(match[1]);
+  // ERROR DEL PROPIO MCP: NO usa códigos HTTP. Responde 200 con
+  //   { result: { content: [{ text: "Authentication failed" }], isError: true } }
+  // Antes devolvíamos ESE TEXTO como si fueran datos: los parsers no matcheaban nada, la búsqueda daba []
+  // y el job terminaba diciendo "0 candidatos, revisar el ICP", sin una sola línea de error en el log
+  // (se veía como `OK (21 chars)`). Ahora es un error de verdad: se loguea, se cuenta y se lanza.
+  // Los callers del sourcing ya lo toleran (catch -> []), y resolverCliente degrada como antes.
+  if (parsed?.result?.isError === true) {
+    const detalle = String(parsed?.result?.content?.[0]?.text || 'error sin detalle').replace(/\s+/g, ' ').slice(0, 200);
+    console.error(`[MCP] ${toolName} ERROR devuelto por el MCP: ${detalle}`);
+    _mcpFallo(toolName, detalle);
+    throw new Error(`MCP ${toolName}: ${detalle}`);
+  }
   const result = parsed?.result?.content?.[0]?.text || JSON.stringify(parsed?.result);
   // structuredContent: si el MCP lo expone, lo adjuntamos SIN romper el contrato (los callers que
   // esperan el texto lo siguen recibiendo: devolvemos un String, con el structured como propiedad
@@ -1610,7 +1684,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       const objetivoEs = _norm(nombrePais);
       const enKw = _PAIS_ES_EN[objetivoEs] || nombrePais;   // inglés si lo conocemos; si no, el original
       const objetivoEn = _norm(enKw);
-      const txt = String(await callMCP('resolve_sales_navigator_id',{type:'LOCATION',keywords:enKw,limit:8}));
+      const txt = String(await callMCPReintento('resolve_sales_navigator_id',{type:'LOCATION',keywords:enKw,limit:8}));
       const matches = [...txt.matchAll(/id="?([0-9]+)"?\s+"([^"]+)"/g)].map(m=>({id:m[1],name:m[2]}));
       // match país-level contra el nombre en inglés O el original (por si el MCP devolviera en español)
       const paisLevel = matches.filter(m => { const n=_norm(String(m.name).split(',')[0]); return n===objetivoEn || n===objetivoEs; });
@@ -1692,7 +1766,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     // días (decisor nuevo = ventana de compra). NO reemplaza la búsqueda normal: alimenta el pool para que
     // los recién-cambiados COMPITAN en el ranking (filtrar solo por esto sesgaría a puro recién-cambiado).
     if(soloRecienCambio) f.changedJobsLast90Days = true;
-    try{ const txt = String(await callMCP('search_sales_navigator_filtered', f)); if(!txtPeopleSenal) txtPeopleSenal = txt; return _parsePeople(txt); }catch{ return []; }
+    try{ const txt = String(await callMCPReintento('search_sales_navigator_filtered', f)); if(!txtPeopleSenal) txtPeopleSenal = txt; return _parsePeople(txt); }catch{ return []; }
   }
   // Une los resultados de buscar cada término de rol por separado (dedupe por id), en PARALELO con tope CONC.
   // Default 8 (era 4 por el tope de 60 req/min del gateway del MCP, ELIMINADO en su actualización; verificado
@@ -1825,10 +1899,10 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   }
   if(indIds.length && geoLocOrNull){
     const baseCo = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoAncla}, industry:{include:indIds}, headcount:_hcDesde(hcMin) };
-    try{ txtCoSenal = String(await callMCP('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); cuentas = _parseCompanies(txtCoSenal); nConSenal = cuentas.length; _marcarCo(cuentas, 'growth'); _addNombres(cuentas, 'growth'); }
+    try{ txtCoSenal = String(await callMCPReintento('search_sales_navigator_filtered', {...baseCo, headcountGrowth:{min:8, max:1000}})); cuentas = _parseCompanies(txtCoSenal); nConSenal = cuentas.length; _marcarCo(cuentas, 'growth'); _addNombres(cuentas, 'growth'); }
     catch(e){ console.warn('[SOURCE] companies (con señal) falló:', e.message); }
     if(cuentas.length < NUM_CUENTAS*2){   // la señal recortó demasiado para este vertical: recall sin señal
-      try{ txtCoBase = String(await callMCP('search_sales_navigator_filtered', baseCo)); const more=_parseCompanies(txtCoBase); for(const c of more) if(!cuentas.some(x=>x.id===c.id)) cuentas.push(c); }
+      try{ txtCoBase = String(await callMCPReintento('search_sales_navigator_filtered', baseCo)); const more=_parseCompanies(txtCoBase); for(const c of more) if(!cuentas.some(x=>x.id===c.id)) cuentas.push(c); }
       catch(e){ console.warn('[SOURCE] companies (sin señal) falló:', e.message); }
     }
     // SEÑALES ADICIONALES POR EMPRESA (financiamiento / contratación / cambio de liderazgo). Gateadas a la
@@ -1875,7 +1949,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       .slice(0,4);
     const baseKw = { category:'companies', profilesLimit:SOURCE_CO_LIMIT, location:{include:geoAncla}, headcount:_hcDesde(hcMin) };
     const listas = await _mapLimit(kwAncla, CONC, async kw => {
-      try{ return _parseCompanies(await callMCP('search_sales_navigator_filtered', {...baseKw, keywords: kw})); }
+      try{ return _parseCompanies(await callMCPReintento('search_sales_navigator_filtered', {...baseKw, keywords: kw})); }
       catch(e){ console.warn(`[SOURCE] companies por keyword "${kw}" falló:`, e.message); return []; }
     });
     for(const lista of listas){ for(const c of (lista||[])) if(c.id && !cuentas.some(x=>x.id===c.id)) cuentas.push(c); }
@@ -1924,7 +1998,7 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     const f={ category:'people', profilesLimit:SOURCE_PROFILES_LIMIT, company:{include: anclaIds} };
     if(geoLocOrNull) f.location={include:geoLocOrNull};
     if(terminos.length) f.jobPosition={ include: terminos };   // acota a los cargos objetivo dentro de la cuenta
-    try{ return _parsePeople(await callMCP('search_sales_navigator_filtered', f)); }catch{ return []; }
+    try{ return _parsePeople(await callMCPReintento('search_sales_navigator_filtered', f)); }catch{ return []; }
   })();
   const _pasadaC = (async () => {
     let b = await buscar(geoLocOrNull, true);
@@ -2594,7 +2668,17 @@ async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
     if(data.stop_reason==='end_turn' || data.stop_reason==='stop_sequence')
       return parseReporteJSON(_textoJSON(data.content));
     if(data.stop_reason==='tool_use'){
-      const tr=[]; for(const b of data.content){ if(b.type!=='tool_use') continue; tr.push({type:'tool_result',tool_use_id:b.id,content:await callMCP(b.name,b.input)}); }
+      // El MCP ahora LANZA ante isError/timeout (antes devolvía el texto de error como si fuera dato). Acá
+      // ese throw mataría el PLAN entero, así que lo convertimos en tool_result de error: el modelo sigue
+      // razonando con lo que tenga (mismo comportamiento observable que antes, pero además queda logueado).
+      const tr=[];
+      for(const b of data.content){
+        if(b.type!=='tool_use') continue;
+        let contenido;
+        try { contenido = await callMCP(b.name, b.input); }
+        catch(e){ contenido = `ERROR: la herramienta ${b.name} falló (${e.message}). No hay datos de esta consulta.`; }
+        tr.push({type:'tool_result',tool_use_id:b.id,content:contenido});
+      }
       it++; if(it>=MAX) cerrar=true;
       if(tr.length){ if(cerrar) tr.push({type:'text',text:'Suficiente research. Devolvé YA el JSON.'}); messages.push({role:'user',content:tr}); }
       else return parseReporteJSON(_textoJSON(messages.filter(m=>m.role==='assistant').pop()?.content));
@@ -3722,7 +3806,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
     const fechaHoy = _fechaHoy();
     const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre, cliente, fechaHoy });
     const { pool, senales } = await sourceConRetry(plan, cliente);
-    if (!pool.length) throw new Error(`Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.`);
+    if (!pool.length) throw new Error(_msgSourcingVacio(plan));
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
     await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
     await enriquecerSenalesEmpresa(data);     // señales REALES de EMPRESA en las 3 cards finales (id-cross MCP)
@@ -4048,7 +4132,7 @@ app.post('/generar-reporte', async (req, res) => {
     const fechaHoy = _fechaHoy();
     const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre: nombre || '', cliente, fechaHoy });
     const { pool, senales } = await sourceConRetry(plan, cliente);
-    if (!pool.length) return res.status(422).json({ error: `Sourcing devolvió 0 candidatos (geo=${(plan._plan&&plan._plan.geografia)||'?'}, industrias=[${((plan._plan&&plan._plan.industrias)||[]).join(', ')||'-'}]). Revisar términos de rol / industria / geografía.` });
+    if (!pool.length) return res.status(422).json({ error: _msgSourcingVacio(plan) });
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
     await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
     await enriquecerSenalesEmpresa(data);     // señales REALES de EMPRESA en las 3 cards finales (id-cross MCP)
@@ -4321,6 +4405,7 @@ module.exports = {
   _cardsFitBueno, _resolverGateCalidez, sourceConRetry, runPlanConRetry,
   _saneaCargo, _dedupUbicacion, enriquecerSenales, _senalesDeCuenta,
   callREST, _parsePeople, _parseCompanies,
+  callMCPReintento, _mcpSalud, _msgSourcingVacio, _motivoRechazo, _recResultado,
   _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS,
   _reconciliarTitulo, _reconciliarGeoVisible, _geoIncoherente, callMCP, resolverCliente, _nuevoStats,
   _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN,
