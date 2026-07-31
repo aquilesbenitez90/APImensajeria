@@ -107,7 +107,7 @@ const _LBL = {
     guia:'Este es tu diagnóstico: a quién apuntar, qué señales mirar, cómo está el mercado y por dónde empezar. Al final, los 3 clientes potenciales.',
     analisis:'Análisis de Mercado', pagina:'Página', verperfil:'Ver perfil en LinkedIn ↗', proofLbl:'Respaldo',
     clientesN:n=>`Clientes potenciales · 01 — ${n}`, cliente1:'Cliente potencial · 01',
-    universo:(n,geo,k)=>`Encontramos <b>${n}</b> decisores que encajan con este perfil${geo?(' en '+geo):''}. En esta ocasión, te mostramos ${k} potenciales clientes.`,
+    universo:(geo,k)=>`Encontramos varios decisores que encajan con este perfil${geo?(' en '+geo):''}. En esta ocasión, te mostramos ${k} potenciales clientes.`,
     senalCtx:{
       'Levantó financiamiento':'Levantó financiamiento (tiene presupuesto fresco: buen momento para proponerle)',
       'Recién asumió el rol':'Decisor nuevo en el cargo (al llegar suele redefinir proveedores)',
@@ -124,7 +124,7 @@ const _LBL = {
     guia:'This is your diagnosis: who to target, what signals to watch, how the market looks, and where to start. At the end, your 3 potential customers.',
     analisis:'Market Analysis', pagina:'Page', verperfil:'View LinkedIn profile ↗', proofLbl:'Track record',
     clientesN:n=>`Prospects · 01 — ${n}`, cliente1:'Prospect · 01',
-    universo:(n,geo,k)=>`We found <b>${n}</b> decision-makers matching this profile${geo?(' in '+geo):''}. This time, we are showing you ${k} potential customers.`,
+    universo:(geo,k)=>`We found several decision-makers matching this profile${geo?(' in '+geo):''}. This time, we are showing you ${k} potential customers.`,
     senalCtx:{
       'Levantó financiamiento':'Raised funding (fresh budget: good time to pitch)',
       'Recién asumió el rol':'New in the role (usually redefines vendors on arrival)',
@@ -141,7 +141,7 @@ const _LBL = {
     guia:'Este é o seu diagnóstico: quem mirar, que sinais observar, como está o mercado e por onde começar. No final, os 3 clientes potenciais.',
     analisis:'Análise de Mercado', pagina:'Página', verperfil:'Ver perfil no LinkedIn ↗', proofLbl:'Histórico',
     clientesN:n=>`Clientes potenciais · 01 — ${n}`, cliente1:'Cliente potencial · 01',
-    universo:(n,geo,k)=>`Encontramos <b>${n}</b> decisores que encaixam neste perfil${geo?(' em '+geo):''}. Nesta ocasião, mostramos ${k} clientes potenciais.`,
+    universo:(geo,k)=>`Encontramos vários decisores que encaixam neste perfil${geo?(' em '+geo):''}. Nesta ocasião, mostramos ${k} clientes potenciais.`,
     senalCtx:{
       'Levantó financiamiento':'Captou investimento (orçamento novo: bom momento para propor)',
       'Recién asumió el rol':'Novo no cargo (costuma redefinir fornecedores ao chegar)',
@@ -294,13 +294,16 @@ ${cardsHtml}
   html = html.split('{{total_pages}}').join(String(totalPages));
   // Señales de mercado reales (inyección CRUDA, es HTML). Vacío si no hay señales.
   html = html.split('{{senales_html}}').join(_senalesHtml(data.senales));
-  // PUENTE DE VENTA (universo -> muestra): "Identificamos N decisores con este perfil; estos son los 3
-  // prioritarios". El N es el conteo REAL de la búsqueda (data.senales[0].value), no inventado. Convierte
-  // el diagnóstico en inventario (las 3 cards = muestra de algo más grande). Vacío si no hay conteo.
+  // PUENTE DE VENTA (universo -> muestra): "hay varios decisores con este perfil; estos son los 3
+  // prioritarios". Convierte el diagnóstico en inventario (las 3 cards = muestra de algo más grande).
+  // El CONTEO NO SE MUESTRA (decisión del dueño): un número exacto tipo "90 decisores" invita a discutir
+  // el número en vez de los leads. Igual seguimos EXIGIENDO que el conteo real exista (`_s0`) para hacer
+  // la afirmación: si la búsqueda no devolvió ningún conteo, no decimos "hay varios" (misma regla de
+  // certeza que el resto del reporte: el nivel de afirmación iguala al de la fuente). Vacío si no hay conteo.
   const _s0 = (Array.isArray(data.senales) ? data.senales.find(s => s && String(s.value == null ? '' : s.value).trim()) : null);
   const _geoU = _esc((data.ribbon && data.ribbon[1] && data.ribbon[1].value) || '');
   const universoHtml = _s0
-    ? `  <p class="puente">${_L().universo(_esc(_s0.value), _geoU, cards.length)}</p>`
+    ? `  <p class="puente">${_L().universo(_geoU, cards.length)}</p>`
     : '';
   html = html.split('{{universo_html}}').join(universoHtml);
   // A QUIÉN NO APUNTAMOS (anti-ICP): sección COMPLETA o vacía si el PLAN no trae verticales_excluir
