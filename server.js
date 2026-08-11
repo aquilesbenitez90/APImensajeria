@@ -210,6 +210,12 @@ function _restFmtProfile(data) {
   let txt = `${name} — ${head}`;
   if (emp) txt += ` @ ${emp}`;
   txt += hc != null ? ` (${hc} employees)` : ` (? )`;
+  // Location/about al FINAL con separador "|" (no rompe _parseProfile ni _empresaDeHeadline, que cortan en "|"):
+  // los necesita _parseDestinatario cuando el perfil llega por el fallback REST en vez del MCP.
+  const loc = String(prof.location || prof.geo_location || '').trim();
+  if (loc) txt += ` | Location: ${loc}`;
+  const about = String(prof.about || prof.summary || '').replace(/\s+/g, ' ').trim();
+  if (about) txt += ` | About: ${about.slice(0, 400)}`;
   return txt;
 }
 // lookup_company -> texto: _empresaDeLookup lee "Company: <name>", _headcountDe "<N> employees",
@@ -454,6 +460,7 @@ function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnv
     dominio: (input && input.dominio) || '',
     email: (input && input.email) || '',
     profileId: (input && input.profileId) || null,
+    destinatario: (input && input.destinatario) || null,
     anclado: !!(cliente && cliente.anclado),
     veredicto: judgeResult && judgeResult.veredicto,
     score: judgeResult ? judgeResult.score : null,
@@ -1370,6 +1377,72 @@ async function resolverCliente({ profileId, dominio, empresa }) {
   }
   console.warn(`[CLIENTE] ⚠️ SIN ANCLAR (dominio="${dominio}", empresa="${empresa}") -> anclado:false`);
   return { empresa: empresa || dominio || '', dominio: dominio || '', headcount: null, tier: null, anclado: false, fuente: 'sin_anclar', confianza: 'baja' };
+}
+
+// ===== DESTINATARIO DEL REPORTE (caso McCoy: el reporte le habló del grupo global a alguien de España) =====
+// La persona que va a RECIBIR el PDF define el ALCANCE del reporte: su país y su unidad son el mercado del
+// documento, no la estructura global del grupo. En el flujo N8N llega como profileId (id del chat); en la
+// landing web, como link/public-id de LinkedIn ("destinatario"). get_contact_profile acepta ambos.
+// País del destinatario: location de LinkedIn viene en INGLÉS ("Madrid, Community of Madrid, Spain") →
+// se traduce al nombre en ESPAÑOL (el mismo set de _ISO_PAIS, que es lo que usan geografias/_corregirGeoSede).
+const _PAIS_EN_ES = {
+  'argentina':'Argentina','brazil':'Brasil','chile':'Chile','colombia':'Colombia','mexico':'México','peru':'Perú',
+  'uruguay':'Uruguay','paraguay':'Paraguay','bolivia':'Bolivia','ecuador':'Ecuador','venezuela':'Venezuela',
+  'costa rica':'Costa Rica','panama':'Panamá','guatemala':'Guatemala','el salvador':'El Salvador','honduras':'Honduras',
+  'nicaragua':'Nicaragua','dominican republic':'República Dominicana','cuba':'Cuba','puerto rico':'Puerto Rico',
+  'united states':'Estados Unidos','canada':'Canadá','spain':'España','portugal':'Portugal','france':'Francia',
+  'germany':'Alemania','united kingdom':'Reino Unido','italy':'Italia','netherlands':'Países Bajos','ireland':'Irlanda',
+  'switzerland':'Suiza','belgium':'Bélgica','sweden':'Suecia','norway':'Noruega','denmark':'Dinamarca','poland':'Polonia',
+  'india':'India','china':'China','japan':'Japón','south korea':'Corea del Sur','singapore':'Singapur',
+  'australia':'Australia','new zealand':'Nueva Zelanda','israel':'Israel','united arab emirates':'Emiratos Árabes Unidos',
+  'south africa':'Sudáfrica','turkey':'Turquía',
+  // por si el perfil viene con locale en español (mismo _norm de claves, sin acentos)
+  'espana':'España','estados unidos':'Estados Unidos','brasil':'Brasil','paises bajos':'Países Bajos',
+  'reino unido':'Reino Unido','republica dominicana':'República Dominicana','japon':'Japón','singapur':'Singapur',
+  'nueva zelanda':'Nueva Zelanda','sudafrica':'Sudáfrica','turquia':'Turquía','corea del sur':'Corea del Sur',
+  'emiratos arabes unidos':'Emiratos Árabes Unidos','francia':'Francia','alemania':'Alemania',
+  'italia':'Italia','irlanda':'Irlanda','suiza':'Suiza','belgica':'Bélgica','suecia':'Suecia','noruega':'Noruega',
+  'dinamarca':'Dinamarca','polonia':'Polonia'
+};
+// Parser TOLERANTE de get_contact_profile para el destinatario: el gateway puede devolver el objeto en
+// structuredContent, el JSON serializado en el texto, o el texto plano del formato REST ("Nombre — headline
+// @ Empresa (N employees) | Location: ..."). Puro (testeable): recibe la respuesta cruda, devuelve
+// {nombre,cargo,empresa,pais,ubicacion,about} o null si no hay nada usable. País desconocido → pais:null (no adivinar).
+function _parseDestinatario(res){
+  try{
+    const s = String(res || '');
+    let o = (res && res.structuredContent) || null;
+    if(!o){ const m = s.match(/\{[\s\S]*\}/); if(m){ try{ o = JSON.parse(m[0]); }catch{} } }
+    o = o || {};
+    const nombre = `${o.firstName || o.first_name || ''} ${o.lastName || o.last_name || ''}`.replace(/\s+/g,' ').trim()
+      || _profileName(s) || (s.includes('—') ? s.split('—')[0].trim() : '') || null;
+    const cargo = String(o.headline || '').trim() || ((s.match(/—\s*(.+?)(?:\s*@|\s*\(|\s*\||$)/) || [])[1] || '').trim() || null;
+    const empresa = String(o.companyName || o.company_name || '').trim() || _empresaDeHeadline(s) || null;
+    let ubicacion = String(o.location || '').trim() || ((s.match(/\|\s*Location:\s*([^|]+)/i) || [])[1] || '').trim() || null;
+    let pais = null;
+    if(ubicacion){
+      const ult = ubicacion.split(',').pop().trim();
+      pais = _PAIS_EN_ES[_norm(ult)] || null;
+    }
+    const about = (o.about ? String(o.about) : ((s.match(/\|\s*About:\s*(.+)$/i) || [])[1] || '')).replace(/\s+/g,' ').trim().slice(0, 400) || null;
+    if(!nombre && !cargo && !pais) return null;
+    return { nombre, cargo, empresa, pais, ubicacion, about };
+  }catch(e){ return null; }
+}
+// Resuelve el destinatario vía MCP. Nunca tira: un destinatario que no resuelve NO puede tumbar el reporte
+// (se degrada a null = comportamiento actual, sin scoping). El cache por job de callMCP dedupea si el mismo
+// perfil ya se consultó (ej. resolverCliente por profileId).
+async function resolverDestinatario({ perfil, profileId }){
+  const args = (perfil && String(perfil).trim())
+    ? { publicIdOrUrl: String(perfil).trim() }
+    : (profileId != null && String(profileId).trim() !== '' && !isNaN(Number(profileId))) ? { profileId: Number(profileId) } : null;
+  if(!args) return null;
+  try{
+    const d = _parseDestinatario(await _callMCPClienteConRetry('get_contact_profile', args));
+    if(d) console.log(`[DEST] destinatario resuelto: ${d.nombre || '?'} — ${d.cargo || '?'}${d.empresa ? ` @ ${d.empresa}` : ''}${d.pais ? ` (${d.pais})` : d.ubicacion ? ` (${d.ubicacion})` : ''}`);
+    else console.warn(`[DEST] get_contact_profile no trajo datos usables del destinatario (${perfil || profileId}).`);
+    return d;
+  }catch(e){ console.warn(`[DEST] destinatario ${perfil || profileId} no resolvió (sigo sin scoping):`, e.message); return null; }
 }
 
 // ===========================================================================
@@ -2578,6 +2651,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - PRINCIPIO RECTOR (gobierna TODO lo de abajo): tu nivel de certeza al escribir tiene que IGUALAR el nivel de tu fuente. No subas el tono (no afirmes como un hecho algo que la fuente sugiere, ni como "operación" algo que recién arranca, ni como "cliente" a un tercero que no está confirmado) ni lo bajes (no llames "apertura/posibilidad" a algo que la fuente da por consolidado). Ante la duda: bajá el tono a una formulación cualitativa, o directamente omití el dato. Las reglas que siguen (números, año de fundación, terceros, países) son CASOS de este mismo principio; cuando dudes en algo no listado, aplicá el principio igual.
 - "fecha" = EXACTAMENTE la fecha de hoy que te paso en el mensaje (no inventes otra).
 - ATRIBUTOS Y CREDENCIALES DEL CLIENTE (caso del principio rector, tan grave como inventar un número): NO le atribuyas al cliente certificaciones, acreditaciones, pólizas, sellos, cumplimientos normativos ni características operativas específicas salvo que web_search lo confirme en una fuente del propio cliente. Esto incluye cosas que "suenan lógicas" pero que no viste: "técnicos certificados en alturas", "pólizas de responsabilidad civil", "proveedor auditado", "certificación ISO", "atención/operación 24/7", "garantía de X horas". Que sea PLAUSIBLE para el rubro NO alcanza: si no salió de una fuente, no lo afirmes. Si querés transmitir formalidad/calidad sin el dato puntual, usá una formulación cualitativa y verificable ("un proveedor formal del segmento", "una red estructurada de técnicos") en vez de inventar la credencial. Una credencial falsa que el prospecto repregunta quema el reporte igual que un nombre de tercero inventado.
+- PRESENCIA / OFICINAS / PAÍSES DEL PROPIO CLIENTE (caso real que quemó un reporte: una nota de prensa decía "oficina en Singapur", el sitio oficial del cliente ya no la listaba, y el prospecto lo detectó al instante): la lista de oficinas, sedes o países de presencia del cliente sale EXCLUSIVAMENTE de una fuente del PROPIO cliente (su sitio oficial en el dominio ancla, o su página de LinkedIn). Una nota de prensa, directorio o artículo puede CORROBORAR lo que el sitio oficial ya dice, pero NUNCA AGREGAR una oficina o país que el sitio oficial no liste HOY: la prensa envejece (la oficina pudo cerrar o ser de otra entidad del grupo). Ante conflicto entre una nota y el sitio oficial actual, MANDA el sitio oficial. Si una presencia aparece SOLO en prensa, OMITILA (el reporte pierde menos por no nombrar una sede que por nombrar una que ya no existe). Y si el reporte es para una operación local de un grupo multinacional, NO inventaries las sedes del grupo: nombrá solo lo relevante al mercado del documento.
 - VERACIDAD (CRÍTICO): PROHIBIDO inventar métricas o datos duros. Esto incluye específicamente: cantidad de categorías/tipos de servicio (ej. "+300 categorías"), totales acumulados (ej. "+470.000 servicios"), tiempos de respuesta ("60 minutos"), %, premios, año de fundación o stage. Si un número NO sale textual de web_search o de una fuente verificable, NO lo pongas en ningún lado (lead, proof, context, apertura, stats, ribbon). Ante la duda, usá una formulación cualitativa SIN número ("amplia cobertura", "varias categorías de servicio"). Es preferible un reporte sin números a uno con números inventados. REGLA DE ORO: antes de cerrar, releé CADA número que escribiste; si no podés señalar la fuente exacta de web_search de donde salió, BORRALO o pasalo a texto cualitativo. El invento más común y MÁS GRAVE es "+300 tipos de servicio" o "+X servicios/clientes": NO lo escribas jamás si no lo viste en una fuente.
 - STATS: que los 4 chips sean datos verificables o estructurales (ej: la cantidad ${N} de cuentas priorizadas, países de operación reales, año de fundación SOLO si lo verificaste). NUNCA rellenes un stat con un número inventado para que "quede lindo". Preferí stats que IMPACTEN y sean verificables (ciudades/países de cobertura, años en el mercado, la cantidad ${N} de cuentas). EVITÁ stats que subvendan al cliente, como su propia cantidad de empleados si es baja.
 - STATS — PROHIBIDO FABRICAR UN NÚMERO CONTANDO TU PROPIO REPORTE (defecto frecuente): un stat numérico SOLO vale si ese número sale TEXTUAL de web_search. NO inventes un stat contando elementos que vos mismo escribiste o dedujiste: prohibido "3 líneas de producto", "3 segmentos atendidos", "4 verticales objetivo", "1 país de operación confirmado", "2 modelos de negocio". Esos números los estás CONTANDO de tu propia redacción, no de una fuente, así que son inventados. ÚNICAS excepciones legítimas que no salen de web_search: (a) la cantidad ${N} de cuentas priorizadas (es un dato del propio reporte, declarado como tal), y (b) el conteo de países de operación SOLO si cada país está confirmado por web_search (ver regla de países). PROHIBIDA la palabra "confirmado/confirmada/confirmados" en el label o el num de un stat si no hay una fuente que lo respalde: no uses "confirmado" para disimular un número que vos dedujiste. Si no juntás 4 números genuinamente verificables, usá stats CUALITATIVOS o ESTRUCTURALES honestos (ej: {"num":"${N}","label":"Cuentas priorizadas"}, {"num":"Multi","label":"País de operación"} o un chip sin número de tipo categoría/modelo) en vez de fabricar cifras.
@@ -2647,12 +2721,18 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 }
 CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
-async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
+async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy, dest }){
   _setStage('gen');
+  // DESTINATARIO (caso McCoy: el PDF le nombró Singapur y Manila del grupo global a un lector de la operación
+  // de España). Si sabemos QUIÉN va a leer el reporte, su país y su unidad definen el ALCANCE del documento.
+  // Las reglas van acá (en el mensaje, como el bloque ANTI-HOMÓNIMO) y no en el system: solo aplican si hay dato.
+  const bloqueDest = (dest && (dest.cargo || dest.pais))
+    ? `\n\nDESTINATARIO DEL REPORTE (dato duro del MCP: la persona REAL que va a recibir y leer este documento): ${dest.nombre || '?'}${dest.cargo ? `, ${dest.cargo}` : ''}${dest.pais ? `, en ${dest.pais}${dest.ubicacion ? ` (${dest.ubicacion})` : ''}` : dest.ubicacion ? `, en ${dest.ubicacion}` : ''}.\nESCRIBÍ PARA SU ALCANCE (CRÍTICO si el cliente es un grupo multinacional): el reporte es para LA OPERACIÓN/UNIDAD del destinatario, NO para el grupo global. ${dest.pais ? `"geografia" y el mercado del título son ${dest.pais} (el país del destinatario), salvo que su cargo declare EXPLÍCITAMENTE un alcance regional/global. ` : ''}Si su cargo acota una unidad, línea o región (ej. "Director de Ventas Colombia"), ESE es el alcance de todo el documento. Los datos de página 1 (proof, context, stats) hablan de SU operación: PROHIBIDO citar oficinas, países, hitos o estructura del grupo que NO toquen el mercado del destinatario (a un lector de una operación local, nombrarle sedes remotas del grupo le suena a dato ajeno y resta credibilidad). La historia del grupo se menciona SOLO como respaldo breve y verificado, sin inventario de sedes.`
+    : '';
   const bloqueCliente = (cliente && cliente.anclado)
     ? `\n\nDATOS VERIFICADOS DEL CLIENTE (NO inventes otra empresa, usá ESTOS): Empresa: ${cliente.empresa}; Tamaño: ${cliente.headcount ?? '?'} empleados${cliente.tier ? ` (tier ${cliente.tier})` : ''}.${cliente.pais ? ` PAÍS SEDE (dato DURO de la página de LinkedIn de la empresa, NO lo contradigas): ${cliente.pais}${cliente.ciudad ? ` (${cliente.ciudad})` : ''}. "geografia" TIENE que ser ${cliente.pais}; solo agregá otros países a "geografias" si el research confirma que el cliente HOY también opera ahí.` : ''}${cliente.descripcion ? `\nQUÉ HACE LA EMPRESA (descripción TEXTUAL de su propia página de LinkedIn — este es el rubro REAL del cliente, dato DURO): «${cliente.descripcion}»${cliente.especialidades ? ` (especialidades: ${cliente.especialidades})` : ''}.\nANTI-HOMÓNIMO (CRÍTICO): "${cliente.empresa}" es un nombre que pueden compartir varias empresas de distintos rubros y países. TODO tu análisis (qué hace, a quién le vende, el ICP entero) tiene que ser coherente con ESTA descripción y ESTE país. Si una fuente de web_search habla de una empresa del mismo nombre pero de OTRO rubro u OTRO país, es OTRA empresa: DESCARTÁ esa fuente por completo (no mezcles rubros ni datos de homónimas). Si el research no aporta nada de ESTA empresa, derivá el ICP desde la descripción de LinkedIn sola.${(cliente.dominio || dominio) ? ` ANCLA DE IDENTIDAD: el sitio oficial del cliente es ${cliente.dominio || dominio} — incluí ese dominio en tus búsquedas (ej. "${cliente.empresa} ${cliente.dominio || dominio}") y preferí las fuentes que correspondan a ESE sitio.` : ''}` : ''}`
     : '';
-  const messages = [{ role:'user', content:`Cliente a analizar:\n- Empresa: ${empresa}\n- Dominio: ${dominio}\n- Email contacto: ${email}\n- Nombre contacto: ${nombre}${bloqueCliente}\n\nFecha de hoy (usala en "fecha"): ${fechaHoy}\n\nInvestigá la empresa con web_search y devolvé SOLO el JSON del schema.` }];
+  const messages = [{ role:'user', content:`Cliente a analizar:\n- Empresa: ${empresa}\n- Dominio: ${dominio}\n- Email contacto: ${email}\n- Nombre contacto: ${nombre}${bloqueCliente}${bloqueDest}\n\nFecha de hoy (usala en "fecha"): ${fechaHoy}\n\nInvestigá la empresa con web_search y devolvé SOLO el JSON del schema.` }];
   const MAX = parseInt(process.env.PLAN_MAX_TOOL_ITERS || '8', 10);
   let it=0, cerrar=false;
   while(true){
@@ -2724,7 +2804,13 @@ async function runPlanConRetry(args){
     try{
       const plan = await runPlan(args);
       validarPlan(plan);   // idempotente: confirma que el PLAN está completo antes de seguir
-      _corregirGeoSede(plan, args && args.cliente && args.cliente.pais);   // guarda determinística de país sede (caso Transur)
+      // Guarda determinística de país (caso Transur + caso McCoy): el país del DESTINATARIO manda sobre la
+      // sede del cliente cuando difieren (multinacional: el reporte es para SU operación, no para el grupo).
+      const _paisDest = args && args.dest && args.dest.pais;
+      const _paisSede = args && args.cliente && args.cliente.pais;
+      if(_paisDest && _paisSede && _norm(_paisDest) !== _norm(_paisSede))
+        console.log(`[GEO] destinatario en "${_paisDest}" ≠ sede del cliente "${_paisSede}" → el reporte se ancla al país del DESTINATARIO.`);
+      _corregirGeoSede(plan, _paisDest || _paisSede);
       return plan;
     }catch(e){
       ultimoError = e;
@@ -3761,12 +3847,12 @@ async function _pdfDePrueba(nombre){
   return Buffer.from(await doc.save()).toString('base64');
 }
 
-async function procesar(jobId, { email, dominio, empresa, nombre, profileId, evalMode, idioma, test }) {
+async function procesar(jobId, { email, dominio, empresa, nombre, profileId, destinatario, evalMode, idioma, test }) {
   return _statsALS.run(_nuevoStats(), async () => {
   const _st0 = _statsALS.getStore(); if (_st0) _st0.idiomaDoc = _idiomaCode(idioma);   // idioma del DOCUMENTO (manual desde la landing)
   try {
     console.log(`\n========== Job ${jobId} - Inicio (${NUM_CUENTAS} cuentas) ==========`);
-    console.log(`Empresa: ${empresa} | Email: ${email} | Dominio: ${dominio} | profileId: ${profileId ?? '-'}`);
+    console.log(`Empresa: ${empresa} | Email: ${email} | Dominio: ${dominio} | profileId: ${profileId ?? '-'} | destinatario: ${destinatario || '-'}`);
 
     // ===== MODO TEST (n8n end-to-end sin gastar): "test":true en el body O TEST_MODE=on en el env. =====
     // Devuelve un reporte FALSO (PDF mínimo válido) con TODOS los campos que n8n lee (status, pdf_base64,
@@ -3798,8 +3884,12 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
     const cliente = await resolverCliente({ profileId, dominio, empresa });
     const empresaFinal = cliente.empresa || empresa;
 
+    // Destinatario del reporte: link de la landing ("destinatario") o el profileId del chat (flujo N8N).
+    // Si no resuelve → null y el PLAN corre como siempre (nunca bloquea el reporte).
+    const dest = await resolverDestinatario({ perfil: destinatario, profileId });
+
     const fechaHoy = _fechaHoy();
-    const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre, cliente, fechaHoy });
+    const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre: nombre || (dest && dest.nombre) || '', cliente, fechaHoy, dest });
     const { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) throw new Error(_msgSourcingVacio(plan));
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
@@ -3962,12 +4052,12 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
       calidezMal: !!(gateCal && gateCal.retener),
       juezRechazo: judgeResult.veredicto === 'RECHAZADO'
     });
-    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId }, cliente, plan, data, judgeResult, aptoEnvio, pageCount, motivo_rechazo: motivoRechazo }));
+    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId, destinatario }, cliente, plan, data, judgeResult, aptoEnvio, pageCount, motivo_rechazo: motivoRechazo }));
     console.log(`========== Job ${jobId} - ${aptoEnvio ? `OK ${pageCount} páginas` : 'NO apto (sin PDF)'}, juez FINAL ${judgeResult.veredicto} ${judgeResult.score}/8 (motivo: ${motivoRechazo}) ==========\n`);
   } catch (err) {
     console.error(`[Job ${jobId}] Error:`, err);
     jobs.set(jobId, { status: 'error', error: err.message, finishedAt: Date.now() });
-    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId }, error: err.message }));
+    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId, destinatario }, error: err.message }));
   }
   });
 }
@@ -4021,7 +4111,7 @@ app.post('/generar', (req, res) => {
   if (process.env.LANDING_KEY && req.header('x-landing-key') !== process.env.LANDING_KEY) {
     return res.status(401).json({ error: 'Clave invalida' });
   }
-  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug, idioma, test } = req.body || {};
+  const { email, dominio, empresa, nombre, profileId, destinatario, eval: evalMode, debug, idioma, test } = req.body || {};
   if (!empresa && !dominio && !profileId) {
     return res.status(400).json({ error: 'Falta empresa, dominio o profileId' });
   }
@@ -4061,7 +4151,7 @@ app.post('/generar', (req, res) => {
       }, JOB_TIMEOUT_MS);
     });
     return Promise.race([
-      procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug, idioma, test }),
+      procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, destinatario, evalMode: evalMode || debug, idioma, test }),
       timeoutGlobal
     ])
     .catch((err) => {   // CATCH DEFENSIVO: si procesar() rechaza sin atrapar, no tumbamos el server.
@@ -4110,7 +4200,7 @@ app.get('/pdf/:jobId', (req, res) => {
 });
 
 app.post('/generar-reporte', async (req, res) => {
-  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug, idioma } = req.body || {};
+  const { email, dominio, empresa, nombre, profileId, destinatario, eval: evalMode, debug, idioma } = req.body || {};
   if (!email || !dominio) return res.status(400).json({ error: 'email y dominio son obligatorios' });
 
   await _statsALS.run(_nuevoStats(), async () => {
@@ -4118,8 +4208,9 @@ app.post('/generar-reporte', async (req, res) => {
   try {
     const cliente = await resolverCliente({ profileId, dominio, empresa: empresa || dominio });
     const empresaFinal = cliente.empresa || empresa || dominio;
+    const dest = await resolverDestinatario({ perfil: destinatario, profileId });   // mismo scoping que procesar()
     const fechaHoy = _fechaHoy();
-    const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre: nombre || '', cliente, fechaHoy });
+    const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre: nombre || (dest && dest.nombre) || '', cliente, fechaHoy, dest });
     const { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) return res.status(422).json({ error: _msgSourcingVacio(plan) });
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
@@ -4251,7 +4342,7 @@ app.post('/generar-reporte', async (req, res) => {
       calidezMal: !!(gateCal && gateCal.retener),
       juezRechazo: judgeResult.veredicto === 'RECHAZADO'
     });
-    _registrarResultado(_recResultado({ input: { email, dominio, empresa, profileId }, cliente, plan, data, judgeResult, aptoEnvio, pageCount, motivo_rechazo: motivoRechazo }));
+    _registrarResultado(_recResultado({ input: { email, dominio, empresa, profileId, destinatario }, cliente, plan, data, judgeResult, aptoEnvio, pageCount, motivo_rechazo: motivoRechazo }));
 
     return res.json({
       status: 'ok',
@@ -4276,7 +4367,7 @@ app.post('/generar-reporte', async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    _registrarResultado(_recResultado({ input: { email, dominio, empresa, profileId }, error: err.message }));
+    _registrarResultado(_recResultado({ input: { email, dominio, empresa, profileId, destinatario }, error: err.message }));
     return res.status(500).json({ error: err.message });
   }
   });
@@ -4376,5 +4467,5 @@ module.exports = {
   _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS,
   _reconciliarTitulo, _reconciliarGeoVisible, _geoIncoherente, callMCP, resolverCliente, _nuevoStats,
   _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN,
-  _sedeDeLookup, _corregirGeoSede
+  _sedeDeLookup, _corregirGeoSede, _parseDestinatario, resolverDestinatario
 };

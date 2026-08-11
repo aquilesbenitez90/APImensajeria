@@ -29,7 +29,7 @@ N8N (cada 5 min) → lee chats IBT → detecta email + keyword "mercado"
 
 | Método | Ruta | Notas |
 |---|---|---|
-| POST | `/generar` | Async. Body `{email,dominio,empresa,nombre,profileId}`. Devuelve `{jobId}`. **Idempotente** por lead (dedup `enProgreso`). |
+| POST | `/generar` | Async. Body `{email,dominio,empresa,nombre,profileId,destinatario}`. `destinatario` = link/public-id de LinkedIn de la persona que RECIBE el reporte (opcional): ancla el país y el alcance del documento a su operación (clave en multinacionales). Devuelve `{jobId}`. **Idempotente** por lead (dedup `enProgreso`). |
 | GET | `/resultado/:jobId` | Estado del job. `status`: processing / ok / error. |
 | POST | `/generar-reporte` | **Síncrono**. Requiere `email` y `dominio`. `eval:true` o `debug:true` incluye el objeto `data` estructurado en `reporte` (úsalo para auditar). |
 | GET | `/health` | `{ok, jobs_activos, cuentas}`. |
