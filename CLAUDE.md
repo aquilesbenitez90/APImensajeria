@@ -46,7 +46,7 @@ Deploy: Railway (nixpacks.toml instala chromium para Puppeteer). El N8N en produ
 ## Variables de entorno
 
 Obligatorias: `ANTHROPIC_API_KEY`, `IBT_EMAIL`, `IBT_PASSWORD`. Opcional `PORT`.
-Tuning (con default): `NUM_CUENTAS=3`, `EXPECTED_PAGES=0` (0 = el juez NO valida páginas), `SOURCE_CONCURRENCY=4`, `SOURCE_HOME_MIN`, `SOURCE_ENRICH_TOP=12`, `SOURCE_TO_IA=18`, `SOURCE_MIN_2ND=4`, `ICP_MIN_HEADCOUNT=20`, `PLAN_MAX_TOOL_ITERS=8`, `SELECT_MAX_TRIES=3`, `MIN_CARDS_OK`, `CLAUDE_MAX_RETRIES=3`, `CLAUDE_TIMEOUT_MS=240000`, `WS_DEBUG=1` (log de web_search), `LOGO_PATH`.
+Tuning (con default): `NUM_CUENTAS=3`, `EXPECTED_PAGES=0` (0 = el juez NO valida páginas), `SOURCE_CONCURRENCY=4`, `SOURCE_HOME_MIN`, `SOURCE_ENRICH_TOP=12`, `SOURCE_TO_IA=18`, `SOURCE_MIN_2ND=4`, `ICP_MIN_HEADCOUNT=20`, `PLAN_MAX_TOOL_ITERS=8`, `SELECT_MAX_TRIES=3`, `PEER_INDUSTRY_CHECK=on` (filtro anti-peer por industria de empresa), `MIN_CARDS_OK`, `CLAUDE_MAX_RETRIES=3`, `CLAUDE_TIMEOUT_MS=240000`, `WS_DEBUG=1` (log de web_search), `LOGO_PATH`.
 
 ## Modelos
 

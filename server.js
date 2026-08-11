@@ -312,6 +312,8 @@ function _nuevoStats() {
     // CACHE POR JOB de señales de compra por empresa (_senalesDeCuenta). Evita re-buscar la misma empresa
     // cuando una ronda de fix re-arma cards del mismo nombre. Lazy (Map) en _senalesDeCuenta.
     _signalsCache: null,
+    // CACHE POR JOB de industria por empresa (_industriaDeEmpresa, filtro anti-peer). Lazy (Map).
+    _industriaCache: null,
     // Idioma del DOCUMENTO (lo pisa el endpoint con el valor elegido en la landing). Default español.
     idiomaDoc: 'es',
     // SALUD DEL MCP dentro del job (aislado por AsyncLocalStorage, NUNCA global mutable): cuántas consultas
@@ -2541,6 +2543,25 @@ function _candViable(c, titulos, excluir, industrias, esComp){
 // Es BARATO en tokens (solo MCP, cada llamada con su timeout); el costo es latencia, aceptable. SELECT corre UNA
 // sola vez DESPUÉS, sobre el pool acumulado (tokens planos).
 // Conserva el retry anti-hipo del MCP: si una pasada sale 100% vacía, espera y reintenta esa pasada.
+
+// INDUSTRIA de una empresa por NOMBRE, vía búsqueda de EMPRESAS (el dato confiable: companyIndustry del
+// perfil suele venir null y lookup_company por nombre suelto falla/trae homónimos — memoria Aenima). SOLO
+// confiamos si el nombre devuelto matchea EXACTO por _empKey (verificado en vivo: "Ayesa Digital" →
+// "IT Services and IT Consulting"). Falla suave → null (no filtra). Cache por job (_industriaCache).
+async function _industriaDeEmpresa(nombre){
+  const k = _empKey(nombre || ''); if(!k) return null;
+  const st = _stats(); if(!st._industriaCache) st._industriaCache = new Map();
+  if(st._industriaCache.has(k)) return st._industriaCache.get(k);
+  let industria = null;
+  try{
+    const txt = String(await callMCPReintento('search_sales_navigator_filtered', { category: 'companies', keywords: String(nombre).trim(), profilesLimit: 3 }));
+    const hit = _parseCompanies(txt).find(c => _empKey(c.name) === k && c.industry);
+    industria = (hit && hit.industry) || null;
+  }catch(e){ console.warn(`[PEER] búsqueda de industria falló para "${nombre}" (sigo sin filtrar):`, e.message); }
+  st._industriaCache.set(k, industria);
+  return industria;
+}
+
 async function sourceConRetry(plan, cliente){
   const reintentos   = parseInt(process.env.SOURCE_RETRY_ON_EMPTY || '1', 10);
   const delay        = parseInt(process.env.SOURCE_RETRY_DELAY_MS || '6000', 10);
@@ -2629,6 +2650,33 @@ async function sourceConRetry(plan, cliente){
   }
 
   const N_IA = parseInt(process.env.SOURCE_TO_IA || '18', 10);
+
+  // ===== ANTI-PEER POR INDUSTRIA sobre el tramo que va a SELECT (caso real Ayesa Digital) ====
+  // El filtro de arriba mira NOMBRE de empresa + HEADLINE de la persona, pero un peer cuyo nombre y headline
+  // no delatan el rubro ("Ayesa Digital" / "CIO") se cuela igual: su INDUSTRIA de LinkedIn ("IT Services and
+  // IT Consulting") solo se ve en la búsqueda de EMPRESAS. Acá consultamos la industria de cada empresa
+  // DISTINTA del tramo con chances de llegar a SELECT y descartamos las que caen en verticales_excluir.
+  // Quemó DOS reportes seguidos de McCoy (el prospecto conocía al CIO de Ayesa y la rechazó como peer).
+  // Falla suave (sin respuesta/sin match de nombre → no filtra) + degradación digna + kill-switch por env.
+  if(excluir.length && String(process.env.PEER_INDUSTRY_CHECK || 'on').toLowerCase() !== 'off'){
+    const tramo = pob.slice(0, N_IA * 2);
+    const nombres = [...new Map(tramo.map(c => [_empKey(c.empresa||''), c.empresa])).entries()]
+      .filter(([k, n]) => k && n).map(([, n]) => n);
+    const CONC = 6;
+    const peers = new Set();
+    for(let i = 0; i < nombres.length; i += CONC){
+      await Promise.all(nombres.slice(i, i + CONC).map(async n => {
+        const ind = await _industriaDeEmpresa(n);
+        if(ind && _matchVerticalExcluir(ind, excluir)){ peers.add(_empKey(n)); console.warn(`[PEER] fuera del pool por INDUSTRIA excluida: "${n}" (${ind})`); }
+      }));
+    }
+    if(peers.size){
+      const sinPeers = pob.filter(c => !peers.has(_empKey(c.empresa||'')));
+      if(sinPeers.length >= NUM_CUENTAS){ console.log(`[PEER] pool sin peers por industria: ${sinPeers.length} (de ${pob.length}; ${peers.size} empresa(s) peer).`); pob = sinPeers; }
+      else console.warn(`[PEER] filtrar peers por industria dejaría ${sinPeers.length}/${NUM_CUENTAS} candidatos -> degradación digna, NO filtro.`);
+    }
+  }
+
   const pool = pob.slice(0, N_IA);
 
   // ===== FUNDING PRE-SELECT (re-rankeo; SIN llamadas MCP extra) ==============================
