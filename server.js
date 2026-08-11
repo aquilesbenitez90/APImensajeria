@@ -3974,6 +3974,88 @@ async function _pdfDePrueba(nombre){
   return Buffer.from(await doc.save()).toString('base64');
 }
 
+// =================== JUEZ COMERCIAL (valor de los leads, no veracidad) ===================
+// El juez de 8 criterios valida VERACIDAD (no inventar); nadie validaba VALOR COMERCIAL ("¿esta empresa
+// compraría de verdad?"). Caso real McCoy: 3 reportes seguidos con leads verídicos pero comercialmente
+// muertos (peer tecnológico, gigante fuera de rango, señal presupuesta), y el prospecto que audita y avisa
+// es la EXCEPCIÓN: el caso normal es que un lead malo no conteste más y nunca sepamos por qué. Por eso la
+// calidad tiene que estar garantizada ANTES de enviar, sin depender de feedback: este juez es el reemplazo
+// productizado del ojo humano que tenía el skill original (Mario miraba cada PDF antes de mandar).
+// Política: NO_COMPRA → se veta la empresa del pool y se re-elige; sin reemplazo digno → el reporte NO sale
+// (fail-closed: mejor no mandar que quemar al cliente). DUDOSA → pasa con log (no bloquea). Error de
+// infraestructura del juez → fail-open con log fuerte (un bug del juez nuevo no puede tumbar el producto).
+function _promptJuezComercial(){ return `# IBT GTM — Juez COMERCIAL (fit de negocio de las cuentas)
+Sos un auditor de ventas B2B. Otro juez ya validó la VERACIDAD del reporte (datos reales, sin inventos); vos juzgás UNA sola cosa: si cada cuenta elegida es un COMPRADOR REALISTA del cliente. Un lead verídico pero que no compraría es un lead MALO: el prospecto que lo recibe no avisa, simplemente deja de contestar.
+
+Por cada cuenta, preguntate EN ORDEN:
+1. PAR / PROVEEDOR: ¿esta empresa HACE o VENDE lo mismo que el cliente, o resuelve esa necesidad puertas adentro con equipo propio? (ej. una consultora IT para una consultora SAP) → NO_COMPRA.
+2. GIGANTE FUERA DE RANGO: ¿es un grupo varias veces más grande que el techo del ICP, con proveedores enterprise establecidos, al que este cliente no le cierra una venta en un ciclo normal? → NO_COMPRA.
+3. FIT DE NECESIDAD: ¿el tipo de empresa realmente usa o compra lo que vende el cliente? Si es muy improbable que necesite el producto y el ángulo lo presupone sin evidencia → DUDOSA (o NO_COMPRA si es claramente absurdo).
+4. DECISOR: ¿el cargo firma o impulsa ESTA compra? Cargo de otra área sin poder de compra → DUDOSA.
+Las verticales que el CLIENTE declara como foco son válidas (no castigues una cuenta solo por pertenecer a una vertical del ICP). NO_COMPRA es para los casos CLAROS (par, gigante, no-comprador evidente); ante la duda razonable usá DUDOSA, que no bloquea. Sé estricto con lo claro y honesto con lo dudoso.
+
+## Output — SOLO JSON (sin texto alrededor, sin markdown)
+{"cards":[{"empresa":"<nombre EXACTO de la cuenta tal como te la paso>","veredicto":"COMPRA|DUDOSA|NO_COMPRA","motivo":"1 oración concreta"}]}
+Una entrada por cuenta, mismas empresas que te paso, mismo orden.`; }
+
+async function runJuezComercial({ cliente, plan, data }){
+  _setStage('judge');
+  const icp = (plan && plan._plan) || {};
+  const grid = Array.isArray(plan.icp) ? plan.icp.map(x => `${x.title}: ${x.desc}`).join(' | ') : '';
+  const cards = (data.cards || []).filter(c => c && c.empresa);
+  if(!cards.length) return null;
+  const lineas = cards.map((c, i) => `${i+1}. ${c.empresa} — ${c.cargo || '?'} (${c.nombre || '?'})${c.headcount ? ` ~${c.headcount} empleados` : ''}. Ángulo: ${String(c.angulo || '').slice(0, 260)}`).join('\n');
+  const msg = `CLIENTE (quien envía el reporte): ${cliente.empresa}${cliente.headcount ? ` (~${cliente.headcount} empleados)` : ''}.${cliente.descripcion ? ` Qué hace (su propia página de LinkedIn): «${String(cliente.descripcion).slice(0, 400)}»` : ''}
+ICP del reporte: ${grid}
+Comprador ideal (test de inclusión/exclusión del PLAN): ${icp.comprador_ideal || '(no declarado)'}
+Tamaño objetivo: ${icp.tamano_min || '?'} a ${icp.tamano_max || 'sin techo'} empleados. Rubros excluidos: ${(_verticalesExcluir(plan) || []).join(', ') || '(ninguno)'}
+
+CUENTAS ELEGIDAS:
+${lineas}
+
+Devolvé SOLO el JSON del veredicto.`;
+  for(let intento = 1; intento <= 2; intento++){
+    try{
+      const res = await callClaude({ model: MODEL_JUDGE, system: _promptJuezComercial(), messages: [{ role: 'user', content: msg }], maxTokens: 1500, temperature: 0 });
+      const txt = _textoJSON(res.content);
+      const m = String(txt || '').match(/\{[\s\S]*\}/);
+      const j = JSON.parse(m ? m[0] : txt);
+      if(j && Array.isArray(j.cards)) return j;
+      throw new Error('JSON sin campo cards');
+    }catch(e){
+      console.warn(`[JUEZ-COM] intento ${intento}/2 no parseó (${e.message})${intento < 2 ? ', reintento' : ' → FAIL-OPEN (no bloqueo el reporte, pero revisar)'}.`);
+    }
+  }
+  return null;
+}
+
+// Aplica el juez comercial con reemplazo: NO_COMPRA → veta la empresa del pool + re-SELECT con fixes;
+// si tras JUEZ_COM_TRIES sigue habiendo NO_COMPRA (o no queda pool para reemplazar), LANZA (fail-closed,
+// el caller decide cómo reportarlo). Devuelve { data } (posiblemente re-seleccionada). Compartida por
+// procesar() y /generar-reporte (gotcha de la lógica duplicada: UNA sola implementación).
+async function aplicarJuezComercial({ cliente, plan, pool, senales, data }){
+  if(String(process.env.JUEZ_COMERCIAL || 'on').toLowerCase() === 'off') return { data };
+  const TRIES = Math.max(1, parseInt(process.env.JUEZ_COM_TRIES || '2', 10));
+  let _pool = pool;
+  for(let t = 1; t <= TRIES; t++){
+    const jc = await runJuezComercial({ cliente, plan, data });
+    if(!jc) return { data };   // fail-open: el juez no respondió parseable; ya quedó logueado
+    const porVeredicto = (v) => jc.cards.filter(c => String(c.veredicto || '').toUpperCase() === v);
+    for(const d of porVeredicto('DUDOSA')) console.warn(`[JUEZ-COM] DUDOSA (pasa, no bloquea): ${d.empresa} — ${d.motivo}`);
+    const malas = porVeredicto('NO_COMPRA');
+    if(!malas.length){ console.log(`[JUEZ-COM] OK${t > 1 ? ` tras ${t - 1} reemplazo(s)` : ''}: ${jc.cards.length} cuenta(s) con valor comercial.`); return { data }; }
+    for(const m of malas) console.warn(`[JUEZ-COM] NO_COMPRA: ${m.empresa} — ${m.motivo}`);
+    const veto = new Set(malas.map(m => _empKey(m.empresa)).filter(Boolean));
+    _pool = _pool.filter(c => !veto.has(_empKey(c.empresa || '')));
+    if(t >= TRIES || _pool.length < NUM_CUENTAS){
+      throw new Error(`El juez comercial rechazó cuentas sin valor de compra y no hay reemplazo digno en el pool: ${malas.map(m => `${m.empresa} (${m.motivo})`).join(' | ')}. Mejor sin reporte que con leads que no compran.`);
+    }
+    const fixes = malas.map(m => `La cuenta "${m.empresa}" NO es un comprador realista del cliente: ${m.motivo}. NO la elijas de nuevo; reemplazala por OTRA empresa del pool que sí compraría.`);
+    data = await seleccionarConRetry({ cliente, plan, pool: _pool, fixes, senales });
+  }
+  return { data };
+}
+
 async function procesar(jobId, { email, dominio, empresa, nombre, profileId, destinatario, evalMode, idioma, test }) {
   return _statsALS.run(_nuevoStats(), async () => {
   const _st0 = _statsALS.getStore(); if (_st0) _st0.idiomaDoc = _idiomaCode(idioma);   // idioma del DOCUMENTO (manual desde la landing)
@@ -4020,6 +4102,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, des
     const { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) throw new Error(_msgSourcingVacio(plan));
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
+    ({ data } = await aplicarJuezComercial({ cliente, plan, pool, senales, data }));   // valor comercial ANTES de gastar en señales
     await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
     await enriquecerSenalesEmpresa(data);     // señales REALES de EMPRESA en las 3 cards finales (id-cross MCP)
 
@@ -4341,6 +4424,7 @@ app.post('/generar-reporte', async (req, res) => {
     const { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) return res.status(422).json({ error: _msgSourcingVacio(plan) });
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
+    ({ data } = await aplicarJuezComercial({ cliente, plan, pool, senales, data }));   // valor comercial ANTES de gastar en señales
     await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
     await enriquecerSenalesEmpresa(data);     // señales REALES de EMPRESA en las 3 cards finales (id-cross MCP)
 
