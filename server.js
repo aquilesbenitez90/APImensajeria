@@ -3557,8 +3557,18 @@ function _reconciliarGeoVisible(valor, cardPaises){
   const v = String(valor||'').trim();
   if(!v) return null;
   const paises = _paisesDeTexto(v);
-  if(paises.length < 2) return null;                       // 0/1 país → nada que reducir
   if(!cardPaises || !cardPaises.size) return null;         // sin país de cards → no tocar
+  // CASO DESTINATARIO (Kais: cinta "España (expansión LATAM)" con las 3 cards en Argentina): si la cinta
+  // nombra país(es) y NINGUNO coincide con los de las cards, la cinta describe el mercado equivocado
+  // entero → se reemplaza por el/los país(es) reales de las cards (la celda GEOGRAFÍA y el puente
+  // "Encontramos varios decisores en X" beben de acá; dejar "España" con cards argentinas contradice el título).
+  if(paises.length >= 1 && paises.every(p => !cardPaises.has(p))){
+    // cardPaises viene NORMALIZADO ("argentina"); para publicar usamos el nombre display de _ISO_PAIS
+    // ("Argentina", "España") y si no está ahí, Title Case como degradación digna.
+    const _display = (nrm) => Object.values(_ISO_PAIS).find(v => _norm(v) === nrm) || String(nrm).replace(/\b\p{L}/gu, c => c.toUpperCase());
+    return [...cardPaises].map(_display).join(' · ');
+  }
+  if(paises.length < 2) return null;                       // 1 país que SÍ coincide → nada que reducir
   if(paises.every(p => cardPaises.has(p))) return null;    // la cinta ya coincide con las cards
   const tokens = v.split(/\s*·\s*|\s*,\s*|\s+y\s+|\s+e\s+|\s+and\s+/i).map(t=>t.trim()).filter(Boolean);
   const quedan = tokens.filter(t => { const ps=_paisesDeTexto(t); return ps.length && ps.some(p=>cardPaises.has(p)); });
