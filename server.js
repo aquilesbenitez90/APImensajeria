@@ -842,6 +842,7 @@ Criterios:
 4. **VERACIDAD de los datos de la empresa** (CRÍTICO):
    FAIL si el overview tiene datos que parecen inventados o demasiado específicos sin verificación (año de fundación, stage de funding, número de productos/clientes, métricas redondas sin fuente, tiempos de respuesta). Si todo el overview suena a "marketing copy genérico" → FAIL.
    SEÑALES DE COMPRA (la lista "Señales" bajo cada cuenta, si aparece): vienen CON su fuente y fecha citadas, así que NO las marques como inventadas por ser específicas (la fuente citada ES el respaldo). SOLO marcá FAIL acá si una señal NO muestra ninguna fuente, o si la cifra es absurda o imposible para esa empresa.
+   TAMAÑO DE EMPRESA EN LOS ÁNGULOS ("cerca de 740 personas", "alrededor de 240", "~N empleados"): el headcount de cada cuenta es un DATO REAL de LinkedIn que el sistema le pasa a la redacción (no lo generó la IA): NO lo marques como inventado ni exijas fuente citada para él. SOLO marcá FAIL si el número es absurdo para esa empresa o si contradice otro dato del propio reporte.
 
 5. **Coherencia interna + GEOGRAFÍA + VERTICAL** (CRÍTICO) — el reporte trata sobre la empresa correcta y las cuentas hacen sentido para ese ICP.
    FAIL si una cuenta target es la misma empresa mencionada como proof point/cliente del producto en el overview.
@@ -4060,7 +4061,7 @@ Devolvé SOLO el JSON del veredicto.`;
 // Devuelve { data } (posiblemente re-seleccionada). Compartida por procesar() y /generar-reporte
 // (gotcha de la lógica duplicada: UNA sola implementación).
 async function aplicarJuezComercial({ cliente, plan, pool, senales, data }){
-  if(String(process.env.JUEZ_COMERCIAL || 'on').toLowerCase() === 'off') return { data };
+  if(String(process.env.JUEZ_COMERCIAL || 'on').toLowerCase() === 'off') return { data, pool, senales };
   const TRIES = Math.max(1, parseInt(process.env.JUEZ_COM_TRIES || '2', 10));
   let _pool = pool, _senales = senales, rebuscado = false;
   const vetadasKeys = new Set();        // _empKey de cada empresa vetada (filtro del pool)
@@ -4068,11 +4069,11 @@ async function aplicarJuezComercial({ cliente, plan, pool, senales, data }){
   let ultimasMalas = [];
   for(let evaluacion = 1; evaluacion <= TRIES + 1; evaluacion++){   // +1: la evaluación extra post-rebusca
     const jc = await runJuezComercial({ cliente, plan, data });
-    if(!jc) return { data };   // fail-open: el juez no respondió parseable; ya quedó logueado
+    if(!jc) return { data, pool: _pool, senales: _senales };   // fail-open: el juez no respondió parseable; ya quedó logueado
     const porVeredicto = (v) => jc.cards.filter(c => String(c.veredicto || '').toUpperCase() === v);
     for(const d of porVeredicto('DUDOSA')) console.warn(`[JUEZ-COM] DUDOSA (pasa, no bloquea): ${d.empresa} — ${d.motivo}`);
     const malas = porVeredicto('NO_COMPRA');
-    if(!malas.length){ console.log(`[JUEZ-COM] OK${evaluacion > 1 ? ` tras ${evaluacion - 1} reemplazo(s)${rebuscado ? ' + re-sourcing' : ''}` : ''}: ${jc.cards.length} cuenta(s) con valor comercial.`); return { data }; }
+    if(!malas.length){ console.log(`[JUEZ-COM] OK${evaluacion > 1 ? ` tras ${evaluacion - 1} reemplazo(s)${rebuscado ? ' + re-sourcing' : ''}` : ''}: ${jc.cards.length} cuenta(s) con valor comercial.`); return { data, pool: _pool, senales: _senales }; }
     ultimasMalas = malas;
     for(const m of malas){
       console.warn(`[JUEZ-COM] NO_COMPRA: ${m.empresa} — ${m.motivo}`);
@@ -4109,7 +4110,7 @@ async function aplicarJuezComercial({ cliente, plan, pool, senales, data }){
 
     throw new Error(`El juez comercial rechazó cuentas sin valor de compra y no quedó reemplazo digno ni rebuscando: ${ultimasMalas.map(m => `${m.empresa} (${m.motivo})`).join(' | ')}. Mejor sin reporte que con leads que no compran.`);
   }
-  return { data };
+  return { data, pool: _pool, senales: _senales };
 }
 
 async function procesar(jobId, { email, dominio, empresa, nombre, profileId, destinatario, evalMode, idioma, test }) {
@@ -4155,10 +4156,13 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, des
 
     const fechaHoy = _fechaHoy();
     const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre: nombre || (dest && dest.nombre) || '', cliente, fechaHoy, dest });
-    const { pool, senales } = await sourceConRetry(plan, cliente);
+    let { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) throw new Error(_msgSourcingVacio(plan));
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
-    ({ data } = await aplicarJuezComercial({ cliente, plan, pool, senales, data }));   // valor comercial ANTES de gastar en señales
+    // El juez comercial puede vetar empresas y hasta REBUSCAR el pool entero: de acá en adelante (ronda de
+    // fixes del juez de veracidad incluida) SIEMPRE se usa el pool depurado que devuelve, no el original
+    // (bug real: el fix re-eligió a COFIDES, ya vetada, desde el pool viejo).
+    ({ data, pool, senales } = await aplicarJuezComercial({ cliente, plan, pool, senales, data }));
     await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
     await enriquecerSenalesEmpresa(data);     // señales REALES de EMPRESA en las 3 cards finales (id-cross MCP)
 
@@ -4477,10 +4481,11 @@ app.post('/generar-reporte', async (req, res) => {
     const dest = await resolverDestinatario({ perfil: destinatario, profileId });   // mismo scoping que procesar()
     const fechaHoy = _fechaHoy();
     const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre: nombre || (dest && dest.nombre) || '', cliente, fechaHoy, dest });
-    const { pool, senales } = await sourceConRetry(plan, cliente);
+    let { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) return res.status(422).json({ error: _msgSourcingVacio(plan) });
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
-    ({ data } = await aplicarJuezComercial({ cliente, plan, pool, senales, data }));   // valor comercial ANTES de gastar en señales
+    // Mismo contrato que procesar(): el pool depurado del juez comercial alimenta todo lo posterior.
+    ({ data, pool, senales } = await aplicarJuezComercial({ cliente, plan, pool, senales, data }));
     await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
     await enriquecerSenalesEmpresa(data);     // señales REALES de EMPRESA en las 3 cards finales (id-cross MCP)
 
