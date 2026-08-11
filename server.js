@@ -53,8 +53,14 @@ process.on('unhandledRejection', (e) => {
 // ---------------------------------------------------------------------------
 // Configuración
 // ---------------------------------------------------------------------------
-const MODEL_GEN = 'claude-sonnet-4-6';
-const MODEL_JUDGE = 'claude-sonnet-4-6';
+const MODEL_GEN = process.env.MODEL_GEN || 'claude-sonnet-4-6';
+// JUEZ EN OTRO MODELO QUE EL GENERADOR (investigación de LLM-as-judge): un juez del MISMO modelo que
+// escribió el texto sufre self-preference bias (favorece su propio estilo; no se arregla con prompt) y
+// N votos del mismo modelo son votos CORRELACIONADOS (~1 voto efectivo; visto en vivo: el mismo reporte
+// salió 0/8 y 8/8 en corridas distintas). Opus 5 ($5/$25 vs $3/$15 de Sonnet) juzga mejor y descorrelaciona.
+// OJO API: Opus 5 rechaza `temperature` (callClaude la filtra por modelo) y piensa por default (el
+// thinking consume max_tokens: los llamados del juez llevan presupuesto holgado).
+const MODEL_JUDGE = process.env.MODEL_JUDGE || 'claude-opus-5';
 // SEÑALES DE COMPRA por cuenta (opcional, reversible). SIGNALS_MODE=on las activa (env en el copy de Railway).
 // La EXTRACCIÓN usa Sonnet (mejor grounding/instrucción que Haiku para no inventar fecha/fuente/URL). Off por
 // default: cero costo/latencia/riesgo hasta que se prenda. Máx 2 señales por card (super resumidas, con link).
@@ -86,7 +92,12 @@ const TEMP_JUDGE = _tempEnv(process.env.TEMP_JUDGE, 0);
 // (4 veracidad, 6 personalización). JUDGE_VOTES=1 reproduce el comportamiento histórico
 // (1 voto a TEMP_JUDGE). Con N>1, los votos corren a TEMP_JUDGE_VOTE>0 para ser MUESTRAS
 // independientes (a T=0 los N votos serían idénticos y la agregación no aportaría nada).
-const JUDGE_VOTES = Math.max(1, parseInt(process.env.JUDGE_VOTES || '3', 10));
+// DEFAULT 1 (antes 3): 3 votos del mismo modelo con el mismo prompt son votos correlacionados (paper
+// "Nine Judges, Two Effective Votes": un panel de 9 modelos de 7 familias ≈ 2 votos efectivos), o sea
+// pagábamos 3x por ~1 voto de señal + lotería de varianza. La diversidad real ahora viene de DOS jueces
+// de LENTE distinta (veracidad + juez comercial) en modelo distinto del generador. JUDGE_VOTES=3 sigue
+// disponible por env si se quiere el comportamiento anterior.
+const JUDGE_VOTES = Math.max(1, parseInt(process.env.JUDGE_VOTES || '1', 10));
 const TEMP_JUDGE_VOTE = _tempEnv(process.env.TEMP_JUDGE_VOTE, 0.4);
 
 // Cantidad de cuentas del reporte. Configurable por env.
@@ -365,7 +376,13 @@ function _idiomaHookDeLoc(loc){
 // Tarifas Anthropic por millón de tokens (input/output/cache_write/cache_read) + fee de web_search ($10/1000 req).
 const RATES_SONNET = { in: 3, out: 15, cw: 3.75, cr: 0.30, ws: 10000 };
 const RATES_HAIKU  = { in: 1, out: 5,  cw: 1.25, cr: 0.10, ws: 10000 };
-function _ratesDe(model){ return /haiku/i.test(String(model || '')) ? RATES_HAIKU : RATES_SONNET; }
+const RATES_OPUS   = { in: 5, out: 25, cw: 6.25, cr: 0.50, ws: 10000 };   // Opus 5 / 4.8 (el juez corre acá)
+function _ratesDe(model){
+  const m = String(model || '');
+  if (/haiku/i.test(m)) return RATES_HAIKU;
+  if (/opus|fable|mythos/i.test(m)) return RATES_OPUS;
+  return RATES_SONNET;
+}
 // Tarifa de cada etapa según el modelo que la corre (signals puede ser Haiku → no sobre-costear).
 function _ratesEtapa(etapa){ return _ratesDe(etapa === 'signals' ? MODEL_SIGNALS : etapa === 'gen' ? MODEL_GEN : MODEL_JUDGE); }
 // Costo Anthropic de un bucket de tokens, a la tarifa indicada (default Sonnet).
@@ -864,7 +881,9 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
     messages
   };
   // Solo se setea si se pasa explícitamente; las llamadas que no la pasan quedan en el default del modelo.
-  if (typeof temperature === 'number') body.temperature = temperature;
+  // GUARD POR MODELO: Opus 4.7+/5, Sonnet 5 y Fable RECHAZAN temperature con 400. En esos modelos se
+  // omite (el juez en Opus 5 pierde la varianza por temperatura, que con JUDGE_VOTES=1 ya no se usa).
+  if (typeof temperature === 'number' && !/opus-5|opus-4-7|opus-4-8|sonnet-5|fable|mythos/i.test(String(model || ''))) body.temperature = temperature;
 
   if (tools.length > 0) {
     const cachedTools = tools.map((t, i) => (i === tools.length - 1) ? { ...t, cache_control: { type: 'ephemeral' } } : t);
@@ -973,7 +992,7 @@ async function _judgeVote(htmlLite, pageCount, temperature, voteIdx) {
         role: 'user',
         content: `Cuentas esperadas: ${NUM_CUENTAS}\nPáginas esperadas: ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}\nPáginas del PDF renderizado: ${pageCount}\n\nHTML del reporte:\n${htmlLite}`
       }],
-      maxTokens: 6000,
+      maxTokens: 12000,   // Opus 5 piensa por default y el thinking consume max_tokens: aire para thinking + JSON del veredicto
       temperature
     });
     const raw = data.content.find(b => b.type === 'text')?.text || '';
@@ -4016,7 +4035,7 @@ ${lineas}
 Devolvé SOLO el JSON del veredicto.`;
   for(let intento = 1; intento <= 2; intento++){
     try{
-      const res = await callClaude({ model: MODEL_JUDGE, system: _promptJuezComercial(), messages: [{ role: 'user', content: msg }], maxTokens: 1500, temperature: 0 });
+      const res = await callClaude({ model: MODEL_JUDGE, system: _promptJuezComercial(), messages: [{ role: 'user', content: msg }], maxTokens: 8000, temperature: 0 });   // temperature se filtra sola en Opus 5; maxTokens con aire para el thinking default
       const txt = _textoJSON(res.content);
       const m = String(txt || '').match(/\{[\s\S]*\}/);
       const j = JSON.parse(m ? m[0] : txt);

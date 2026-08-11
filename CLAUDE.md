@@ -50,7 +50,7 @@ Tuning (con default): `NUM_CUENTAS=3`, `EXPECTED_PAGES=0` (0 = el juez NO valida
 
 ## Modelos
 
-`MODEL_GEN` y `MODEL_JUDGE` = `claude-sonnet-4-6` (ver server.js:40-41). Caching de prompts activado (system + última tool con `cache_control: ephemeral`). Costeo en `costoDe()` con tarifas de Sonnet.
+`MODEL_GEN` = `claude-sonnet-4-6` (generador). `MODEL_JUDGE` = `claude-opus-5` (jueces: veracidad + comercial) — modelo DISTINTO del generador a propósito (self-preference bias; votos del mismo modelo son correlacionados). Ambos overrideables por env. `JUDGE_VOTES=1` default (la diversidad viene de dos jueces de lente distinta, no de N copias). OJO: Opus 5 rechaza `temperature` (callClaude la filtra por modelo) y piensa por default (los llamados del juez llevan maxTokens holgado). Caching de prompts activado. Costeo en `costoDe()` con tarifas por modelo (`_ratesDe`: Sonnet/Haiku/Opus).
 
 ## Schema del objeto `data` (lo que devuelve el pipeline y consume render.js)
 
