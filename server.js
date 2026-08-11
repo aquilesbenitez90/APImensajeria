@@ -984,7 +984,7 @@ function _textoJSON(content){
 
 // Un único voto del juez. Devuelve siempre un veredicto normalizado (APROBADO solo 8/8);
 // fail-closed individual: si no parsea o es incoherente → RECHAZADO (nunca lo descartamos).
-async function _judgeVote(htmlLite, pageCount, temperature, voteIdx) {
+async function _judgeVote(htmlLite, pageCount, temperature, voteIdx, cuentasEsperadas = NUM_CUENTAS) {
   try {
     const data = await callClaude({
       model: MODEL_JUDGE,
@@ -1020,9 +1020,9 @@ async function _judgeVote(htmlLite, pageCount, temperature, voteIdx) {
   }
 }
 
-async function runJudge(html, pageCount) {
+async function runJudge(html, pageCount, cuentasEsperadas = NUM_CUENTAS) {
   _setStage('judge');
-  console.log(`[JUDGE] Evaluando reporte (${pageCount} páginas, esperadas ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}, cuentas ${NUM_CUENTAS}, votos ${JUDGE_VOTES})...`);
+  console.log(`[JUDGE] Evaluando reporte (${pageCount} páginas, esperadas ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}, cuentas ${cuentasEsperadas}, votos ${JUDGE_VOTES})...`);
   const htmlLite = String(html || '')
     .replace(/src="data:image\/[a-z]+;base64,[A-Za-z0-9+/=]+"/gi, 'src="[LOGO]"')
     .replace(/<style>[\s\S]*?<\/style>/i, '<style>/* css omitido para el juez */</style>');
@@ -1031,7 +1031,7 @@ async function runJudge(html, pageCount) {
   // N>1 → N votos INDEPENDIENTES a TEMP_JUDGE_VOTE (>0), en PARALELO para no sumar latencia.
   const tempVoto = JUDGE_VOTES === 1 ? TEMP_JUDGE : TEMP_JUDGE_VOTE;
   const votos = await Promise.all(
-    Array.from({ length: JUDGE_VOTES }, (_, i) => _judgeVote(htmlLite, pageCount, tempVoto, i + 1))
+    Array.from({ length: JUDGE_VOTES }, (_, i) => _judgeVote(htmlLite, pageCount, tempVoto, i + 1, cuentasEsperadas))
   );
 
   // Agregación CONSERVADORA / fail-closed: APROBADO final SOLO si la MAYORÍA de los votos
@@ -4051,6 +4051,25 @@ Devolvé SOLO el JSON del veredicto.`;
   return null;
 }
 
+// Cuando el reporte sale a propósito con MENOS cuentas que NUM_CUENTAS (mercado sin 3ra comprable), los
+// conteos de página 1 se escribieron para NUM_CUENTAS y hay que reconciliarlos: h1_post ("3 clientes
+// potenciales..."), lead ("te compartimos 3...") y el stat "Cuentas priorizadas". Reemplaza SOLO la primera
+// aparición del número esperado en cada superficie (los textos del PLAN nombran ese número una vez). El
+// puente "te mostramos N" del render ya es dinámico (usa cards.length). Muta data; devuelve true si tocó algo.
+function _reconciliarConteoCuentas(data, nEsperado){
+  const n = Array.isArray(data.cards) ? data.cards.filter(c => c && c.empresa).length : 0;
+  if(!n || n >= nEsperado) return false;
+  const re = new RegExp(`\\b${nEsperado}\\b`);
+  let toco = false;
+  if(typeof data.h1_post === 'string' && re.test(data.h1_post)){ data.h1_post = data.h1_post.replace(re, String(n)); toco = true; }
+  if(typeof data.lead === 'string' && re.test(data.lead)){ data.lead = data.lead.replace(re, String(n)); toco = true; }
+  if(Array.isArray(data.stats)) for(const st of data.stats){
+    if(st && /cuenta|account|conta/i.test(String(st.label || '')) && String(st.num).trim() === String(nEsperado)){ st.num = String(n); toco = true; }
+  }
+  if(toco) console.warn(`[CARDS] reporte reducido a ${n}/${nEsperado} cuentas: conteos de página 1 reconciliados (h1/lead/stat).`);
+  return toco;
+}
+
 // Aplica el juez comercial con reemplazo y RE-SOURCING (el lazo que el skill original hacía a mano):
 //   NO_COMPRA → veta la empresa del pool + re-SELECT con fixes.
 //   Pool sin reemplazo digno (o intentos agotados) → UNA rebusca completa: las empresas vetadas entran a
@@ -4109,7 +4128,21 @@ async function aplicarJuezComercial({ cliente, plan, pool, senales, data }){
       }catch(e){ console.warn(`[JUEZ-COM] re-sourcing falló (${e.message}); cierro fail-closed.`); }
     }
 
-    throw new Error(`El juez comercial rechazó cuentas sin valor de compra y no quedó reemplazo digno ni rebuscando: ${ultimasMalas.map(m => `${m.empresa} (${m.motivo})`).join(' | ')}. Mejor sin reporte que con leads que no compran.`);
+    // ÚLTIMO RECURSO antes de no emitir (política del negocio: en mercados jodidos, MEJOR 2 cards
+    // excelentes que 0 reporte, y muchísimo mejor que 3 con relleno): si al sacar las vetadas quedan al
+    // menos JUEZ_COM_MIN cards que el juez SÍ aprobó, el reporte sale REDUCIDO. _cuentasOk le avisa al
+    // juez de veracidad y a la guarda de integridad que la reducción fue deliberada, y los conteos de
+    // página 1 se reconcilian. NOTA: si después la ronda de fixes del juez de veracidad re-elige, puede
+    // volver a 3 desde el pool depurado (sin vetadas) — eso es un upgrade, no un bug.
+    const MIN_JC = Math.max(1, parseInt(process.env.JUEZ_COM_MIN || '2', 10));
+    const buenas = (data.cards || []).filter(c => c && c.empresa && !vetadasKeys.has(_empKey(c.empresa)));
+    if(buenas.length >= MIN_JC){
+      console.warn(`[JUEZ-COM] sin reemplazo comprable para completar ${NUM_CUENTAS}: emito el reporte REDUCIDO con ${buenas.length} card(s) aprobadas (descarto ${(data.cards || []).length - buenas.length} vetada(s)).`);
+      data = { ...data, cards: buenas, _cuentasOk: buenas.length };
+      _reconciliarConteoCuentas(data, NUM_CUENTAS);
+      return { data, pool: _pool, senales: _senales };
+    }
+    throw new Error(`El juez comercial rechazó cuentas sin valor de compra y no quedó reemplazo digno ni rebuscando (ni siquiera ${MIN_JC} cards buenas): ${ultimasMalas.map(m => `${m.empresa} (${m.motivo})`).join(' | ')}. Mejor sin reporte que con leads que no compran.`);
   }
   return { data, pool: _pool, senales: _senales };
 }
@@ -4171,7 +4204,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, des
     if (!cleanHtml) throw new Error('No se pudo renderizar el reporte');
 
     // El juez evalúa el HTML; el PDF se genera una sola vez al final y SOLO si queda apto.
-    let judgeResult = await runJudge(cleanHtml, null);
+    let judgeResult = await runJudge(cleanHtml, null, (data && data._cuentasOk) || NUM_CUENTAS);
 
     // Si el juez rechaza, reintenta re-seleccionando con los fixes. NO se renderiza PDF en
     // el medio: solo HTML + juez. Configurable con MAX_FIX_ITERS (default 1).
@@ -4195,14 +4228,16 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, des
         await enriquecerSenalesEmpresa(data);     // re-chequea señales de EMPRESA para las cuentas del fix
         cleanHtml = limpiarHtml(renderReport(data));
         console.log(`[Job ${jobId}] Re-validando con el juez (re-render incluye normalización de países)...`);
-        judgeResult = await runJudge(cleanHtml, null);
+        judgeResult = await runJudge(cleanHtml, null, (data && data._cuentasOk) || NUM_CUENTAS);
       } catch (e) {
         console.warn(`[FIX] Falló, conservo el reporte previo:`, e.message);
         break;
       }
     }
 
-    const MIN_CARDS_OK = parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10);
+    // _cuentasOk: seteado SOLO cuando el juez comercial redujo el reporte a propósito (mercado sin 3ra
+    // cuenta comprable): el mínimo de integridad acompaña esa decisión en vez de rechazar el reporte reducido.
+    const MIN_CARDS_OK = Math.min(parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10), (data && data._cuentasOk) || Infinity);
     const cardsValidas = _cuentaCompletas(data);
     if (cardsValidas < MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO') {
       console.warn(`[INTEGRIDAD] Override: juez dijo APROBADO con ${cardsValidas}/${MIN_CARDS_OK} cards completas → RECHAZADO.`);
@@ -4494,7 +4529,7 @@ app.post('/generar-reporte', async (req, res) => {
     if (!cleanHtml) return res.status(500).json({ error: 'No se pudo renderizar el reporte' });
 
     // El juez evalúa el HTML; el PDF se genera abajo y solo si quedó apto.
-    let judgeResult = await runJudge(cleanHtml, null);
+    let judgeResult = await runJudge(cleanHtml, null, (data && data._cuentasOk) || NUM_CUENTAS);
 
     // Si el juez rechaza, reintenta re-seleccionando con los fixes (sin renderizar PDF en el medio).
     const MAX_FIX = parseInt(process.env.MAX_FIX_ITERS || '1', 10);
@@ -4513,14 +4548,16 @@ app.post('/generar-reporte', async (req, res) => {
         await enriquecerSenales(data, cliente);   // re-busca señales para las cuentas nuevas del fix
         await enriquecerSenalesEmpresa(data);     // re-chequea señales de EMPRESA para las cuentas del fix
         cleanHtml = limpiarHtml(renderReport(data));
-        judgeResult = await runJudge(cleanHtml, null);
+        judgeResult = await runJudge(cleanHtml, null, (data && data._cuentasOk) || NUM_CUENTAS);
       } catch (e) {
         console.warn(`[FIX] Falló, conservo el reporte previo:`, e.message);
         break;
       }
     }
 
-    const MIN_CARDS_OK = parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10);
+    // _cuentasOk: seteado SOLO cuando el juez comercial redujo el reporte a propósito (mercado sin 3ra
+    // cuenta comprable): el mínimo de integridad acompaña esa decisión en vez de rechazar el reporte reducido.
+    const MIN_CARDS_OK = Math.min(parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10), (data && data._cuentasOk) || Infinity);
     const cardsValidas = _cuentaCompletas(data);
     if (cardsValidas < MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO') {
       console.warn(`[INTEGRIDAD] Override: juez dijo APROBADO con ${cardsValidas}/${MIN_CARDS_OK} cards completas → RECHAZADO.`);
@@ -4740,5 +4777,5 @@ module.exports = {
   _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS,
   _reconciliarTitulo, _reconciliarGeoVisible, _geoIncoherente, callMCP, resolverCliente, _nuevoStats,
   _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN,
-  _sedeDeLookup, _corregirGeoSede, _parseDestinatario, resolverDestinatario
+  _sedeDeLookup, _corregirGeoSede, _parseDestinatario, resolverDestinatario, _reconciliarConteoCuentas
 };
