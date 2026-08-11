@@ -17,3 +17,4 @@ smoke.js
 
 # Secretos (NUNCA commitear)
 .env
+banco-leads.jsonl

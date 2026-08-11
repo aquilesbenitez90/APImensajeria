@@ -4051,6 +4051,99 @@ Devolvé SOLO el JSON del veredicto.`;
   return null;
 }
 
+// =================== BANCO DE LEADS POR CLIENTE (memoria entre corridas) ===================
+// Un vendedor humano acumula sus mejores hallazgos en una libreta; el pipeline los olvidaba al terminar
+// cada job y cada regeneración tiraba los dados de nuevo (las mejores cards de McCoy quedaron repartidas
+// en 4 corridas distintas: Sesderma, Talgo, Cantabria Labs, Bella Aurora). El banco persiste POR CLIENTE
+// cada card que el juez comercial APROBÓ (con su veredicto COMPRA/DUDOSA) y cada empresa que VETÓ. Usos:
+//   1. SUPRESIÓN: las vetadas históricas entran a icp.competidores ANTES del sourcing → una empresa
+//      rechazada no vuelve a aparecer para ese cliente (caso Ayesa/Nebrija repetidas al mismo prospecto).
+//   2. UPGRADE/COMPLETAR: una DUDOSA de hoy se reemplaza por una COMPRA histórica de otra corrida, y si
+//      faltan cuentas el banco completa: el reporte final es el TOP ACUMULADO, no la lotería de una pasada.
+// Persistencia: JSONL append-only (amigable a jobs concurrentes), mismo patrón y caveat que
+// resultados.jsonl: en Railway el filesystem es efímero por deploy; para histórico durable montar un
+// volumen y setear BANCO_PATH (ej. /data/banco-leads.jsonl). BANCO_LEADS=off lo apaga entero.
+const BANCO_PATH = process.env.BANCO_PATH || path.join(__dirname, 'banco-leads.jsonl');
+const BANCO_ON = String(process.env.BANCO_LEADS || 'on').toLowerCase() !== 'off';
+function _bancoKeyDe(cliente){ return _empKey((cliente && cliente.empresa) || '') || null; }
+function _bancoAppend(rec){
+  if(!BANCO_ON) return;
+  try{ fs.appendFileSync(BANCO_PATH, JSON.stringify(rec) + '\n'); }
+  catch(e){ console.warn('[BANCO] no se pudo escribir:', e.message); }
+}
+function _bancoLeer(clienteKey){
+  const out = { aprobadas: new Map(), vetadas: new Map() };   // empKey -> registro (reduce del JSONL)
+  if(!BANCO_ON || !clienteKey) return out;
+  try{
+    if(!fs.existsSync(BANCO_PATH)) return out;
+    for(const line of String(fs.readFileSync(BANCO_PATH, 'utf8')).split('\n')){
+      const t = line.trim(); if(!t) continue;
+      let r; try{ r = JSON.parse(t); }catch{ continue; }
+      if(r.clienteKey !== clienteKey) continue;
+      const k = _empKey(r.empresa || ''); if(!k) continue;
+      if(r.tipo === 'vetada'){ out.vetadas.set(k, r); out.aprobadas.delete(k); }      // un veto pisa aprobaciones previas
+      else if(r.tipo === 'aprobada' && !out.vetadas.has(k)) out.aprobadas.set(k, r);  // última aprobación gana
+    }
+  }catch(e){ console.warn('[BANCO] no se pudo leer:', e.message); }
+  return out;
+}
+function _bancoGuardarAprobadas(cliente, cards){
+  const ck = _bancoKeyDe(cliente); if(!ck || !Array.isArray(cards)) return;
+  let n = 0;
+  for(const c of cards){
+    if(!c || !c.empresa) continue;
+    _bancoAppend({ ts: Date.now(), clienteKey: ck, tipo: 'aprobada', veredicto: String(c._veredictoJC || 'COMPRA').toUpperCase(), empresa: c.empresa, card: c });
+    n++;
+  }
+  if(n) console.log(`[BANCO] ${n} card(s) aprobadas guardadas para "${(cliente && cliente.empresa) || '?'}".`);
+}
+function _bancoGuardarVetada(cliente, mala){
+  const ck = _bancoKeyDe(cliente); if(!ck || !mala || !mala.empresa) return;
+  _bancoAppend({ ts: Date.now(), clienteKey: ck, tipo: 'vetada', empresa: mala.empresa, motivo: mala.motivo || '' });
+}
+// SUPRESIÓN pre-sourcing: vetadas históricas → icp.competidores (el sourcing ya filtra por nombre en todas sus capas).
+function _bancoAplicarVetadas(plan, cliente){
+  const ck = _bancoKeyDe(cliente); if(!ck) return 0;
+  const vetadas = [..._bancoLeer(ck).vetadas.values()].map(r => String(r.empresa).trim()).filter(Boolean);
+  if(!vetadas.length) return 0;
+  const icp = (plan && plan._plan) || {};
+  icp.competidores = [ ...(Array.isArray(icp.competidores) ? icp.competidores : []), ...vetadas ];
+  console.log(`[BANCO] supresión: ${vetadas.length} empresa(s) vetadas en corridas previas van a competidores [${vetadas.join(', ')}].`);
+  return vetadas.length;
+}
+// UPGRADE/COMPLETAR post-juez: las cards del banco YA fueron aprobadas por el juez comercial en su corrida
+// (ángulo/hook incluidos), así que entran directo. Completa hasta nObjetivo y reemplaza DUDOSAs de hoy por
+// COMPRAs históricas. Muta data.cards; devuelve true si cambió algo.
+function _bancoMejorarCards(data, cliente, nObjetivo = NUM_CUENTAS){
+  const ck = _bancoKeyDe(cliente);
+  if(!BANCO_ON || !ck || !data || !Array.isArray(data.cards)) return false;
+  const banco = _bancoLeer(ck);
+  if(!banco.aprobadas.size) return false;
+  const rank = (r) => String(r.veredicto || '').toUpperCase() === 'COMPRA' ? 1 : 0;
+  const enUso = new Set(data.cards.filter(c => c && c.empresa).map(c => _empKey(c.empresa)));
+  const candidatas = [...banco.aprobadas.values()]
+    .filter(r => r.card && r.card.empresa && !enUso.has(_empKey(r.card.empresa)))
+    .sort((a, b) => (rank(b) - rank(a)) || ((b.ts || 0) - (a.ts || 0)));   // COMPRA primero, después más nuevas
+  if(!candidatas.length) return false;
+  let cambio = false;
+  while(data.cards.length < nObjetivo && candidatas.length){   // 1) COMPLETAR hasta el objetivo
+    const r = candidatas.shift();
+    console.log(`[BANCO] completo con card de corrida previa: ${r.card.empresa} (${r.veredicto}).`);
+    data.cards.push(r.card); enUso.add(_empKey(r.card.empresa)); cambio = true;
+  }
+  for(let i = data.cards.length - 1; i >= 0; i--){             // 2) UPGRADE: DUDOSA de hoy → COMPRA histórica
+    const c = data.cards[i];
+    if(String((c && c._veredictoJC) || 'COMPRA').toUpperCase() !== 'DUDOSA') continue;
+    const j = candidatas.findIndex(r => rank(r) === 1);
+    if(j < 0) break;
+    const r = candidatas.splice(j, 1)[0];
+    console.log(`[BANCO] UPGRADE: "${c.empresa}" (DUDOSA hoy) → "${r.card.empresa}" (COMPRA en corrida previa).`);
+    enUso.add(_empKey(r.card.empresa));
+    data.cards[i] = r.card; cambio = true;
+  }
+  return cambio;
+}
+
 // Cuando el reporte sale a propósito con MENOS cuentas que NUM_CUENTAS (mercado sin 3ra comprable), los
 // conteos de página 1 se escribieron para NUM_CUENTAS y hay que reconciliarlos: h1_post ("3 clientes
 // potenciales..."), lead ("te compartimos 3...") y el stat "Cuentas priorizadas". Reemplaza SOLO la primera
@@ -4091,13 +4184,17 @@ async function aplicarJuezComercial({ cliente, plan, pool, senales, data }){
     const jc = await runJuezComercial({ cliente, plan, data });
     if(!jc) return { data, pool: _pool, senales: _senales };   // fail-open: el juez no respondió parseable; ya quedó logueado
     const porVeredicto = (v) => jc.cards.filter(c => String(c.veredicto || '').toUpperCase() === v);
+    // Veredicto por card pegado a la data (lo usan el banco y el upgrade posterior).
+    const _verPor = new Map(jc.cards.map(c => [_empKey(c.empresa), String(c.veredicto || 'COMPRA').toUpperCase()]));
+    for(const c of (data.cards || [])){ if(c && c.empresa) c._veredictoJC = _verPor.get(_empKey(c.empresa)) || 'COMPRA'; }
     for(const d of porVeredicto('DUDOSA')) console.warn(`[JUEZ-COM] DUDOSA (pasa, no bloquea): ${d.empresa} — ${d.motivo}`);
     const malas = porVeredicto('NO_COMPRA');
-    if(!malas.length){ console.log(`[JUEZ-COM] OK${evaluacion > 1 ? ` tras ${evaluacion - 1} reemplazo(s)${rebuscado ? ' + re-sourcing' : ''}` : ''}: ${jc.cards.length} cuenta(s) con valor comercial.`); return { data, pool: _pool, senales: _senales }; }
+    if(!malas.length){ console.log(`[JUEZ-COM] OK${evaluacion > 1 ? ` tras ${evaluacion - 1} reemplazo(s)${rebuscado ? ' + re-sourcing' : ''}` : ''}: ${jc.cards.length} cuenta(s) con valor comercial.`); _bancoGuardarAprobadas(cliente, data.cards); _bancoMejorarCards(data, cliente); return { data, pool: _pool, senales: _senales }; }
     ultimasMalas = malas;
     for(const m of malas){
       console.warn(`[JUEZ-COM] NO_COMPRA: ${m.empresa} — ${m.motivo}`);
       const k = _empKey(m.empresa); if(k && !vetadasKeys.has(k)){ vetadasKeys.add(k); vetadasNombres.push(String(m.empresa).trim()); }
+      _bancoGuardarVetada(cliente, m);
     }
     _pool = _pool.filter(c => !vetadasKeys.has(_empKey(c.empresa || '')));
     const fixes = malas.map(m => `La cuenta "${m.empresa}" NO es un comprador realista del cliente: ${m.motivo}. NO la elijas de nuevo; reemplazala por OTRA empresa que sí compraría.`);
@@ -4137,8 +4234,15 @@ async function aplicarJuezComercial({ cliente, plan, pool, senales, data }){
     const MIN_JC = Math.max(1, parseInt(process.env.JUEZ_COM_MIN || '2', 10));
     const buenas = (data.cards || []).filter(c => c && c.empresa && !vetadasKeys.has(_empKey(c.empresa)));
     if(buenas.length >= MIN_JC){
-      console.warn(`[JUEZ-COM] sin reemplazo comprable para completar ${NUM_CUENTAS}: emito el reporte REDUCIDO con ${buenas.length} card(s) aprobadas (descarto ${(data.cards || []).length - buenas.length} vetada(s)).`);
-      data = { ...data, cards: buenas, _cuentasOk: buenas.length };
+      _bancoGuardarAprobadas(cliente, buenas);
+      data = { ...data, cards: buenas.slice() };
+      // Antes de reducir: el banco puede COMPLETAR con cards de corridas previas (ya aprobadas por el juez).
+      if(_bancoMejorarCards(data, cliente) && data.cards.length >= NUM_CUENTAS){
+        console.log(`[BANCO] el banco completó el reporte a ${data.cards.length} cuentas: no hace falta reducir.`);
+        return { data, pool: _pool, senales: _senales };
+      }
+      console.warn(`[JUEZ-COM] sin reemplazo comprable para completar ${NUM_CUENTAS}: emito el reporte REDUCIDO con ${data.cards.length} card(s) aprobadas.`);
+      data._cuentasOk = data.cards.length;
       _reconciliarConteoCuentas(data, NUM_CUENTAS);
       return { data, pool: _pool, senales: _senales };
     }
@@ -4190,6 +4294,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, des
 
     const fechaHoy = _fechaHoy();
     const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre: nombre || (dest && dest.nombre) || '', cliente, fechaHoy, dest });
+    _bancoAplicarVetadas(plan, cliente);   // supresión: empresas vetadas en corridas previas no vuelven a entrar
     let { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) throw new Error(_msgSourcingVacio(plan));
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
@@ -4517,6 +4622,7 @@ app.post('/generar-reporte', async (req, res) => {
     const dest = await resolverDestinatario({ perfil: destinatario, profileId });   // mismo scoping que procesar()
     const fechaHoy = _fechaHoy();
     const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre: nombre || (dest && dest.nombre) || '', cliente, fechaHoy, dest });
+    _bancoAplicarVetadas(plan, cliente);   // supresión: empresas vetadas en corridas previas no vuelven a entrar
     let { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) return res.status(422).json({ error: _msgSourcingVacio(plan) });
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
@@ -4777,5 +4883,6 @@ module.exports = {
   _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS,
   _reconciliarTitulo, _reconciliarGeoVisible, _geoIncoherente, callMCP, resolverCliente, _nuevoStats,
   _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN,
-  _sedeDeLookup, _corregirGeoSede, _parseDestinatario, resolverDestinatario, _reconciliarConteoCuentas
+  _sedeDeLookup, _corregirGeoSede, _parseDestinatario, resolverDestinatario, _reconciliarConteoCuentas,
+  _bancoLeer, _bancoAplicarVetadas, _bancoMejorarCards, _bancoGuardarAprobadas, _bancoGuardarVetada
 };
