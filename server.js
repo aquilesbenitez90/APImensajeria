@@ -1404,6 +1404,48 @@ const _PAIS_EN_ES = {
   'italia':'Italia','irlanda':'Irlanda','suiza':'Suiza','belgica':'Bélgica','suecia':'Suecia','noruega':'Noruega',
   'dinamarca':'Dinamarca','polonia':'Polonia'
 };
+// LinkedIn suele dar la ubicación como ÁREA METRO SIN PAÍS ("Greater Madrid Metropolitan Area" — caso real:
+// el destinatario de McCoy resolvió sin país y la guarda geo no disparó). Ciudades/áreas INEQUÍVOCAS → país.
+// En ORDEN (las entradas compuestas van ANTES que su palabra suelta: "porto alegre" antes que "porto",
+// "santiago de compostela"/"del estero"/"de los caballeros" antes que "santiago"). Match por palabra completa
+// sobre _norm; ciudades ambiguas entre países (Córdoba, Mérida, Cartagena, San José, San Juan, Guadalajara ES) se OMITEN a propósito.
+const _CIUDAD_PAIS = [
+  ['santiago de compostela','España'],['santiago del estero','Argentina'],['santiago de los caballeros','República Dominicana'],
+  ['porto alegre','Brasil'],['san salvador','El Salvador'],['mexico city','México'],['ciudad de mexico','México'],
+  ['buenos aires','Argentina'],['mar del plata','Argentina'],['sao paulo','Brasil'],['rio de janeiro','Brasil'],
+  ['belo horizonte','Brasil'],['santo domingo','República Dominicana'],['la habana','Cuba'],['havana','Cuba'],
+  ['new york','Estados Unidos'],['los angeles','Estados Unidos'],['san francisco','Estados Unidos'],
+  ['the hague','Países Bajos'],
+  ['madrid','España'],['barcelona','España'],['valencia','España'],['sevilla','España'],['seville','España'],
+  ['bilbao','España'],['malaga','España'],['zaragoza','España'],['alicante','España'],
+  ['lisboa','Portugal'],['lisbon','Portugal'],['porto','Portugal'],
+  ['rosario','Argentina'],['mendoza','Argentina'],['montevideo','Uruguay'],['asuncion','Paraguay'],
+  ['santiago','Chile'],['valparaiso','Chile'],
+  ['bogota','Colombia'],['medellin','Colombia'],['cali','Colombia'],['barranquilla','Colombia'],
+  ['lima','Perú'],['arequipa','Perú'],['quito','Ecuador'],['guayaquil','Ecuador'],
+  ['caracas','Venezuela'],['maracaibo','Venezuela'],
+  ['guadalajara','México'],['monterrey','México'],['puebla','México'],['tijuana','México'],['cancun','México'],['queretaro','México'],
+  ['brasilia','Brasil'],['curitiba','Brasil'],['recife','Brasil'],['fortaleza','Brasil'],
+  ['guatemala','Guatemala'],['panama','Panamá'],['tegucigalpa','Honduras'],['managua','Nicaragua'],
+  ['miami','Estados Unidos'],['chicago','Estados Unidos'],['houston','Estados Unidos'],['dallas','Estados Unidos'],
+  ['austin','Estados Unidos'],['boston','Estados Unidos'],['seattle','Estados Unidos'],['atlanta','Estados Unidos'],
+  ['denver','Estados Unidos'],['phoenix','Estados Unidos'],['philadelphia','Estados Unidos'],
+  ['london','Reino Unido'],['manchester','Reino Unido'],['dublin','Irlanda'],
+  ['amsterdam','Países Bajos'],['rotterdam','Países Bajos'],['eindhoven','Países Bajos'],['utrecht','Países Bajos'],
+  ['berlin','Alemania'],['munich','Alemania'],['frankfurt','Alemania'],['hamburg','Alemania'],
+  ['paris','Francia'],['lyon','Francia'],['milan','Italia'],['milano','Italia'],['rome','Italia'],['roma','Italia'],
+  ['zurich','Suiza'],['geneva','Suiza'],['brussels','Bélgica'],['stockholm','Suecia'],['copenhagen','Dinamarca'],
+  ['warsaw','Polonia'],['sydney','Australia'],['melbourne','Australia'],
+  ['toronto','Canadá'],['vancouver','Canadá'],['montreal','Canadá']
+];
+function _paisDeCiudad(ubicacion){
+  const t = _norm(ubicacion || '');
+  if(!t) return null;
+  for(const [ciudad, pais] of _CIUDAD_PAIS){
+    if(new RegExp(`\\b${ciudad}\\b`).test(t)) return pais;
+  }
+  return null;
+}
 // Parser TOLERANTE de get_contact_profile para el destinatario: el gateway puede devolver el objeto en
 // structuredContent, el JSON serializado en el texto, o el texto plano del formato REST ("Nombre — headline
 // @ Empresa (N employees) | Location: ..."). Puro (testeable): recibe la respuesta cruda, devuelve
@@ -1421,8 +1463,11 @@ function _parseDestinatario(res){
     let ubicacion = String(o.location || '').trim() || ((s.match(/\|\s*Location:\s*([^|]+)/i) || [])[1] || '').trim() || null;
     let pais = null;
     if(ubicacion){
-      const ult = ubicacion.split(',').pop().trim();
-      pais = _PAIS_EN_ES[_norm(ult)] || null;
+      // País: primero por TOKEN exacto (el último suele ser el país, pero probamos todos: "Madrid, ..., Spain");
+      // si ningún token es un país (área metro sin país, ej. "Greater Madrid Metropolitan Area"), por CIUDAD conocida.
+      const partes = ubicacion.split(',').map(t => t.trim()).filter(Boolean);
+      for(const t of partes.slice().reverse()){ const p = _PAIS_EN_ES[_norm(t)]; if(p){ pais = p; break; } }
+      if(!pais) pais = _paisDeCiudad(ubicacion);
     }
     const about = (o.about ? String(o.about) : ((s.match(/\|\s*About:\s*(.+)$/i) || [])[1] || '')).replace(/\s+/g,' ').trim().slice(0, 400) || null;
     if(!nombre && !cargo && !pais) return null;
