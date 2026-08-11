@@ -632,7 +632,28 @@ async function callMCPReintento(toolName, args){
   }
 }
 
+// REINTENTO ANTI-FLAPPING DE UNIPILE (envuelve a TODAS las llamadas, no solo a las de callMCPReintento):
+// la sesión de Sales Navigator del backoffice se cae y se recupera en ventanas de segundos, devolviendo
+// 500 "UNIPILE_SEARCH_ERROR: ... not been subscribed or not been authenticated". Sin reintento, cada
+// ráfaga dejaba búsquedas enteras en [] (pools flacos, checks [PEER] ciegos, anclas en 0). Reintentamos
+// SOLO ese error (regex específica: otros 500 como "company no longer exists" NO son flapping y no se
+// reintentan), con espera escalonada (UNIPILE_RETRY_MS × intento) y tope UNIPILE_RETRIES. Es mitigación:
+// si la sesión muere por minutos, esto no la salva (el arreglo real es la cuenta en el backoffice).
 async function callMCP(toolName, args) {
+  const MAXU = Math.max(0, parseInt(process.env.UNIPILE_RETRIES || '2', 10));
+  for (let intento = 0; ; intento++) {
+    try { return await _callMCPCrudo(toolName, args); }
+    catch (e) {
+      const flapping = /UNIPILE|not been subscribed|authenticated properly/i.test(e.message || '');
+      if (!flapping || intento >= MAXU) throw e;
+      const espera = parseInt(process.env.UNIPILE_RETRY_MS || '2500', 10) * (intento + 1);
+      console.warn(`[MCP] ${toolName} falló por UNIPILE flapping; reintento ${intento + 1}/${MAXU} en ${espera}ms.`);
+      await new Promise(r => setTimeout(r, espera));
+    }
+  }
+}
+
+async function _callMCPCrudo(toolName, args) {
   console.log(`[MCP] Llamando ${toolName} con args:`, JSON.stringify(args).substring(0, 200));
   _mcpContarLlamada();
   // DESPACHO A REST (flag SOURCE_BACKEND='rest'): mismo timeout/cache-por-job que el MCP. callREST devuelve
