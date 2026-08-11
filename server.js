@@ -4048,29 +4048,65 @@ Devolvé SOLO el JSON del veredicto.`;
   return null;
 }
 
-// Aplica el juez comercial con reemplazo: NO_COMPRA → veta la empresa del pool + re-SELECT con fixes;
-// si tras JUEZ_COM_TRIES sigue habiendo NO_COMPRA (o no queda pool para reemplazar), LANZA (fail-closed,
-// el caller decide cómo reportarlo). Devuelve { data } (posiblemente re-seleccionada). Compartida por
-// procesar() y /generar-reporte (gotcha de la lógica duplicada: UNA sola implementación).
+// Aplica el juez comercial con reemplazo y RE-SOURCING (el lazo que el skill original hacía a mano):
+//   NO_COMPRA → veta la empresa del pool + re-SELECT con fixes.
+//   Pool sin reemplazo digno (o intentos agotados) → UNA rebusca completa: las empresas vetadas entran a
+//   icp.competidores (el sourcing las filtra por nombre en todas sus capas, incluido el boost de anclas
+//   vetadas que en el caso KPMG llenó el pool de gente de consultoras gigantes) y sourceConRetry arma un
+//   pool NUEVO; re-SELECT y una evaluación más del juez.
+//   Si la rebusca tampoco da cuentas comprables → LANZA (fail-closed: mejor sin reporte que quemar al
+//   prospecto; el caller decide cómo reportarlo).
+// Devuelve { data } (posiblemente re-seleccionada). Compartida por procesar() y /generar-reporte
+// (gotcha de la lógica duplicada: UNA sola implementación).
 async function aplicarJuezComercial({ cliente, plan, pool, senales, data }){
   if(String(process.env.JUEZ_COMERCIAL || 'on').toLowerCase() === 'off') return { data };
   const TRIES = Math.max(1, parseInt(process.env.JUEZ_COM_TRIES || '2', 10));
-  let _pool = pool;
-  for(let t = 1; t <= TRIES; t++){
+  let _pool = pool, _senales = senales, rebuscado = false;
+  const vetadasKeys = new Set();        // _empKey de cada empresa vetada (filtro del pool)
+  const vetadasNombres = [];            // nombres crudos (van a icp.competidores en la rebusca)
+  let ultimasMalas = [];
+  for(let evaluacion = 1; evaluacion <= TRIES + 1; evaluacion++){   // +1: la evaluación extra post-rebusca
     const jc = await runJuezComercial({ cliente, plan, data });
     if(!jc) return { data };   // fail-open: el juez no respondió parseable; ya quedó logueado
     const porVeredicto = (v) => jc.cards.filter(c => String(c.veredicto || '').toUpperCase() === v);
     for(const d of porVeredicto('DUDOSA')) console.warn(`[JUEZ-COM] DUDOSA (pasa, no bloquea): ${d.empresa} — ${d.motivo}`);
     const malas = porVeredicto('NO_COMPRA');
-    if(!malas.length){ console.log(`[JUEZ-COM] OK${t > 1 ? ` tras ${t - 1} reemplazo(s)` : ''}: ${jc.cards.length} cuenta(s) con valor comercial.`); return { data }; }
-    for(const m of malas) console.warn(`[JUEZ-COM] NO_COMPRA: ${m.empresa} — ${m.motivo}`);
-    const veto = new Set(malas.map(m => _empKey(m.empresa)).filter(Boolean));
-    _pool = _pool.filter(c => !veto.has(_empKey(c.empresa || '')));
-    if(t >= TRIES || _pool.length < NUM_CUENTAS){
-      throw new Error(`El juez comercial rechazó cuentas sin valor de compra y no hay reemplazo digno en el pool: ${malas.map(m => `${m.empresa} (${m.motivo})`).join(' | ')}. Mejor sin reporte que con leads que no compran.`);
+    if(!malas.length){ console.log(`[JUEZ-COM] OK${evaluacion > 1 ? ` tras ${evaluacion - 1} reemplazo(s)${rebuscado ? ' + re-sourcing' : ''}` : ''}: ${jc.cards.length} cuenta(s) con valor comercial.`); return { data }; }
+    ultimasMalas = malas;
+    for(const m of malas){
+      console.warn(`[JUEZ-COM] NO_COMPRA: ${m.empresa} — ${m.motivo}`);
+      const k = _empKey(m.empresa); if(k && !vetadasKeys.has(k)){ vetadasKeys.add(k); vetadasNombres.push(String(m.empresa).trim()); }
     }
-    const fixes = malas.map(m => `La cuenta "${m.empresa}" NO es un comprador realista del cliente: ${m.motivo}. NO la elijas de nuevo; reemplazala por OTRA empresa del pool que sí compraría.`);
-    data = await seleccionarConRetry({ cliente, plan, pool: _pool, fixes, senales });
+    _pool = _pool.filter(c => !vetadasKeys.has(_empKey(c.empresa || '')));
+    const fixes = malas.map(m => `La cuenta "${m.empresa}" NO es un comprador realista del cliente: ${m.motivo}. NO la elijas de nuevo; reemplazala por OTRA empresa que sí compraría.`);
+
+    // ¿Alcanza el pool actual para re-elegir? (y nos quedan evaluaciones del presupuesto base)
+    if(evaluacion < TRIES && _pool.length >= NUM_CUENTAS){
+      data = await seleccionarConRetry({ cliente, plan, pool: _pool, fixes, senales: _senales });
+      continue;
+    }
+
+    // Pool agotado o intentos agotados → UNA rebusca completa antes de rendirnos.
+    if(!rebuscado){
+      rebuscado = true;
+      console.warn(`[JUEZ-COM] sin reemplazo digno en el pool → RE-SOURCING: rebusco con ${vetadasNombres.length} empresa(s) vetada(s) como competidores [${vetadasNombres.join(', ')}].`);
+      try{
+        const icp = (plan && plan._plan) || {};
+        icp.competidores = [ ...(Array.isArray(icp.competidores) ? icp.competidores : []), ...vetadasNombres ];
+        const r = await sourceConRetry(plan, cliente);
+        const nuevo = (r && Array.isArray(r.pool) ? r.pool : []).filter(c => !vetadasKeys.has(_empKey(c.empresa || '')));
+        if(nuevo.length >= NUM_CUENTAS){
+          _pool = nuevo;
+          _senales = (r && r.senales && r.senales.length) ? r.senales : _senales;
+          console.log(`[JUEZ-COM] re-sourcing OK: pool nuevo de ${_pool.length} candidatos sin las vetadas. Re-eligiendo...`);
+          data = await seleccionarConRetry({ cliente, plan, pool: _pool, fixes, senales: _senales });
+          continue;   // la evaluación TRIES+1 juzga la selección post-rebusca
+        }
+        console.warn(`[JUEZ-COM] la rebusca dejó ${nuevo.length} candidato(s) (<${NUM_CUENTAS}); no hay mercado comprable con este ICP.`);
+      }catch(e){ console.warn(`[JUEZ-COM] re-sourcing falló (${e.message}); cierro fail-closed.`); }
+    }
+
+    throw new Error(`El juez comercial rechazó cuentas sin valor de compra y no quedó reemplazo digno ni rebuscando: ${ultimasMalas.map(m => `${m.empresa} (${m.motivo})`).join(' | ')}. Mejor sin reporte que con leads que no compran.`);
   }
   return { data };
 }
