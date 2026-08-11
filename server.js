@@ -1617,8 +1617,10 @@ function _parseProfile(res){
 // Headcount puede venir como "442", "1,5 mil+", "10 mil+" (es-MX). Normaliza a entero.
 function _parseHC(raw){
   if(!raw) return null;
-  const mil = /mil/i.test(raw);
-  const s = String(raw).toLowerCase().replace(/mil/,'').replace(/\+/g,'').trim().replace(/\./g,'').replace(',','.');
+  // "7K+" (locale EN del gateway) = 7000, igual que "7 mil+" (es-MX). Sin la K, parseFloat('7k')=7 y un
+  // gigante quedaría contado como micro (rompería piso y techo al completar headcounts faltantes).
+  const mil = /mil/i.test(raw) || /\dk\+?\s*$/i.test(String(raw).trim());
+  const s = String(raw).toLowerCase().replace(/mil/,'').replace(/\+/g,'').trim().replace(/k\s*$/,'').trim().replace(/\./g,'').replace(',','.');
   const n = parseFloat(s);
   if(isNaN(n)) return null;
   return Math.round(mil ? n*1000 : n);
@@ -2548,19 +2550,25 @@ function _candViable(c, titulos, excluir, industrias, esComp){
 // perfil suele venir null y lookup_company por nombre suelto falla/trae homónimos — memoria Aenima). SOLO
 // confiamos si el nombre devuelto matchea EXACTO por _empKey (verificado en vivo: "Ayesa Digital" →
 // "IT Services and IT Consulting"). Falla suave → null (no filtra). Cache por job (_industriaCache).
-async function _industriaDeEmpresa(nombre){
+async function _fichaEmpresa(nombre){
   const k = _empKey(nombre || ''); if(!k) return null;
   const st = _stats(); if(!st._industriaCache) st._industriaCache = new Map();
   if(st._industriaCache.has(k)) return st._industriaCache.get(k);
-  let industria = null;
+  let ficha = null;
   try{
     const txt = String(await callMCPReintento('search_sales_navigator_filtered', { category: 'companies', keywords: String(nombre).trim(), profilesLimit: 3 }));
-    const hit = _parseCompanies(txt).find(c => _empKey(c.name) === k && c.industry);
-    industria = (hit && hit.industry) || null;
-  }catch(e){ console.warn(`[PEER] búsqueda de industria falló para "${nombre}" (sigo sin filtrar):`, e.message); }
-  st._industriaCache.set(k, industria);
-  return industria;
+    // Puede haber VARIAS páginas con el mismo nombre (visto en vivo: "Ayesa Digital" real con industria y
+    // 901 empleados + una fantasma sin industria y 2 empleados). Entre las que matchean el nombre exacto,
+    // preferimos la que tiene industria y más headcount (la página real), nunca la fantasma.
+    const hits = _parseCompanies(txt).filter(c => _empKey(c.name) === k);
+    hits.sort((a, b) => ((b.industry?1:0) - (a.industry?1:0)) || ((b.headcount||0) - (a.headcount||0)));
+    const hit = hits[0];
+    if(hit) ficha = { industria: hit.industry || null, headcount: hit.headcount != null ? hit.headcount : null };
+  }catch(e){ console.warn(`[PEER] búsqueda de empresa falló para "${nombre}" (sigo sin filtrar):`, e.message); }
+  st._industriaCache.set(k, ficha);
+  return ficha;
 }
+async function _industriaDeEmpresa(nombre){ const f = await _fichaEmpresa(nombre); return (f && f.industria) || null; }
 
 async function sourceConRetry(plan, cliente){
   const reintentos   = parseInt(process.env.SOURCE_RETRY_ON_EMPTY || '1', 10);
@@ -2658,22 +2666,47 @@ async function sourceConRetry(plan, cliente){
   // DISTINTA del tramo con chances de llegar a SELECT y descartamos las que caen en verticales_excluir.
   // Quemó DOS reportes seguidos de McCoy (el prospecto conocía al CIO de Ayesa y la rechazó como peer).
   // Falla suave (sin respuesta/sin match de nombre → no filtra) + degradación digna + kill-switch por env.
-  if(excluir.length && String(process.env.PEER_INDUSTRY_CHECK || 'on').toLowerCase() !== 'off'){
+  const _tamMaxPool = parseInt((icp && icp.tamano_max) || 0, 10) || 0;
+  if(String(process.env.PEER_INDUSTRY_CHECK || 'on').toLowerCase() !== 'off' && (excluir.length || _tamMaxPool > 0)){
     const tramo = pob.slice(0, N_IA * 2);
-    const nombres = [...new Map(tramo.map(c => [_empKey(c.empresa||''), c.empresa])).entries()]
+    // Empresas a consultar: TODAS las del tramo si hay verticales a excluir (necesitamos la industria);
+    // si solo importa el techo, únicamente las de candidatos SIN headcount (dato faltante, caso Antolin).
+    const objetivo = excluir.length ? tramo : tramo.filter(c => c.headcount == null);
+    const nombres = [...new Map(objetivo.map(c => [_empKey(c.empresa||''), c.empresa])).entries()]
       .filter(([k, n]) => k && n).map(([, n]) => n);
     const CONC = 6;
-    const peers = new Set();
+    const fichas = new Map();   // empKey -> {industria, headcount} | null
     for(let i = 0; i < nombres.length; i += CONC){
-      await Promise.all(nombres.slice(i, i + CONC).map(async n => {
-        const ind = await _industriaDeEmpresa(n);
-        if(ind && _matchVerticalExcluir(ind, excluir)){ peers.add(_empKey(n)); console.warn(`[PEER] fuera del pool por INDUSTRIA excluida: "${n}" (${ind})`); }
-      }));
+      await Promise.all(nombres.slice(i, i + CONC).map(async n => { fichas.set(_empKey(n), await _fichaEmpresa(n)); }));
     }
-    if(peers.size){
-      const sinPeers = pob.filter(c => !peers.has(_empKey(c.empresa||'')));
-      if(sinPeers.length >= NUM_CUENTAS){ console.log(`[PEER] pool sin peers por industria: ${sinPeers.length} (de ${pob.length}; ${peers.size} empresa(s) peer).`); pob = sinPeers; }
-      else console.warn(`[PEER] filtrar peers por industria dejaría ${sinPeers.length}/${NUM_CUENTAS} candidatos -> degradación digna, NO filtro.`);
+    // (1) ANTI-PEER por INDUSTRIA (caso Ayesa Digital): nombre/headline no delatan el rubro, la industria sí.
+    if(excluir.length){
+      const peers = new Set();
+      for(const n of nombres){
+        const f = fichas.get(_empKey(n));
+        if(f && f.industria && _matchVerticalExcluir(f.industria, excluir)){ peers.add(_empKey(n)); console.warn(`[PEER] fuera del pool por INDUSTRIA excluida: "${n}" (${f.industria})`); }
+      }
+      if(peers.size){
+        const sinPeers = pob.filter(c => !peers.has(_empKey(c.empresa||'')));
+        if(sinPeers.length >= NUM_CUENTAS){ console.log(`[PEER] pool sin peers por industria: ${sinPeers.length} (de ${pob.length}; ${peers.size} empresa(s) peer).`); pob = sinPeers; }
+        else console.warn(`[PEER] filtrar peers por industria dejaría ${sinPeers.length}/${NUM_CUENTAS} candidatos -> degradación digna, NO filtro.`);
+      }
+    }
+    // (2) TECHO-SIN-DATO (caso Antolin, grupo de decenas de miles con techo 2000): el techo del sourcing
+    // solo veta headcount CONOCIDO, así que un candidato-persona sin headcount pasaba aunque su empresa
+    // fuera un gigante. Completamos el headcount desde la MISMA ficha (solo con match exacto de nombre)
+    // y re-aplicamos el techo con la degradación digna de siempre. El headcount completado además viaja
+    // a SELECT ("~N empleados") y a _tamanoIncoherente, que antes tampoco podían juzgar.
+    if(_tamMaxPool > 0){
+      for(const c of pob){
+        if(c.headcount == null){ const f = fichas.get(_empKey(c.empresa||'')); if(f && f.headcount != null) c.headcount = f.headcount; }
+      }
+      const sobre = pob.filter(c => c.headcount != null && c.headcount > _tamMaxPool);
+      if(sobre.length){
+        const bajo = pob.filter(c => !(c.headcount != null && c.headcount > _tamMaxPool));
+        if(bajo.length >= NUM_CUENTAS){ for(const c of sobre) console.warn(`[TAM] fuera del pool por techo con headcount completado (${c.headcount}>${_tamMaxPool}): ${c.name} @ ${c.empresa||'?'}`); pob = bajo; }
+        else console.warn(`[TAM] techo con headcount completado dejaría ${bajo.length}/${NUM_CUENTAS} candidatos -> degradación digna, NO filtro.`);
+      }
     }
   }
 
