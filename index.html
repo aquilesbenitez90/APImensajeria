@@ -137,9 +137,10 @@ const MSGS = [
 let t0, timer, msgTimer, msgIdx = 0;
 
 // Persistencia: guardamos el jobId en el navegador para sobrevivir cierres/refrescos de pestaña.
-// El server limpia el job a 1h; damos un margen y reintentamos retomar al reabrir.
+// El job en RAM del server expira a 1h, pero el PDF queda en disco PDF_RETENTION_DIAS (30 default):
+// al reabrir, si /resultado ya no existe, probamos /pdf/:jobId directo (init) y ofrecemos la descarga.
 const LS_KEY = 'ibt_job';
-const TTL = 55*60*1000;
+const TTL = 30*24*60*60*1000;
 function saveJob(jobId, dominio){ try{ localStorage.setItem(LS_KEY, JSON.stringify({jobId, dominio, ts:Date.now()})); }catch(e){} }
 function loadJob(){ try{ const j = JSON.parse(localStorage.getItem(LS_KEY)||'null'); if(j && j.jobId && (Date.now()-j.ts) < TTL) return j; }catch(e){} return null; }
 function clearJob(){ try{ localStorage.removeItem(LS_KEY); }catch(e){} }
@@ -237,7 +238,7 @@ async function poll(jobId){
     if(!aplicarEstado(job)) continue;   // 'queued' → muestra la cola | 'processing' → progreso; en ambos, seguir esperando
     stopProgress();
     if(job.status === 'ok' && job.paginas){
-      mostrarOk(jobId, job.empresa);   // dejamos el job guardado: si reabrís dentro de la hora, podés volver a descargar
+      mostrarOk(jobId, job.empresa);   // dejamos el job guardado: al reabrir se ofrece la descarga (disco, hasta 30 días)
     } else {
       clearJob();
       $('errMsg').textContent = job.error || 'El análisis no pudo armar un reporte para esta empresa. Probá con otra.';
@@ -257,7 +258,14 @@ async function init(){
   if(!saved){ show('stageForm'); return; }
   try{
     const r = await fetch('/resultado/'+saved.jobId);
-    if(r.status === 404){ clearJob(); show('stageForm'); return; }
+    if(r.status === 404){
+      // El job ya expiró de la RAM del server, pero el PDF puede seguir en disco (30 días): probamos directo.
+      try{
+        const p = await fetch('/pdf/'+saved.jobId, { method:'HEAD' });
+        if(p.ok){ mostrarOk(saved.jobId, saved.dominio); return; }
+      }catch(e){}
+      clearJob(); show('stageForm'); return;
+    }
     const job = await r.json();
     if(job.status === 'processing' || job.status === 'queued'){
       if(saved.dominio) $('dominio').value = saved.dominio;
