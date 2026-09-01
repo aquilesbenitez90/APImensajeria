@@ -53,8 +53,14 @@ process.on('unhandledRejection', (e) => {
 // ---------------------------------------------------------------------------
 // Configuración
 // ---------------------------------------------------------------------------
-const MODEL_GEN = 'claude-sonnet-4-6';
-const MODEL_JUDGE = 'claude-sonnet-4-6';
+const MODEL_GEN = process.env.MODEL_GEN || 'claude-sonnet-4-6';
+// JUEZ EN OTRO MODELO QUE EL GENERADOR (investigación de LLM-as-judge): un juez del MISMO modelo que
+// escribió el texto sufre self-preference bias (favorece su propio estilo; no se arregla con prompt) y
+// N votos del mismo modelo son votos CORRELACIONADOS (~1 voto efectivo; visto en vivo: el mismo reporte
+// salió 0/8 y 8/8 en corridas distintas). Opus 5 ($5/$25 vs $3/$15 de Sonnet) juzga mejor y descorrelaciona.
+// OJO API: Opus 5 rechaza `temperature` (callClaude la filtra por modelo) y piensa por default (el
+// thinking consume max_tokens: los llamados del juez llevan presupuesto holgado).
+const MODEL_JUDGE = process.env.MODEL_JUDGE || 'claude-opus-5';
 // SEÑALES DE COMPRA por cuenta (opcional, reversible). SIGNALS_MODE=on las activa (env en el copy de Railway).
 // La EXTRACCIÓN usa Sonnet (mejor grounding/instrucción que Haiku para no inventar fecha/fuente/URL). Off por
 // default: cero costo/latencia/riesgo hasta que se prenda. Máx 2 señales por card (super resumidas, con link).
@@ -86,7 +92,12 @@ const TEMP_JUDGE = _tempEnv(process.env.TEMP_JUDGE, 0);
 // (4 veracidad, 6 personalización). JUDGE_VOTES=1 reproduce el comportamiento histórico
 // (1 voto a TEMP_JUDGE). Con N>1, los votos corren a TEMP_JUDGE_VOTE>0 para ser MUESTRAS
 // independientes (a T=0 los N votos serían idénticos y la agregación no aportaría nada).
-const JUDGE_VOTES = Math.max(1, parseInt(process.env.JUDGE_VOTES || '3', 10));
+// DEFAULT 1 (antes 3): 3 votos del mismo modelo con el mismo prompt son votos correlacionados (paper
+// "Nine Judges, Two Effective Votes": un panel de 9 modelos de 7 familias ≈ 2 votos efectivos), o sea
+// pagábamos 3x por ~1 voto de señal + lotería de varianza. La diversidad real ahora viene de DOS jueces
+// de LENTE distinta (veracidad + juez comercial) en modelo distinto del generador. JUDGE_VOTES=3 sigue
+// disponible por env si se quiere el comportamiento anterior.
+const JUDGE_VOTES = Math.max(1, parseInt(process.env.JUDGE_VOTES || '1', 10));
 const TEMP_JUDGE_VOTE = _tempEnv(process.env.TEMP_JUDGE_VOTE, 0.4);
 
 // Cantidad de cuentas del reporte. Configurable por env.
@@ -210,6 +221,12 @@ function _restFmtProfile(data) {
   let txt = `${name} — ${head}`;
   if (emp) txt += ` @ ${emp}`;
   txt += hc != null ? ` (${hc} employees)` : ` (? )`;
+  // Location/about al FINAL con separador "|" (no rompe _parseProfile ni _empresaDeHeadline, que cortan en "|"):
+  // los necesita _parseDestinatario cuando el perfil llega por el fallback REST en vez del MCP.
+  const loc = String(prof.location || prof.geo_location || '').trim();
+  if (loc) txt += ` | Location: ${loc}`;
+  const about = String(prof.about || prof.summary || '').replace(/\s+/g, ' ').trim();
+  if (about) txt += ` | About: ${about.slice(0, 400)}`;
   return txt;
 }
 // lookup_company -> texto: _empresaDeLookup lee "Company: <name>", _headcountDe "<N> employees",
@@ -306,6 +323,8 @@ function _nuevoStats() {
     // CACHE POR JOB de señales de compra por empresa (_senalesDeCuenta). Evita re-buscar la misma empresa
     // cuando una ronda de fix re-arma cards del mismo nombre. Lazy (Map) en _senalesDeCuenta.
     _signalsCache: null,
+    // CACHE POR JOB de industria por empresa (_industriaDeEmpresa, filtro anti-peer). Lazy (Map).
+    _industriaCache: null,
     // Idioma del DOCUMENTO (lo pisa el endpoint con el valor elegido en la landing). Default español.
     idiomaDoc: 'es',
     // SALUD DEL MCP dentro del job (aislado por AsyncLocalStorage, NUNCA global mutable): cuántas consultas
@@ -357,7 +376,13 @@ function _idiomaHookDeLoc(loc){
 // Tarifas Anthropic por millón de tokens (input/output/cache_write/cache_read) + fee de web_search ($10/1000 req).
 const RATES_SONNET = { in: 3, out: 15, cw: 3.75, cr: 0.30, ws: 10000 };
 const RATES_HAIKU  = { in: 1, out: 5,  cw: 1.25, cr: 0.10, ws: 10000 };
-function _ratesDe(model){ return /haiku/i.test(String(model || '')) ? RATES_HAIKU : RATES_SONNET; }
+const RATES_OPUS   = { in: 5, out: 25, cw: 6.25, cr: 0.50, ws: 10000 };   // Opus 5 / 4.8 (el juez corre acá)
+function _ratesDe(model){
+  const m = String(model || '');
+  if (/haiku/i.test(m)) return RATES_HAIKU;
+  if (/opus|fable|mythos/i.test(m)) return RATES_OPUS;
+  return RATES_SONNET;
+}
 // Tarifa de cada etapa según el modelo que la corre (signals puede ser Haiku → no sobre-costear).
 function _ratesEtapa(etapa){ return _ratesDe(etapa === 'signals' ? MODEL_SIGNALS : etapa === 'gen' ? MODEL_GEN : MODEL_JUDGE); }
 // Costo Anthropic de un bucket de tokens, a la tarifa indicada (default Sonnet).
@@ -454,6 +479,7 @@ function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnv
     dominio: (input && input.dominio) || '',
     email: (input && input.email) || '',
     profileId: (input && input.profileId) || null,
+    destinatario: (input && input.destinatario) || null,
     anclado: !!(cliente && cliente.anclado),
     veredicto: judgeResult && judgeResult.veredicto,
     score: judgeResult ? judgeResult.score : null,
@@ -606,7 +632,28 @@ async function callMCPReintento(toolName, args){
   }
 }
 
+// REINTENTO ANTI-FLAPPING DE UNIPILE (envuelve a TODAS las llamadas, no solo a las de callMCPReintento):
+// la sesión de Sales Navigator del backoffice se cae y se recupera en ventanas de segundos, devolviendo
+// 500 "UNIPILE_SEARCH_ERROR: ... not been subscribed or not been authenticated". Sin reintento, cada
+// ráfaga dejaba búsquedas enteras en [] (pools flacos, checks [PEER] ciegos, anclas en 0). Reintentamos
+// SOLO ese error (regex específica: otros 500 como "company no longer exists" NO son flapping y no se
+// reintentan), con espera escalonada (UNIPILE_RETRY_MS × intento) y tope UNIPILE_RETRIES. Es mitigación:
+// si la sesión muere por minutos, esto no la salva (el arreglo real es la cuenta en el backoffice).
 async function callMCP(toolName, args) {
+  const MAXU = Math.max(0, parseInt(process.env.UNIPILE_RETRIES || '2', 10));
+  for (let intento = 0; ; intento++) {
+    try { return await _callMCPCrudo(toolName, args); }
+    catch (e) {
+      const flapping = /UNIPILE|not been subscribed|authenticated properly/i.test(e.message || '');
+      if (!flapping || intento >= MAXU) throw e;
+      const espera = parseInt(process.env.UNIPILE_RETRY_MS || '2500', 10) * (intento + 1);
+      console.warn(`[MCP] ${toolName} falló por UNIPILE flapping; reintento ${intento + 1}/${MAXU} en ${espera}ms.`);
+      await new Promise(r => setTimeout(r, espera));
+    }
+  }
+}
+
+async function _callMCPCrudo(toolName, args) {
   console.log(`[MCP] Llamando ${toolName} con args:`, JSON.stringify(args).substring(0, 200));
   _mcpContarLlamada();
   // DESPACHO A REST (flag SOURCE_BACKEND='rest'): mismo timeout/cache-por-job que el MCP. callREST devuelve
@@ -816,6 +863,7 @@ Criterios:
 4. **VERACIDAD de los datos de la empresa** (CRÍTICO):
    FAIL si el overview tiene datos que parecen inventados o demasiado específicos sin verificación (año de fundación, stage de funding, número de productos/clientes, métricas redondas sin fuente, tiempos de respuesta). Si todo el overview suena a "marketing copy genérico" → FAIL.
    SEÑALES DE COMPRA (la lista "Señales" bajo cada cuenta, si aparece): vienen CON su fuente y fecha citadas, así que NO las marques como inventadas por ser específicas (la fuente citada ES el respaldo). SOLO marcá FAIL acá si una señal NO muestra ninguna fuente, o si la cifra es absurda o imposible para esa empresa.
+   TAMAÑO DE EMPRESA EN LOS ÁNGULOS ("cerca de 740 personas", "alrededor de 240", "~N empleados"): el headcount de cada cuenta es un DATO REAL de LinkedIn que el sistema le pasa a la redacción (no lo generó la IA): NO lo marques como inventado ni exijas fuente citada para él. SOLO marcá FAIL si el número es absurdo para esa empresa o si contradice otro dato del propio reporte.
 
 5. **Coherencia interna + GEOGRAFÍA + VERTICAL** (CRÍTICO) — el reporte trata sobre la empresa correcta y las cuentas hacen sentido para ese ICP.
    FAIL si una cuenta target es la misma empresa mencionada como proof point/cliente del producto en el overview.
@@ -855,7 +903,9 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
     messages
   };
   // Solo se setea si se pasa explícitamente; las llamadas que no la pasan quedan en el default del modelo.
-  if (typeof temperature === 'number') body.temperature = temperature;
+  // GUARD POR MODELO: Opus 4.7+/5, Sonnet 5 y Fable RECHAZAN temperature con 400. En esos modelos se
+  // omite (el juez en Opus 5 pierde la varianza por temperatura, que con JUDGE_VOTES=1 ya no se usa).
+  if (typeof temperature === 'number' && !/opus-5|opus-4-7|opus-4-8|sonnet-5|fable|mythos/i.test(String(model || ''))) body.temperature = temperature;
 
   if (tools.length > 0) {
     const cachedTools = tools.map((t, i) => (i === tools.length - 1) ? { ...t, cache_control: { type: 'ephemeral' } } : t);
@@ -955,7 +1005,7 @@ function _textoJSON(content){
 
 // Un único voto del juez. Devuelve siempre un veredicto normalizado (APROBADO solo 8/8);
 // fail-closed individual: si no parsea o es incoherente → RECHAZADO (nunca lo descartamos).
-async function _judgeVote(htmlLite, pageCount, temperature, voteIdx) {
+async function _judgeVote(htmlLite, pageCount, temperature, voteIdx, cuentasEsperadas = NUM_CUENTAS) {
   try {
     const data = await callClaude({
       model: MODEL_JUDGE,
@@ -964,7 +1014,7 @@ async function _judgeVote(htmlLite, pageCount, temperature, voteIdx) {
         role: 'user',
         content: `Cuentas esperadas: ${NUM_CUENTAS}\nPáginas esperadas: ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}\nPáginas del PDF renderizado: ${pageCount}\n\nHTML del reporte:\n${htmlLite}`
       }],
-      maxTokens: 6000,
+      maxTokens: 12000,   // Opus 5 piensa por default y el thinking consume max_tokens: aire para thinking + JSON del veredicto
       temperature
     });
     const raw = data.content.find(b => b.type === 'text')?.text || '';
@@ -991,9 +1041,9 @@ async function _judgeVote(htmlLite, pageCount, temperature, voteIdx) {
   }
 }
 
-async function runJudge(html, pageCount) {
+async function runJudge(html, pageCount, cuentasEsperadas = NUM_CUENTAS) {
   _setStage('judge');
-  console.log(`[JUDGE] Evaluando reporte (${pageCount} páginas, esperadas ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}, cuentas ${NUM_CUENTAS}, votos ${JUDGE_VOTES})...`);
+  console.log(`[JUDGE] Evaluando reporte (${pageCount} páginas, esperadas ${EXPECTED_PAGES>0?EXPECTED_PAGES:'no validar'}, cuentas ${cuentasEsperadas}, votos ${JUDGE_VOTES})...`);
   const htmlLite = String(html || '')
     .replace(/src="data:image\/[a-z]+;base64,[A-Za-z0-9+/=]+"/gi, 'src="[LOGO]"')
     .replace(/<style>[\s\S]*?<\/style>/i, '<style>/* css omitido para el juez */</style>');
@@ -1002,7 +1052,7 @@ async function runJudge(html, pageCount) {
   // N>1 → N votos INDEPENDIENTES a TEMP_JUDGE_VOTE (>0), en PARALELO para no sumar latencia.
   const tempVoto = JUDGE_VOTES === 1 ? TEMP_JUDGE : TEMP_JUDGE_VOTE;
   const votos = await Promise.all(
-    Array.from({ length: JUDGE_VOTES }, (_, i) => _judgeVote(htmlLite, pageCount, tempVoto, i + 1))
+    Array.from({ length: JUDGE_VOTES }, (_, i) => _judgeVote(htmlLite, pageCount, tempVoto, i + 1, cuentasEsperadas))
   );
 
   // Agregación CONSERVADORA / fail-closed: APROBADO final SOLO si la MAYORÍA de los votos
@@ -1372,6 +1422,117 @@ async function resolverCliente({ profileId, dominio, empresa }) {
   return { empresa: empresa || dominio || '', dominio: dominio || '', headcount: null, tier: null, anclado: false, fuente: 'sin_anclar', confianza: 'baja' };
 }
 
+// ===== DESTINATARIO DEL REPORTE (caso McCoy: el reporte le habló del grupo global a alguien de España) =====
+// La persona que va a RECIBIR el PDF define el ALCANCE del reporte: su país y su unidad son el mercado del
+// documento, no la estructura global del grupo. En el flujo N8N llega como profileId (id del chat); en la
+// landing web, como link/public-id de LinkedIn ("destinatario"). get_contact_profile acepta ambos.
+// País del destinatario: location de LinkedIn viene en INGLÉS ("Madrid, Community of Madrid, Spain") →
+// se traduce al nombre en ESPAÑOL (el mismo set de _ISO_PAIS, que es lo que usan geografias/_corregirGeoSede).
+const _PAIS_EN_ES = {
+  'argentina':'Argentina','brazil':'Brasil','chile':'Chile','colombia':'Colombia','mexico':'México','peru':'Perú',
+  'uruguay':'Uruguay','paraguay':'Paraguay','bolivia':'Bolivia','ecuador':'Ecuador','venezuela':'Venezuela',
+  'costa rica':'Costa Rica','panama':'Panamá','guatemala':'Guatemala','el salvador':'El Salvador','honduras':'Honduras',
+  'nicaragua':'Nicaragua','dominican republic':'República Dominicana','cuba':'Cuba','puerto rico':'Puerto Rico',
+  'united states':'Estados Unidos','canada':'Canadá','spain':'España','portugal':'Portugal','france':'Francia',
+  'germany':'Alemania','united kingdom':'Reino Unido','italy':'Italia','netherlands':'Países Bajos','ireland':'Irlanda',
+  'switzerland':'Suiza','belgium':'Bélgica','sweden':'Suecia','norway':'Noruega','denmark':'Dinamarca','poland':'Polonia',
+  'india':'India','china':'China','japan':'Japón','south korea':'Corea del Sur','singapore':'Singapur',
+  'australia':'Australia','new zealand':'Nueva Zelanda','israel':'Israel','united arab emirates':'Emiratos Árabes Unidos',
+  'south africa':'Sudáfrica','turkey':'Turquía',
+  // por si el perfil viene con locale en español (mismo _norm de claves, sin acentos)
+  'espana':'España','estados unidos':'Estados Unidos','brasil':'Brasil','paises bajos':'Países Bajos',
+  'reino unido':'Reino Unido','republica dominicana':'República Dominicana','japon':'Japón','singapur':'Singapur',
+  'nueva zelanda':'Nueva Zelanda','sudafrica':'Sudáfrica','turquia':'Turquía','corea del sur':'Corea del Sur',
+  'emiratos arabes unidos':'Emiratos Árabes Unidos','francia':'Francia','alemania':'Alemania',
+  'italia':'Italia','irlanda':'Irlanda','suiza':'Suiza','belgica':'Bélgica','suecia':'Suecia','noruega':'Noruega',
+  'dinamarca':'Dinamarca','polonia':'Polonia'
+};
+// LinkedIn suele dar la ubicación como ÁREA METRO SIN PAÍS ("Greater Madrid Metropolitan Area" — caso real:
+// el destinatario de McCoy resolvió sin país y la guarda geo no disparó). Ciudades/áreas INEQUÍVOCAS → país.
+// En ORDEN (las entradas compuestas van ANTES que su palabra suelta: "porto alegre" antes que "porto",
+// "santiago de compostela"/"del estero"/"de los caballeros" antes que "santiago"). Match por palabra completa
+// sobre _norm; ciudades ambiguas entre países (Córdoba, Mérida, Cartagena, San José, San Juan, Guadalajara ES) se OMITEN a propósito.
+const _CIUDAD_PAIS = [
+  ['santiago de compostela','España'],['santiago del estero','Argentina'],['santiago de los caballeros','República Dominicana'],
+  ['porto alegre','Brasil'],['san salvador','El Salvador'],['mexico city','México'],['ciudad de mexico','México'],
+  ['buenos aires','Argentina'],['mar del plata','Argentina'],['sao paulo','Brasil'],['rio de janeiro','Brasil'],
+  ['belo horizonte','Brasil'],['santo domingo','República Dominicana'],['la habana','Cuba'],['havana','Cuba'],
+  ['new york','Estados Unidos'],['los angeles','Estados Unidos'],['san francisco','Estados Unidos'],
+  ['the hague','Países Bajos'],
+  ['madrid','España'],['barcelona','España'],['valencia','España'],['sevilla','España'],['seville','España'],
+  ['bilbao','España'],['malaga','España'],['zaragoza','España'],['alicante','España'],
+  ['lisboa','Portugal'],['lisbon','Portugal'],['porto','Portugal'],
+  ['rosario','Argentina'],['mendoza','Argentina'],['montevideo','Uruguay'],['asuncion','Paraguay'],
+  ['santiago','Chile'],['valparaiso','Chile'],
+  ['bogota','Colombia'],['medellin','Colombia'],['cali','Colombia'],['barranquilla','Colombia'],
+  ['lima','Perú'],['arequipa','Perú'],['quito','Ecuador'],['guayaquil','Ecuador'],
+  ['caracas','Venezuela'],['maracaibo','Venezuela'],
+  ['guadalajara','México'],['monterrey','México'],['puebla','México'],['tijuana','México'],['cancun','México'],['queretaro','México'],
+  ['brasilia','Brasil'],['curitiba','Brasil'],['recife','Brasil'],['fortaleza','Brasil'],
+  ['guatemala','Guatemala'],['panama','Panamá'],['tegucigalpa','Honduras'],['managua','Nicaragua'],
+  ['miami','Estados Unidos'],['chicago','Estados Unidos'],['houston','Estados Unidos'],['dallas','Estados Unidos'],
+  ['austin','Estados Unidos'],['boston','Estados Unidos'],['seattle','Estados Unidos'],['atlanta','Estados Unidos'],
+  ['denver','Estados Unidos'],['phoenix','Estados Unidos'],['philadelphia','Estados Unidos'],
+  ['london','Reino Unido'],['manchester','Reino Unido'],['dublin','Irlanda'],
+  ['amsterdam','Países Bajos'],['rotterdam','Países Bajos'],['eindhoven','Países Bajos'],['utrecht','Países Bajos'],
+  ['berlin','Alemania'],['munich','Alemania'],['frankfurt','Alemania'],['hamburg','Alemania'],
+  ['paris','Francia'],['lyon','Francia'],['milan','Italia'],['milano','Italia'],['rome','Italia'],['roma','Italia'],
+  ['zurich','Suiza'],['geneva','Suiza'],['brussels','Bélgica'],['stockholm','Suecia'],['copenhagen','Dinamarca'],
+  ['warsaw','Polonia'],['sydney','Australia'],['melbourne','Australia'],
+  ['toronto','Canadá'],['vancouver','Canadá'],['montreal','Canadá']
+];
+function _paisDeCiudad(ubicacion){
+  const t = _norm(ubicacion || '');
+  if(!t) return null;
+  for(const [ciudad, pais] of _CIUDAD_PAIS){
+    if(new RegExp(`\\b${ciudad}\\b`).test(t)) return pais;
+  }
+  return null;
+}
+// Parser TOLERANTE de get_contact_profile para el destinatario: el gateway puede devolver el objeto en
+// structuredContent, el JSON serializado en el texto, o el texto plano del formato REST ("Nombre — headline
+// @ Empresa (N employees) | Location: ..."). Puro (testeable): recibe la respuesta cruda, devuelve
+// {nombre,cargo,empresa,pais,ubicacion,about} o null si no hay nada usable. País desconocido → pais:null (no adivinar).
+function _parseDestinatario(res){
+  try{
+    const s = String(res || '');
+    let o = (res && res.structuredContent) || null;
+    if(!o){ const m = s.match(/\{[\s\S]*\}/); if(m){ try{ o = JSON.parse(m[0]); }catch{} } }
+    o = o || {};
+    const nombre = `${o.firstName || o.first_name || ''} ${o.lastName || o.last_name || ''}`.replace(/\s+/g,' ').trim()
+      || _profileName(s) || (s.includes('—') ? s.split('—')[0].trim() : '') || null;
+    const cargo = String(o.headline || '').trim() || ((s.match(/—\s*(.+?)(?:\s*@|\s*\(|\s*\||$)/) || [])[1] || '').trim() || null;
+    const empresa = String(o.companyName || o.company_name || '').trim() || _empresaDeHeadline(s) || null;
+    let ubicacion = String(o.location || '').trim() || ((s.match(/\|\s*Location:\s*([^|]+)/i) || [])[1] || '').trim() || null;
+    let pais = null;
+    if(ubicacion){
+      // País: primero por TOKEN exacto (el último suele ser el país, pero probamos todos: "Madrid, ..., Spain");
+      // si ningún token es un país (área metro sin país, ej. "Greater Madrid Metropolitan Area"), por CIUDAD conocida.
+      const partes = ubicacion.split(',').map(t => t.trim()).filter(Boolean);
+      for(const t of partes.slice().reverse()){ const p = _PAIS_EN_ES[_norm(t)]; if(p){ pais = p; break; } }
+      if(!pais) pais = _paisDeCiudad(ubicacion);
+    }
+    const about = (o.about ? String(o.about) : ((s.match(/\|\s*About:\s*(.+)$/i) || [])[1] || '')).replace(/\s+/g,' ').trim().slice(0, 400) || null;
+    if(!nombre && !cargo && !pais) return null;
+    return { nombre, cargo, empresa, pais, ubicacion, about };
+  }catch(e){ return null; }
+}
+// Resuelve el destinatario vía MCP. Nunca tira: un destinatario que no resuelve NO puede tumbar el reporte
+// (se degrada a null = comportamiento actual, sin scoping). El cache por job de callMCP dedupea si el mismo
+// perfil ya se consultó (ej. resolverCliente por profileId).
+async function resolverDestinatario({ perfil, profileId }){
+  const args = (perfil && String(perfil).trim())
+    ? { publicIdOrUrl: String(perfil).trim() }
+    : (profileId != null && String(profileId).trim() !== '' && !isNaN(Number(profileId))) ? { profileId: Number(profileId) } : null;
+  if(!args) return null;
+  try{
+    const d = _parseDestinatario(await _callMCPClienteConRetry('get_contact_profile', args));
+    if(d) console.log(`[DEST] destinatario resuelto: ${d.nombre || '?'} — ${d.cargo || '?'}${d.empresa ? ` @ ${d.empresa}` : ''}${d.pais ? ` (${d.pais})` : d.ubicacion ? ` (${d.ubicacion})` : ''}`);
+    else console.warn(`[DEST] get_contact_profile no trajo datos usables del destinatario (${perfil || profileId}).`);
+    return d;
+  }catch(e){ console.warn(`[DEST] destinatario ${perfil || profileId} no resolvió (sigo sin scoping):`, e.message); return null; }
+}
+
 // ===========================================================================
 // PIPELINE FULL (3 fases).
 // ===========================================================================
@@ -1497,8 +1658,10 @@ function _parseProfile(res){
 // Headcount puede venir como "442", "1,5 mil+", "10 mil+" (es-MX). Normaliza a entero.
 function _parseHC(raw){
   if(!raw) return null;
-  const mil = /mil/i.test(raw);
-  const s = String(raw).toLowerCase().replace(/mil/,'').replace(/\+/g,'').trim().replace(/\./g,'').replace(',','.');
+  // "7K+" (locale EN del gateway) = 7000, igual que "7 mil+" (es-MX). Sin la K, parseFloat('7k')=7 y un
+  // gigante quedaría contado como micro (rompería piso y techo al completar headcounts faltantes).
+  const mil = /mil/i.test(raw) || /\dk\+?\s*$/i.test(String(raw).trim());
+  const s = String(raw).toLowerCase().replace(/mil/,'').replace(/\+/g,'').trim().replace(/k\s*$/,'').trim().replace(/\./g,'').replace(',','.');
   const n = parseFloat(s);
   if(isNaN(n)) return null;
   return Math.round(mil ? n*1000 : n);
@@ -2423,6 +2586,31 @@ function _candViable(c, titulos, excluir, industrias, esComp){
 // Es BARATO en tokens (solo MCP, cada llamada con su timeout); el costo es latencia, aceptable. SELECT corre UNA
 // sola vez DESPUÉS, sobre el pool acumulado (tokens planos).
 // Conserva el retry anti-hipo del MCP: si una pasada sale 100% vacía, espera y reintenta esa pasada.
+
+// INDUSTRIA de una empresa por NOMBRE, vía búsqueda de EMPRESAS (el dato confiable: companyIndustry del
+// perfil suele venir null y lookup_company por nombre suelto falla/trae homónimos — memoria Aenima). SOLO
+// confiamos si el nombre devuelto matchea EXACTO por _empKey (verificado en vivo: "Ayesa Digital" →
+// "IT Services and IT Consulting"). Falla suave → null (no filtra). Cache por job (_industriaCache).
+async function _fichaEmpresa(nombre){
+  const k = _empKey(nombre || ''); if(!k) return null;
+  const st = _stats(); if(!st._industriaCache) st._industriaCache = new Map();
+  if(st._industriaCache.has(k)) return st._industriaCache.get(k);
+  let ficha = null;
+  try{
+    const txt = String(await callMCPReintento('search_sales_navigator_filtered', { category: 'companies', keywords: String(nombre).trim(), profilesLimit: 3 }));
+    // Puede haber VARIAS páginas con el mismo nombre (visto en vivo: "Ayesa Digital" real con industria y
+    // 901 empleados + una fantasma sin industria y 2 empleados). Entre las que matchean el nombre exacto,
+    // preferimos la que tiene industria y más headcount (la página real), nunca la fantasma.
+    const hits = _parseCompanies(txt).filter(c => _empKey(c.name) === k);
+    hits.sort((a, b) => ((b.industry?1:0) - (a.industry?1:0)) || ((b.headcount||0) - (a.headcount||0)));
+    const hit = hits[0];
+    if(hit) ficha = { industria: hit.industry || null, headcount: hit.headcount != null ? hit.headcount : null };
+  }catch(e){ console.warn(`[PEER] búsqueda de empresa falló para "${nombre}" (sigo sin filtrar):`, e.message); }
+  st._industriaCache.set(k, ficha);
+  return ficha;
+}
+async function _industriaDeEmpresa(nombre){ const f = await _fichaEmpresa(nombre); return (f && f.industria) || null; }
+
 async function sourceConRetry(plan, cliente){
   const reintentos   = parseInt(process.env.SOURCE_RETRY_ON_EMPTY || '1', 10);
   const delay        = parseInt(process.env.SOURCE_RETRY_DELAY_MS || '6000', 10);
@@ -2511,6 +2699,58 @@ async function sourceConRetry(plan, cliente){
   }
 
   const N_IA = parseInt(process.env.SOURCE_TO_IA || '18', 10);
+
+  // ===== ANTI-PEER POR INDUSTRIA sobre el tramo que va a SELECT (caso real Ayesa Digital) ====
+  // El filtro de arriba mira NOMBRE de empresa + HEADLINE de la persona, pero un peer cuyo nombre y headline
+  // no delatan el rubro ("Ayesa Digital" / "CIO") se cuela igual: su INDUSTRIA de LinkedIn ("IT Services and
+  // IT Consulting") solo se ve en la búsqueda de EMPRESAS. Acá consultamos la industria de cada empresa
+  // DISTINTA del tramo con chances de llegar a SELECT y descartamos las que caen en verticales_excluir.
+  // Quemó DOS reportes seguidos de McCoy (el prospecto conocía al CIO de Ayesa y la rechazó como peer).
+  // Falla suave (sin respuesta/sin match de nombre → no filtra) + degradación digna + kill-switch por env.
+  const _tamMaxPool = parseInt((icp && icp.tamano_max) || 0, 10) || 0;
+  if(String(process.env.PEER_INDUSTRY_CHECK || 'on').toLowerCase() !== 'off' && (excluir.length || _tamMaxPool > 0)){
+    const tramo = pob.slice(0, N_IA * 2);
+    // Empresas a consultar: TODAS las del tramo si hay verticales a excluir (necesitamos la industria);
+    // si solo importa el techo, únicamente las de candidatos SIN headcount (dato faltante, caso Antolin).
+    const objetivo = excluir.length ? tramo : tramo.filter(c => c.headcount == null);
+    const nombres = [...new Map(objetivo.map(c => [_empKey(c.empresa||''), c.empresa])).entries()]
+      .filter(([k, n]) => k && n).map(([, n]) => n);
+    const CONC = 6;
+    const fichas = new Map();   // empKey -> {industria, headcount} | null
+    for(let i = 0; i < nombres.length; i += CONC){
+      await Promise.all(nombres.slice(i, i + CONC).map(async n => { fichas.set(_empKey(n), await _fichaEmpresa(n)); }));
+    }
+    // (1) ANTI-PEER por INDUSTRIA (caso Ayesa Digital): nombre/headline no delatan el rubro, la industria sí.
+    if(excluir.length){
+      const peers = new Set();
+      for(const n of nombres){
+        const f = fichas.get(_empKey(n));
+        if(f && f.industria && _matchVerticalExcluir(f.industria, excluir)){ peers.add(_empKey(n)); console.warn(`[PEER] fuera del pool por INDUSTRIA excluida: "${n}" (${f.industria})`); }
+      }
+      if(peers.size){
+        const sinPeers = pob.filter(c => !peers.has(_empKey(c.empresa||'')));
+        if(sinPeers.length >= NUM_CUENTAS){ console.log(`[PEER] pool sin peers por industria: ${sinPeers.length} (de ${pob.length}; ${peers.size} empresa(s) peer).`); pob = sinPeers; }
+        else console.warn(`[PEER] filtrar peers por industria dejaría ${sinPeers.length}/${NUM_CUENTAS} candidatos -> degradación digna, NO filtro.`);
+      }
+    }
+    // (2) TECHO-SIN-DATO (caso Antolin, grupo de decenas de miles con techo 2000): el techo del sourcing
+    // solo veta headcount CONOCIDO, así que un candidato-persona sin headcount pasaba aunque su empresa
+    // fuera un gigante. Completamos el headcount desde la MISMA ficha (solo con match exacto de nombre)
+    // y re-aplicamos el techo con la degradación digna de siempre. El headcount completado además viaja
+    // a SELECT ("~N empleados") y a _tamanoIncoherente, que antes tampoco podían juzgar.
+    if(_tamMaxPool > 0){
+      for(const c of pob){
+        if(c.headcount == null){ const f = fichas.get(_empKey(c.empresa||'')); if(f && f.headcount != null) c.headcount = f.headcount; }
+      }
+      const sobre = pob.filter(c => c.headcount != null && c.headcount > _tamMaxPool);
+      if(sobre.length){
+        const bajo = pob.filter(c => !(c.headcount != null && c.headcount > _tamMaxPool));
+        if(bajo.length >= NUM_CUENTAS){ for(const c of sobre) console.warn(`[TAM] fuera del pool por techo con headcount completado (${c.headcount}>${_tamMaxPool}): ${c.name} @ ${c.empresa||'?'}`); pob = bajo; }
+        else console.warn(`[TAM] techo con headcount completado dejaría ${bajo.length}/${NUM_CUENTAS} candidatos -> degradación digna, NO filtro.`);
+      }
+    }
+  }
+
   const pool = pob.slice(0, N_IA);
 
   // ===== FUNDING PRE-SELECT (re-rankeo; SIN llamadas MCP extra) ==============================
@@ -2578,6 +2818,7 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - PRINCIPIO RECTOR (gobierna TODO lo de abajo): tu nivel de certeza al escribir tiene que IGUALAR el nivel de tu fuente. No subas el tono (no afirmes como un hecho algo que la fuente sugiere, ni como "operación" algo que recién arranca, ni como "cliente" a un tercero que no está confirmado) ni lo bajes (no llames "apertura/posibilidad" a algo que la fuente da por consolidado). Ante la duda: bajá el tono a una formulación cualitativa, o directamente omití el dato. Las reglas que siguen (números, año de fundación, terceros, países) son CASOS de este mismo principio; cuando dudes en algo no listado, aplicá el principio igual.
 - "fecha" = EXACTAMENTE la fecha de hoy que te paso en el mensaje (no inventes otra).
 - ATRIBUTOS Y CREDENCIALES DEL CLIENTE (caso del principio rector, tan grave como inventar un número): NO le atribuyas al cliente certificaciones, acreditaciones, pólizas, sellos, cumplimientos normativos ni características operativas específicas salvo que web_search lo confirme en una fuente del propio cliente. Esto incluye cosas que "suenan lógicas" pero que no viste: "técnicos certificados en alturas", "pólizas de responsabilidad civil", "proveedor auditado", "certificación ISO", "atención/operación 24/7", "garantía de X horas". Que sea PLAUSIBLE para el rubro NO alcanza: si no salió de una fuente, no lo afirmes. Si querés transmitir formalidad/calidad sin el dato puntual, usá una formulación cualitativa y verificable ("un proveedor formal del segmento", "una red estructurada de técnicos") en vez de inventar la credencial. Una credencial falsa que el prospecto repregunta quema el reporte igual que un nombre de tercero inventado.
+- PRESENCIA / OFICINAS / PAÍSES DEL PROPIO CLIENTE (caso real que quemó un reporte: una nota de prensa decía "oficina en Singapur", el sitio oficial del cliente ya no la listaba, y el prospecto lo detectó al instante): la lista de oficinas, sedes o países de presencia del cliente sale EXCLUSIVAMENTE de una fuente del PROPIO cliente (su sitio oficial en el dominio ancla, o su página de LinkedIn). Una nota de prensa, directorio o artículo puede CORROBORAR lo que el sitio oficial ya dice, pero NUNCA AGREGAR una oficina o país que el sitio oficial no liste HOY: la prensa envejece (la oficina pudo cerrar o ser de otra entidad del grupo). Ante conflicto entre una nota y el sitio oficial actual, MANDA el sitio oficial. Si una presencia aparece SOLO en prensa, OMITILA (el reporte pierde menos por no nombrar una sede que por nombrar una que ya no existe). Y si el reporte es para una operación local de un grupo multinacional, NO inventaries las sedes del grupo: nombrá solo lo relevante al mercado del documento.
 - VERACIDAD (CRÍTICO): PROHIBIDO inventar métricas o datos duros. Esto incluye específicamente: cantidad de categorías/tipos de servicio (ej. "+300 categorías"), totales acumulados (ej. "+470.000 servicios"), tiempos de respuesta ("60 minutos"), %, premios, año de fundación o stage. Si un número NO sale textual de web_search o de una fuente verificable, NO lo pongas en ningún lado (lead, proof, context, apertura, stats, ribbon). Ante la duda, usá una formulación cualitativa SIN número ("amplia cobertura", "varias categorías de servicio"). Es preferible un reporte sin números a uno con números inventados. REGLA DE ORO: antes de cerrar, releé CADA número que escribiste; si no podés señalar la fuente exacta de web_search de donde salió, BORRALO o pasalo a texto cualitativo. El invento más común y MÁS GRAVE es "+300 tipos de servicio" o "+X servicios/clientes": NO lo escribas jamás si no lo viste en una fuente.
 - STATS: que los 4 chips sean datos verificables o estructurales (ej: la cantidad ${N} de cuentas priorizadas, países de operación reales, año de fundación SOLO si lo verificaste). NUNCA rellenes un stat con un número inventado para que "quede lindo". Preferí stats que IMPACTEN y sean verificables (ciudades/países de cobertura, años en el mercado, la cantidad ${N} de cuentas). EVITÁ stats que subvendan al cliente, como su propia cantidad de empleados si es baja.
 - STATS — PROHIBIDO FABRICAR UN NÚMERO CONTANDO TU PROPIO REPORTE (defecto frecuente): un stat numérico SOLO vale si ese número sale TEXTUAL de web_search. NO inventes un stat contando elementos que vos mismo escribiste o dedujiste: prohibido "3 líneas de producto", "3 segmentos atendidos", "4 verticales objetivo", "1 país de operación confirmado", "2 modelos de negocio". Esos números los estás CONTANDO de tu propia redacción, no de una fuente, así que son inventados. ÚNICAS excepciones legítimas que no salen de web_search: (a) la cantidad ${N} de cuentas priorizadas (es un dato del propio reporte, declarado como tal), y (b) el conteo de países de operación SOLO si cada país está confirmado por web_search (ver regla de países). PROHIBIDA la palabra "confirmado/confirmada/confirmados" en el label o el num de un stat si no hay una fuente que lo respalde: no uses "confirmado" para disimular un número que vos dedujiste. Si no juntás 4 números genuinamente verificables, usá stats CUALITATIVOS o ESTRUCTURALES honestos (ej: {"num":"${N}","label":"Cuentas priorizadas"}, {"num":"Multi","label":"País de operación"} o un chip sin número de tipo categoría/modelo) en vez de fabricar cifras.
@@ -2624,8 +2865,10 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 - COMPETIDORES (importante para no quemar el reporte): en "competidores" listá los NOMBRES de empresas/PRODUCTOS que compiten DIRECTAMENTE con la solución que vende el cliente (otras herramientas/soluciones DEL MISMO TIPO), porque venden/fabrican LO MISMO que el cliente. REGLA MENTAL INNEGOCIABLE: un competidor es algo que tu comprador potencial podría comprar EN VEZ del producto del cliente; NO es el comprador potencial mismo. PROHIBIDO incluir la INDUSTRIA, la FUNCIÓN, el TIPO DE EMPRESA o la VERTICAL del COMPRADOR objetivo (eso son tus clientes, no tus rivales). Ejemplo concreto: si el cliente es un CRM que se VENDE a inmobiliarias, los competidores son OTROS CRM inmobiliarios (ej. Inmovilla, Wasi, Propify), NUNCA "inmobiliaria", "agencia inmobiliaria" ni "bienes raíces" (esos son los COMPRADORES). Buscalos con web_search e incluí TRES tipos: (i) competidores directos de tamaño similar; (ii) FABRICANTES o PROVEEDORES globales del mismo producto (ej. para detonadores/voladura: Enaex, Orica, Dyno Nobel, Sandvik; para staffing de tecnología: Toptal, Turing, Andela, TEKsystems); (iii) distribuidores o integradores que revenden ese producto. Son PARES o RIVALES, no clientes. El sistema EXCLUYE a cualquiera que trabaje en esas empresas. Usá nombres de marca/empresa REALES del research. NO pongas palabras genéricas del servicio (ej. "asistencia", "mantenimiento") porque descartaría compradores legítimos. Si no identificás competidores reales claros, MEJOR dejá la lista VACÍA que meter la vertical del comprador (que rompe el sourcing).
 - COMPETIDOR_TERMINOS (filtro de respaldo, usar con cuidado): listá 0-4 términos del PRODUCTO ESPECÍFICO que el cliente fabrica/vende y que, si aparecen en el NOMBRE de otra empresa, casi seguro la delatan como proveedor o competidor (ej. "explosivos", "detonadores", "voladura", "staffing", "proptech"). MISMA REGLA MENTAL que en "competidores": un término competidor describe algo que el comprador compraría EN VEZ del producto del cliente, NUNCA describe al comprador mismo. REGLA CRÍTICA Y DURA: PROHIBIDO poner la INDUSTRIA, la FUNCIÓN, el TIPO DE EMPRESA o el VERTICAL donde el cliente VENDE. Si vende software/CRM inmobiliario NO pongas "inmobiliaria" ni "agencia inmobiliaria" ni "bienes raíces"; si le vende a minería NO pongas "minería". Eso descartaría a tus propios COMPRADORES (es exactamente el bug que quemó el sourcing de NOCNOK). Solo el nombre del producto en sí. Ante la duda, MEJOR dejá la lista VACÍA que arriesgarte a meter la vertical del comprador.
 - VERTICALES_EXCLUIR (ruido adyacente del sourcing, NO inventes nada del cliente): listá 2-5 RUBROS ADYACENTES que comparten palabras o suenan parecido al ICP pero que NO son compradores del cliente, para que el sistema los descarte del pool. Son verticales del MERCADO (no del cliente): no estás afirmando nada nuevo sobre el cliente, solo marcando rubros-ruido a EXCLUIR. Ejemplos: para una empresa de voladura minera, excluí "geotecnia", "mecánica de suelos", "militar", "consultoría"; para una marca de joyería retail, excluí "hotelería", "educación". REGLA ANTI FALSO POSITIVO: NUNCA pongas acá el vertical legítimo del comprador (si el comprador está en "Seguros", JAMÁS pongas "seguros") ni un término tan corto/genérico que pueda colarse en nombres de tus compradores. Si no hay rubros adyacentes claros que confundan, dejá la lista VACÍA ([]). BILINGÜE (CRÍTICO, sino NO filtra): los datos de empresa en LinkedIn (industria/headline) vienen casi siempre en INGLÉS, y el filtro es por coincidencia de texto. Por eso CADA rubro a excluir ponelo en español Y su equivalente en inglés: ej. "consultoría de gestión" Y "management consulting"; "investigación de mercado" Y "market research"; "relaciones públicas" Y "public relations"; "educación" Y "education". Si solo lo ponés en español, una empresa con headline en inglés (caso real: PwC "Management Consulting") se cuela igual. Términos de ≥4 letras.
+  REGLA DURA ANTI-PEER (caso real que quemó DOS reportes seguidos: Ayesa, consultora IT con práctica SAP propia, salió como lead de una consultora SAP y el prospecto, que la conocía en persona, la rechazó como "peer tecnológico"; en el retest salieron 3/3 consultoras): si el CLIENTE vende SERVICIOS (consultoría, implementación, integración, agencia, desarrollo), las empresas del MISMO rubro de servicios NO son compradoras: tienen capacidad propia puertas adentro o son rivales directos, por más que caigan dentro de una vertical compradora amplia como "servicios profesionales". Por eso agregá SIEMPRE a verticales_excluir los términos que describen el rubro del PROPIO cliente, en español E inglés (ej. para una consultora SAP: "consultoría SAP", "SAP consulting", "consultora tecnológica", "IT consulting", "technology consulting", "integrador de sistemas", "systems integrator"; para una agencia de marketing: "agencia de marketing", "marketing agency", "advertising agency"). Estos términos anti-peer NO cuentan para el tope de 2-5 (van ADEMÁS de los rubros-ruido). MATIZ IMPORTANTE que NO rompe el recall: esto NO excluye a los "servicios profesionales" que sí COMPRAN (estudios jurídicos, ingenierías, firmas de arquitectura o auditoría compran un ERP); excluye ESPECÍFICAMENTE a quienes VENDEN lo mismo que el cliente. El test mental por empresa: "¿esta empresa le COMPRARÍA esto al cliente, o lo hace/vende ella misma?"; si lo hace ella misma, es PAR y va excluida.
 - LARGO (CRÍTICO — la página 1 tiene que RESPIRAR, no ser un muro de texto; pero el "lead" SÍ desarrolla): el "lead" es la APERTURA del documento, 3 oraciones cortas y PLANAS (humanas, no corporativas): presenta qué hace el cliente, enmarca que armamos este diagnóstico para que sepas cuándo y cómo contactar a tus clientes potenciales, y dice que te compartimos ${N} encontrados con el mensaje listo. Trato de TÚ (cercano y directo). No es telegrama pero TAMPOCO un párrafo denso; SIN nombres de marcas, jerga ni mención de tecnología en la apertura. TODO LO DEMÁS corto: proof = 1 oración; cada desc del ICP = FRASE TELEGRÁFICA de máx ~14 palabras (frase nominal, sin subordinadas, sin relleno: ej. "VP/Director de Operaciones o RobOps Lead", NO un párrafo); "Señal de compra" y "Pain primario" = media oración cada una (máx ~14 palabras); cada bullet de context = máx ~16 palabras; cada prioridad = prefijo de orden ("Primero:"/"Después:"/"También:") + frase de máx ~16 palabras (ver regla PRIORIDADES). Fuera del lead, cortá toda palabra que no aporte y preferí frases nominales. El objetivo: el lead explica y vende; el resto se lee de un vistazo.
 - PRIORIDADES "Por dónde empezar" (CRÍTICO — lo lee alguien que NO conoce el rubro: tiene que ENTENDERSE solo): las 4 prioridades dicen por qué TIPO de empresa conviene empezar y en qué orden. REGLAS DURAS: (1) LENGUAJE PLANO, sin jerga: si usás un término técnico o de nicho, glosalo en 2-3 palabras entre paréntesis (ej. "operadores 3PL (empresas que manejan la logística de otros)"). Nada de siglas sueltas ni etiquetas internas sin explicar. (2) ORDEN POR PRIORIDAD con prefijo literal: las 2 de MAYOR prioridad empiezan con "Primero:", la siguiente con "Después:" y la última con "También:" (en ese orden exacto, NUNCA "Alta:"/"Media:"). (3) Cada ítem dice QUÉ tipo de empresa + POR QUÉ conviene, claro y corto (máx ~16 palabras incluyendo el prefijo). (4) ANTI-INVENCIÓN: no inventes segmentos, datos ni nombres; los tipos de empresa salen del comprador real que ya investigaste. (5) Las que marcás "Primero:" son las MISMAS verticales que van en "industrias" (coherencia con esa regla). Trato de TÚ, español neutro, SIN guiones.
+- TECNOLOGÍA QUE EL CLIENTE VENDE ≠ TÉRMINO DE BÚSQUEDA DE PERSONAS (REGLA DURA, caso real que llenó el pool de competidores): si el cliente VENDE servicios sobre una tecnología o producto con nombre propio (SAP, Salesforce, AWS, Odoo, HubSpot...), PROHIBIDO usar ese nombre (y sus variantes: S/4HANA, ECC...) en "titulos_objetivo": en LinkedIn, quien lleva esa tecnología en el CARGO es casi siempre quien la VENDE o implementa (consultores, partners, la propia marca), NUNCA el comprador. El CIO de una fábrica que USA SAP dice "CIO", no "SAP". Buscar por el nombre del producto trae a la competencia del cliente y contamina el pool entero (caso real: buscar "SAP, S4HANA" para una consultora SAP llenó el pool de gente de KPMG/SEIDOR/Minsait). El comprador se encuentra por ROL (CIO, director TI, director de operaciones, CFO) DENTRO de las industrias compradoras (el filtro de industria hace el trabajo que la keyword no puede hacer). El nombre de la tecnología SÍ puede ir en "competidor_terminos" (delata proveedores por nombre de empresa).
 - _plan.titulos_objetivo es CRÍTICO: el sistema rankea y BUSCA con estas palabras (una por una) dentro del cargo. Palabras SUELTAS (no frases), ES+inglés+abreviaturas. APLICÁ acá la regla de DESAMBIGUACIÓN de arriba: evitá palabras de cargo genéricas/porosas que matchean cualquier industria ("operations", "automation", "fleet", "platform", "manager" a secas); preferí términos del cargo que anclen al nicho del comprador real, o el nombre del producto/vertical del cliente tal como aparece en el cargo del comprador. Pensá DOS tipos de comprador y poné términos de AMBOS: (a) el que CONSUME el servicio puertas adentro (operaciones, facilities, mantenimiento, servicios generales, administrador); y (b) el que dentro de la empresa-canal OWNS la línea de producto/relación que mapea con lo que vende el cliente (el comprador de canal). Para (b), usá el NOMBRE del producto/vertical del cliente tal como aparece en cargos del comprador: ej. para una empresa de asistencia domiciliaria, los que en una aseguradora/retailer manejan "hogar", "asistencia", "vivienda", "copropiedad", "siniestros", "líneas personales", "proveedores". NO te quedes solo con los roles de facilities: el comprador de canal (ej. el jefe de línea hogar de una aseguradora) suele ser la mejor cuenta. Si el ICP apunta a empresas chicas donde compra el dueño/CEO, incluí "ceo, founder, owner, dueño, fundador". ORDEN: poné PRIMERO los términos del comprador de canal/producto (b) y después los de facilities (a); el sistema usa los primeros, así que los más valiosos van al frente.
 
 ## Output — SOLO JSON (sin texto ni markdown alrededor)
@@ -2647,12 +2890,18 @@ Generás la PARTE 1 de un reporte de análisis de mercado que IBT manda a un pro
 }
 CANTIDADES EXACTAS: ribbon 3, stats 4, icp 4, context 3, apertura 3, prioridades 4. NADA fuera del objeto JSON.`; }
 
-async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy }){
+async function runPlan({ empresa, dominio, email, nombre, cliente, fechaHoy, dest }){
   _setStage('gen');
+  // DESTINATARIO (caso McCoy: el PDF le nombró Singapur y Manila del grupo global a un lector de la operación
+  // de España). Si sabemos QUIÉN va a leer el reporte, su país y su unidad definen el ALCANCE del documento.
+  // Las reglas van acá (en el mensaje, como el bloque ANTI-HOMÓNIMO) y no en el system: solo aplican si hay dato.
+  const bloqueDest = (dest && (dest.cargo || dest.pais))
+    ? `\n\nDESTINATARIO DEL REPORTE (dato duro del MCP: la persona REAL que va a recibir y leer este documento): ${dest.nombre || '?'}${dest.cargo ? `, ${dest.cargo}` : ''}${dest.pais ? `, en ${dest.pais}${dest.ubicacion ? ` (${dest.ubicacion})` : ''}` : dest.ubicacion ? `, en ${dest.ubicacion}` : ''}.\nESCRIBÍ PARA SU ALCANCE (CRÍTICO si el cliente es un grupo multinacional): el reporte es para LA OPERACIÓN/UNIDAD del destinatario, NO para el grupo global. ${dest.pais ? `"geografia" y el mercado del título son ${dest.pais} (el país del destinatario), salvo que su cargo declare EXPLÍCITAMENTE un alcance regional/global. ` : ''}Si su cargo acota una unidad, línea o región (ej. "Director de Ventas Colombia"), ESE es el alcance de todo el documento. Los datos de página 1 (proof, context, stats) hablan de SU operación: PROHIBIDO citar oficinas, países, hitos o estructura del grupo que NO toquen el mercado del destinatario (a un lector de una operación local, nombrarle sedes remotas del grupo le suena a dato ajeno y resta credibilidad). La historia del grupo se menciona SOLO como respaldo breve y verificado, sin inventario de sedes.`
+    : '';
   const bloqueCliente = (cliente && cliente.anclado)
     ? `\n\nDATOS VERIFICADOS DEL CLIENTE (NO inventes otra empresa, usá ESTOS): Empresa: ${cliente.empresa}; Tamaño: ${cliente.headcount ?? '?'} empleados${cliente.tier ? ` (tier ${cliente.tier})` : ''}.${cliente.pais ? ` PAÍS SEDE (dato DURO de la página de LinkedIn de la empresa, NO lo contradigas): ${cliente.pais}${cliente.ciudad ? ` (${cliente.ciudad})` : ''}. "geografia" TIENE que ser ${cliente.pais}; solo agregá otros países a "geografias" si el research confirma que el cliente HOY también opera ahí.` : ''}${cliente.descripcion ? `\nQUÉ HACE LA EMPRESA (descripción TEXTUAL de su propia página de LinkedIn — este es el rubro REAL del cliente, dato DURO): «${cliente.descripcion}»${cliente.especialidades ? ` (especialidades: ${cliente.especialidades})` : ''}.\nANTI-HOMÓNIMO (CRÍTICO): "${cliente.empresa}" es un nombre que pueden compartir varias empresas de distintos rubros y países. TODO tu análisis (qué hace, a quién le vende, el ICP entero) tiene que ser coherente con ESTA descripción y ESTE país. Si una fuente de web_search habla de una empresa del mismo nombre pero de OTRO rubro u OTRO país, es OTRA empresa: DESCARTÁ esa fuente por completo (no mezcles rubros ni datos de homónimas). Si el research no aporta nada de ESTA empresa, derivá el ICP desde la descripción de LinkedIn sola.${(cliente.dominio || dominio) ? ` ANCLA DE IDENTIDAD: el sitio oficial del cliente es ${cliente.dominio || dominio} — incluí ese dominio en tus búsquedas (ej. "${cliente.empresa} ${cliente.dominio || dominio}") y preferí las fuentes que correspondan a ESE sitio.` : ''}` : ''}`
     : '';
-  const messages = [{ role:'user', content:`Cliente a analizar:\n- Empresa: ${empresa}\n- Dominio: ${dominio}\n- Email contacto: ${email}\n- Nombre contacto: ${nombre}${bloqueCliente}\n\nFecha de hoy (usala en "fecha"): ${fechaHoy}\n\nInvestigá la empresa con web_search y devolvé SOLO el JSON del schema.` }];
+  const messages = [{ role:'user', content:`Cliente a analizar:\n- Empresa: ${empresa}\n- Dominio: ${dominio}\n- Email contacto: ${email}\n- Nombre contacto: ${nombre}${bloqueCliente}${bloqueDest}\n\nFecha de hoy (usala en "fecha"): ${fechaHoy}\n\nInvestigá la empresa con web_search y devolvé SOLO el JSON del schema.` }];
   const MAX = parseInt(process.env.PLAN_MAX_TOOL_ITERS || '8', 10);
   let it=0, cerrar=false;
   while(true){
@@ -2724,7 +2973,13 @@ async function runPlanConRetry(args){
     try{
       const plan = await runPlan(args);
       validarPlan(plan);   // idempotente: confirma que el PLAN está completo antes de seguir
-      _corregirGeoSede(plan, args && args.cliente && args.cliente.pais);   // guarda determinística de país sede (caso Transur)
+      // Guarda determinística de país (caso Transur + caso McCoy): el país del DESTINATARIO manda sobre la
+      // sede del cliente cuando difieren (multinacional: el reporte es para SU operación, no para el grupo).
+      const _paisDest = args && args.dest && args.dest.pais;
+      const _paisSede = args && args.cliente && args.cliente.pais;
+      if(_paisDest && _paisSede && _norm(_paisDest) !== _norm(_paisSede))
+        console.log(`[GEO] destinatario en "${_paisDest}" ≠ sede del cliente "${_paisSede}" → el reporte se ancla al país del DESTINATARIO.`);
+      _corregirGeoSede(plan, _paisDest || _paisSede);
       return plan;
     }catch(e){
       ultimoError = e;
@@ -2763,6 +3018,7 @@ Te paso una LISTA REAL de candidatos (gente que existe, con su id, nombre, cargo
 - BIO (si la línea del candidato trae 'BIO (texto real de su perfil)'): es el "Acerca de" que ESA persona escribió en su propio LinkedIn. Es ORO para personalizar: usalo para que el ángulo y el hook conecten con lo que a la persona le importa (su enfoque, sus temas, cómo describe su trabajo) — un mensaje que refleja lo que el lead mismo dice de sí convierte mucho más que uno genérico. REGLAS: (1) podés parafrasear o hacer eco de SUS temas, pero PROHIBIDO atribuirle afirmaciones, logros o datos que no estén textuales en la bio; (2) no cites la bio entre comillas como si lo hubieras entrevistado; integralo natural ("veo que tu foco está en X"); (3) si la bio no aporta al pitch, ignorala (no fuerces la referencia); (4) la bio NUNCA pisa el cargo/empresa de la lista (esos mandan).
 - PROHIBIDO atribuir un ÁREA, DEPARTAMENTO, INICIATIVA o ESPECIALIDAD que no aparezca LITERAL en el cargo de la lista. Si el cargo dice solo "Executive Director", NO escribas que "dirige Automation", "lidera Innovation" ni que está "a cargo de Automation e Innovation": esa área NO está en el cargo, te la estás inventando. Hablá del rol GENÉRICO tal como figura ("como Executive Director", "desde su rol de dirección"), NO inventes el QUÉ específico que dirige. Misma regla para el ángulo y para el hook.
 - PROHIBIDO RE-ENCUADRAR EL ROL HACIA EL COMPRADOR (defecto sutil): NO le atribuyas a la persona la responsabilidad de COMPRA, DECISIÓN o LIDERAZGO de un área que su cargo real NO implica. Un "Head of Design" NO "lidera las compras de [X]"; un "People & Culture Director" NO "decide alianzas/expansión/proveedores"; un "Marketing Manager" NO "gestiona la operación de mantenimiento". Si el cargo es de OTRA función y claramente NO es el comprador del producto del cliente, NO lo fuerces a parecerlo: conectá con lo que ESE rol SÍ hace, o mejor elegí otro candidato cuyo cargo sí sea del comprador. Forzar el encuadre quema el reporte cuando el prospecto lee que le atribuís algo que no es lo suyo.
+- PROHIBIDO AFIRMAR QUE LA EMPRESA USA UNA TECNOLOGÍA ESPECÍFICA SIN EVIDENCIA (caso real que quemó un reporte: "conozco a sus CIOs y ninguno usa SAP"): si el cliente vende servicios sobre una tecnología con nombre propio (SAP, Salesforce, Odoo...), el ángulo y el hook NO pueden afirmar ni presuponer que la empresa de la card LA USA ("su entorno SAP", "la evolución de tu entorno SAP", "el reto no es tener SAP sino...") salvo que la línea del candidato o su BIO lo digan explícitamente. Sin evidencia, redactá en GENÉRICO por la NECESIDAD, no por la marca: "su ERP", "sus sistemas de gestión", "la plataforma que sostiene la operación" (la pregunta abierta "¿con qué ERP trabajan hoy?" es MEJOR hook que presuponer la marca: invita respuesta en vez de arriesgar un "no usamos eso"). Presuponer la tecnología equivocada quema la card entera apenas el prospecto la lee.
 - PROHIBIDO AFIRMAR UN FIT DE NEGOCIO QUE NO CONSTA (anti-invención, defecto que MAQUILLA un mismatch): el ángulo y el hook NO pueden AFIRMAR que la empresa de la card COMPRA, ALOJA, REVENDE o INTEGRA lo del cliente si eso no está respaldado por lo que sabés de esa empresa. PROHIBIDO frases tipo "incorpora marcas externas", "aloja proveedores de terceros", "integra robótica", "suma soluciones como la de [cliente]" sobre una empresa donde NO hay evidencia de que lo haga (peor aún si es justo lo que esa empresa NO hace, ej. una marca propia que solo vende lo suyo). Si NO sabés si la empresa compra/aloja lo del cliente, NO lo afirmes: conectá con lo que ESE rol/empresa SÍ hace de forma genérica y verificable ("como responsable de [área] en [empresa], usted maneja [lo que el rol SÍ toca]"), sin atribuirle una adopción que no consta. Afirmar un fit inexistente quema el reporte apenas el prospecto lo lee.
 - PROHIBIDO INVENTARLE LOGROS/CASOS/MÉTRICAS AL CLIENTE (anti-invención, tan grave como inventar el cargo): el ángulo y el hook conectan el rol con lo que el cliente OFRECE (en presente, cualitativo), NUNCA con un resultado, caso de éxito, implementación, cifra o cliente del cliente que NO esté TEXTUAL en el contexto "Qué ofrece / proof" que te paso. PROHIBIDO escribir cosas tipo "[cliente] redujo X a cero", "implementaciones activas en [sector]", "ya trabaja con empresas como la suya", "logró +X% de", "tiene casos en [vertical]" si eso no figura LITERAL en el contexto. Si el contexto no trae un logro, NO lo inventes: describí qué OFRECE el cliente y cómo eso toca el rol de esa persona. Una métrica o caso inventado del cliente lo quema apenas el prospecto repregunta.
 - CADA uno DEBE tener angulo y hook NO vacíos.
@@ -3322,8 +3578,18 @@ function _reconciliarGeoVisible(valor, cardPaises){
   const v = String(valor||'').trim();
   if(!v) return null;
   const paises = _paisesDeTexto(v);
-  if(paises.length < 2) return null;                       // 0/1 país → nada que reducir
   if(!cardPaises || !cardPaises.size) return null;         // sin país de cards → no tocar
+  // CASO DESTINATARIO (Kais: cinta "España (expansión LATAM)" con las 3 cards en Argentina): si la cinta
+  // nombra país(es) y NINGUNO coincide con los de las cards, la cinta describe el mercado equivocado
+  // entero → se reemplaza por el/los país(es) reales de las cards (la celda GEOGRAFÍA y el puente
+  // "Encontramos varios decisores en X" beben de acá; dejar "España" con cards argentinas contradice el título).
+  if(paises.length >= 1 && paises.every(p => !cardPaises.has(p))){
+    // cardPaises viene NORMALIZADO ("argentina"); para publicar usamos el nombre display de _ISO_PAIS
+    // ("Argentina", "España") y si no está ahí, Title Case como degradación digna.
+    const _display = (nrm) => Object.values(_ISO_PAIS).find(v => _norm(v) === nrm) || String(nrm).replace(/\b\p{L}/gu, c => c.toUpperCase());
+    return [...cardPaises].map(_display).join(' · ');
+  }
+  if(paises.length < 2) return null;                       // 1 país que SÍ coincide → nada que reducir
   if(paises.every(p => cardPaises.has(p))) return null;    // la cinta ya coincide con las cards
   const tokens = v.split(/\s*·\s*|\s*,\s*|\s+y\s+|\s+e\s+|\s+and\s+/i).map(t=>t.trim()).filter(Boolean);
   const quedan = tokens.filter(t => { const ps=_paisesDeTexto(t); return ps.length && ps.some(p=>cardPaises.has(p)); });
@@ -3543,7 +3809,7 @@ Te paso UNA empresa y el producto que un proveedor le quiere vender. Buscá en w
 - Cada señal TIENE que salir de una fuente real que encontraste con web_search. Devolvé el nombre de la fuente (medio o sitio), la fecha (Mes Año) y la URL EXACTA del resultado de web_search de donde la sacaste: copiala TAL CUAL del resultado, NO la inventes, NO la armes de memoria, NO adivines el dominio. Si no tenés la URL exacta del resultado, dejá "url" vacío.
 - PROHIBIDO inventar cifras, fechas, fuentes, URLs o hechos. Si no encontrás una señal con respaldo, devolvé MENOS señales o ninguna. Una señal real vale más que tres inventadas.
 - Preferí señales RECIENTES (últimos ~12 meses) y con fecha. Una señal vieja sin recencia NO sirve como "por qué ahora".
-- La señal tiene que ser RELEVANTE para por qué esa empresa compraría el producto del proveedor, no un dato al azar.
+- La señal tiene que ser RELEVANTE para por qué esa empresa compraría el producto del proveedor, no un dato al azar. TEST DE RELEVANCIA (aplicalo a CADA señal antes de incluirla): ¿esta noticia hace MÁS probable que la empresa compre ESTE producto AHORA? Una noticia real pero ajena al pain NO es señal (casos reales que quemaron reportes: "lanzó ciclos de Formación Profesional" o "fondo de inversión con Qatar" como señales para vender un ERP: verídicas, irrelevantes, y el prospecto lo nota al instante). Si las noticias que encontraste son reales pero NINGUNA conecta con el producto, devolvé CERO señales: menos es más.
 - "texto": 1 oración corta y concreta (máx 130 caracteres), en el IDIOMA DE SALIDA, neutro, SIN guiones (— ni -).
 - "tipo": una palabra que clasifique la señal (inversión, expansión, ejecutivo, producto, alianza, hito), EN EL IDIOMA DE SALIDA.
 - No repitas la misma señal redactada distinto.
@@ -3761,12 +4027,267 @@ async function _pdfDePrueba(nombre){
   return Buffer.from(await doc.save()).toString('base64');
 }
 
-async function procesar(jobId, { email, dominio, empresa, nombre, profileId, evalMode, idioma, test }) {
+// =================== JUEZ COMERCIAL (valor de los leads, no veracidad) ===================
+// El juez de 8 criterios valida VERACIDAD (no inventar); nadie validaba VALOR COMERCIAL ("¿esta empresa
+// compraría de verdad?"). Caso real McCoy: 3 reportes seguidos con leads verídicos pero comercialmente
+// muertos (peer tecnológico, gigante fuera de rango, señal presupuesta), y el prospecto que audita y avisa
+// es la EXCEPCIÓN: el caso normal es que un lead malo no conteste más y nunca sepamos por qué. Por eso la
+// calidad tiene que estar garantizada ANTES de enviar, sin depender de feedback: este juez es el reemplazo
+// productizado del ojo humano que tenía el skill original (Mario miraba cada PDF antes de mandar).
+// Política: NO_COMPRA → se veta la empresa del pool y se re-elige; sin reemplazo digno → el reporte NO sale
+// (fail-closed: mejor no mandar que quemar al cliente). DUDOSA → pasa con log (no bloquea). Error de
+// infraestructura del juez → fail-open con log fuerte (un bug del juez nuevo no puede tumbar el producto).
+function _promptJuezComercial(){ return `# IBT GTM — Juez COMERCIAL (fit de negocio de las cuentas)
+Sos un auditor de ventas B2B. Otro juez ya validó la VERACIDAD del reporte (datos reales, sin inventos); vos juzgás UNA sola cosa: si cada cuenta elegida es un COMPRADOR REALISTA del cliente. Un lead verídico pero que no compraría es un lead MALO: el prospecto que lo recibe no avisa, simplemente deja de contestar.
+
+Por cada cuenta, preguntate EN ORDEN:
+1. PAR / PROVEEDOR: ¿esta empresa HACE o VENDE lo mismo que el cliente, o resuelve esa necesidad puertas adentro con equipo propio? (ej. una consultora IT para una consultora SAP) → NO_COMPRA.
+2. GIGANTE FUERA DE RANGO: ¿es un grupo varias veces más grande que el techo del ICP, con proveedores enterprise establecidos, al que este cliente no le cierra una venta en un ciclo normal? → NO_COMPRA.
+3. FIT DE NECESIDAD: ¿el tipo de empresa realmente usa o compra lo que vende el cliente? Si es muy improbable que necesite el producto y el ángulo lo presupone sin evidencia → DUDOSA (o NO_COMPRA si es claramente absurdo).
+4. DECISOR: ¿el cargo firma o impulsa ESTA compra? Cargo de otra área sin poder de compra → DUDOSA.
+Las verticales que el CLIENTE declara como foco son válidas (no castigues una cuenta solo por pertenecer a una vertical del ICP). NO_COMPRA es para los casos CLAROS (par, gigante, no-comprador evidente); ante la duda razonable usá DUDOSA, que no bloquea. Sé estricto con lo claro y honesto con lo dudoso.
+
+## Output — SOLO JSON (sin texto alrededor, sin markdown)
+{"cards":[{"empresa":"<nombre EXACTO de la cuenta tal como te la paso>","veredicto":"COMPRA|DUDOSA|NO_COMPRA","motivo":"1 oración concreta"}]}
+Una entrada por cuenta, mismas empresas que te paso, mismo orden.`; }
+
+async function runJuezComercial({ cliente, plan, data }){
+  _setStage('judge');
+  const icp = (plan && plan._plan) || {};
+  const grid = Array.isArray(plan.icp) ? plan.icp.map(x => `${x.title}: ${x.desc}`).join(' | ') : '';
+  const cards = (data.cards || []).filter(c => c && c.empresa);
+  if(!cards.length) return null;
+  const lineas = cards.map((c, i) => `${i+1}. ${c.empresa} — ${c.cargo || '?'} (${c.nombre || '?'})${c.headcount ? ` ~${c.headcount} empleados` : ''}. Ángulo: ${String(c.angulo || '').slice(0, 260)}`).join('\n');
+  const msg = `CLIENTE (quien envía el reporte): ${cliente.empresa}${cliente.headcount ? ` (~${cliente.headcount} empleados)` : ''}.${cliente.descripcion ? ` Qué hace (su propia página de LinkedIn): «${String(cliente.descripcion).slice(0, 400)}»` : ''}
+ICP del reporte: ${grid}
+Comprador ideal (test de inclusión/exclusión del PLAN): ${icp.comprador_ideal || '(no declarado)'}
+Tamaño objetivo: ${icp.tamano_min || '?'} a ${icp.tamano_max || 'sin techo'} empleados. Rubros excluidos: ${(_verticalesExcluir(plan) || []).join(', ') || '(ninguno)'}
+
+CUENTAS ELEGIDAS:
+${lineas}
+
+Devolvé SOLO el JSON del veredicto.`;
+  for(let intento = 1; intento <= 2; intento++){
+    try{
+      const res = await callClaude({ model: MODEL_JUDGE, system: _promptJuezComercial(), messages: [{ role: 'user', content: msg }], maxTokens: 8000, temperature: 0 });   // temperature se filtra sola en Opus 5; maxTokens con aire para el thinking default
+      const txt = _textoJSON(res.content);
+      const m = String(txt || '').match(/\{[\s\S]*\}/);
+      const j = JSON.parse(m ? m[0] : txt);
+      if(j && Array.isArray(j.cards)) return j;
+      throw new Error('JSON sin campo cards');
+    }catch(e){
+      console.warn(`[JUEZ-COM] intento ${intento}/2 no parseó (${e.message})${intento < 2 ? ', reintento' : ' → FAIL-OPEN (no bloqueo el reporte, pero revisar)'}.`);
+    }
+  }
+  return null;
+}
+
+// =================== BANCO DE LEADS POR CLIENTE (memoria entre corridas) ===================
+// Un vendedor humano acumula sus mejores hallazgos en una libreta; el pipeline los olvidaba al terminar
+// cada job y cada regeneración tiraba los dados de nuevo (las mejores cards de McCoy quedaron repartidas
+// en 4 corridas distintas: Sesderma, Talgo, Cantabria Labs, Bella Aurora). El banco persiste POR CLIENTE
+// cada card que el juez comercial APROBÓ (con su veredicto COMPRA/DUDOSA) y cada empresa que VETÓ. Usos:
+//   1. SUPRESIÓN: las vetadas históricas entran a icp.competidores ANTES del sourcing → una empresa
+//      rechazada no vuelve a aparecer para ese cliente (caso Ayesa/Nebrija repetidas al mismo prospecto).
+//   2. UPGRADE/COMPLETAR: una DUDOSA de hoy se reemplaza por una COMPRA histórica de otra corrida, y si
+//      faltan cuentas el banco completa: el reporte final es el TOP ACUMULADO, no la lotería de una pasada.
+// Persistencia: JSONL append-only (amigable a jobs concurrentes), mismo patrón y caveat que
+// resultados.jsonl: en Railway el filesystem es efímero por deploy; para histórico durable montar un
+// volumen y setear BANCO_PATH (ej. /data/banco-leads.jsonl). BANCO_LEADS=off lo apaga entero.
+const BANCO_PATH = process.env.BANCO_PATH || path.join(__dirname, 'banco-leads.jsonl');
+const BANCO_ON = String(process.env.BANCO_LEADS || 'on').toLowerCase() !== 'off';
+function _bancoKeyDe(cliente){ return _empKey((cliente && cliente.empresa) || '') || null; }
+function _bancoAppend(rec){
+  if(!BANCO_ON) return;
+  try{ fs.appendFileSync(BANCO_PATH, JSON.stringify(rec) + '\n'); }
+  catch(e){ console.warn('[BANCO] no se pudo escribir:', e.message); }
+}
+function _bancoLeer(clienteKey){
+  const out = { aprobadas: new Map(), vetadas: new Map() };   // empKey -> registro (reduce del JSONL)
+  if(!BANCO_ON || !clienteKey) return out;
+  try{
+    if(!fs.existsSync(BANCO_PATH)) return out;
+    for(const line of String(fs.readFileSync(BANCO_PATH, 'utf8')).split('\n')){
+      const t = line.trim(); if(!t) continue;
+      let r; try{ r = JSON.parse(t); }catch{ continue; }
+      if(r.clienteKey !== clienteKey) continue;
+      const k = _empKey(r.empresa || ''); if(!k) continue;
+      if(r.tipo === 'vetada'){ out.vetadas.set(k, r); out.aprobadas.delete(k); }      // un veto pisa aprobaciones previas
+      else if(r.tipo === 'aprobada' && !out.vetadas.has(k)) out.aprobadas.set(k, r);  // última aprobación gana
+    }
+  }catch(e){ console.warn('[BANCO] no se pudo leer:', e.message); }
+  return out;
+}
+function _bancoGuardarAprobadas(cliente, cards){
+  const ck = _bancoKeyDe(cliente); if(!ck || !Array.isArray(cards)) return;
+  let n = 0;
+  for(const c of cards){
+    if(!c || !c.empresa) continue;
+    _bancoAppend({ ts: Date.now(), clienteKey: ck, tipo: 'aprobada', veredicto: String(c._veredictoJC || 'COMPRA').toUpperCase(), empresa: c.empresa, card: c });
+    n++;
+  }
+  if(n) console.log(`[BANCO] ${n} card(s) aprobadas guardadas para "${(cliente && cliente.empresa) || '?'}".`);
+}
+function _bancoGuardarVetada(cliente, mala){
+  const ck = _bancoKeyDe(cliente); if(!ck || !mala || !mala.empresa) return;
+  _bancoAppend({ ts: Date.now(), clienteKey: ck, tipo: 'vetada', empresa: mala.empresa, motivo: mala.motivo || '' });
+}
+// SUPRESIÓN pre-sourcing: vetadas históricas → icp.competidores (el sourcing ya filtra por nombre en todas sus capas).
+function _bancoAplicarVetadas(plan, cliente){
+  const ck = _bancoKeyDe(cliente); if(!ck) return 0;
+  const vetadas = [..._bancoLeer(ck).vetadas.values()].map(r => String(r.empresa).trim()).filter(Boolean);
+  if(!vetadas.length) return 0;
+  const icp = (plan && plan._plan) || {};
+  icp.competidores = [ ...(Array.isArray(icp.competidores) ? icp.competidores : []), ...vetadas ];
+  console.log(`[BANCO] supresión: ${vetadas.length} empresa(s) vetadas en corridas previas van a competidores [${vetadas.join(', ')}].`);
+  return vetadas.length;
+}
+// UPGRADE/COMPLETAR post-juez: las cards del banco YA fueron aprobadas por el juez comercial en su corrida
+// (ángulo/hook incluidos), así que entran directo. Completa hasta nObjetivo y reemplaza DUDOSAs de hoy por
+// COMPRAs históricas. Muta data.cards; devuelve true si cambió algo.
+function _bancoMejorarCards(data, cliente, nObjetivo = NUM_CUENTAS){
+  const ck = _bancoKeyDe(cliente);
+  if(!BANCO_ON || !ck || !data || !Array.isArray(data.cards)) return false;
+  const banco = _bancoLeer(ck);
+  if(!banco.aprobadas.size) return false;
+  const rank = (r) => String(r.veredicto || '').toUpperCase() === 'COMPRA' ? 1 : 0;
+  const enUso = new Set(data.cards.filter(c => c && c.empresa).map(c => _empKey(c.empresa)));
+  const candidatas = [...banco.aprobadas.values()]
+    .filter(r => r.card && r.card.empresa && !enUso.has(_empKey(r.card.empresa)))
+    .sort((a, b) => (rank(b) - rank(a)) || ((b.ts || 0) - (a.ts || 0)));   // COMPRA primero, después más nuevas
+  if(!candidatas.length) return false;
+  let cambio = false;
+  while(data.cards.length < nObjetivo && candidatas.length){   // 1) COMPLETAR hasta el objetivo
+    const r = candidatas.shift();
+    console.log(`[BANCO] completo con card de corrida previa: ${r.card.empresa} (${r.veredicto}).`);
+    data.cards.push(r.card); enUso.add(_empKey(r.card.empresa)); cambio = true;
+  }
+  for(let i = data.cards.length - 1; i >= 0; i--){             // 2) UPGRADE: DUDOSA de hoy → COMPRA histórica
+    const c = data.cards[i];
+    if(String((c && c._veredictoJC) || 'COMPRA').toUpperCase() !== 'DUDOSA') continue;
+    const j = candidatas.findIndex(r => rank(r) === 1);
+    if(j < 0) break;
+    const r = candidatas.splice(j, 1)[0];
+    console.log(`[BANCO] UPGRADE: "${c.empresa}" (DUDOSA hoy) → "${r.card.empresa}" (COMPRA en corrida previa).`);
+    enUso.add(_empKey(r.card.empresa));
+    data.cards[i] = r.card; cambio = true;
+  }
+  return cambio;
+}
+
+// Cuando el reporte sale a propósito con MENOS cuentas que NUM_CUENTAS (mercado sin 3ra comprable), los
+// conteos de página 1 se escribieron para NUM_CUENTAS y hay que reconciliarlos: h1_post ("3 clientes
+// potenciales..."), lead ("te compartimos 3...") y el stat "Cuentas priorizadas". Reemplaza SOLO la primera
+// aparición del número esperado en cada superficie (los textos del PLAN nombran ese número una vez). El
+// puente "te mostramos N" del render ya es dinámico (usa cards.length). Muta data; devuelve true si tocó algo.
+function _reconciliarConteoCuentas(data, nEsperado){
+  const n = Array.isArray(data.cards) ? data.cards.filter(c => c && c.empresa).length : 0;
+  if(!n || n >= nEsperado) return false;
+  const re = new RegExp(`\\b${nEsperado}\\b`);
+  let toco = false;
+  if(typeof data.h1_post === 'string' && re.test(data.h1_post)){ data.h1_post = data.h1_post.replace(re, String(n)); toco = true; }
+  if(typeof data.lead === 'string' && re.test(data.lead)){ data.lead = data.lead.replace(re, String(n)); toco = true; }
+  if(Array.isArray(data.stats)) for(const st of data.stats){
+    if(st && /cuenta|account|conta/i.test(String(st.label || '')) && String(st.num).trim() === String(nEsperado)){ st.num = String(n); toco = true; }
+  }
+  if(toco) console.warn(`[CARDS] reporte reducido a ${n}/${nEsperado} cuentas: conteos de página 1 reconciliados (h1/lead/stat).`);
+  return toco;
+}
+
+// Aplica el juez comercial con reemplazo y RE-SOURCING (el lazo que el skill original hacía a mano):
+//   NO_COMPRA → veta la empresa del pool + re-SELECT con fixes.
+//   Pool sin reemplazo digno (o intentos agotados) → UNA rebusca completa: las empresas vetadas entran a
+//   icp.competidores (el sourcing las filtra por nombre en todas sus capas, incluido el boost de anclas
+//   vetadas que en el caso KPMG llenó el pool de gente de consultoras gigantes) y sourceConRetry arma un
+//   pool NUEVO; re-SELECT y una evaluación más del juez.
+//   Si la rebusca tampoco da cuentas comprables → LANZA (fail-closed: mejor sin reporte que quemar al
+//   prospecto; el caller decide cómo reportarlo).
+// Devuelve { data } (posiblemente re-seleccionada). Compartida por procesar() y /generar-reporte
+// (gotcha de la lógica duplicada: UNA sola implementación).
+async function aplicarJuezComercial({ cliente, plan, pool, senales, data }){
+  if(String(process.env.JUEZ_COMERCIAL || 'on').toLowerCase() === 'off') return { data, pool, senales };
+  const TRIES = Math.max(1, parseInt(process.env.JUEZ_COM_TRIES || '2', 10));
+  let _pool = pool, _senales = senales, rebuscado = false;
+  const vetadasKeys = new Set();        // _empKey de cada empresa vetada (filtro del pool)
+  const vetadasNombres = [];            // nombres crudos (van a icp.competidores en la rebusca)
+  let ultimasMalas = [];
+  for(let evaluacion = 1; evaluacion <= TRIES + 1; evaluacion++){   // +1: la evaluación extra post-rebusca
+    const jc = await runJuezComercial({ cliente, plan, data });
+    if(!jc) return { data, pool: _pool, senales: _senales };   // fail-open: el juez no respondió parseable; ya quedó logueado
+    const porVeredicto = (v) => jc.cards.filter(c => String(c.veredicto || '').toUpperCase() === v);
+    // Veredicto por card pegado a la data (lo usan el banco y el upgrade posterior).
+    const _verPor = new Map(jc.cards.map(c => [_empKey(c.empresa), String(c.veredicto || 'COMPRA').toUpperCase()]));
+    for(const c of (data.cards || [])){ if(c && c.empresa) c._veredictoJC = _verPor.get(_empKey(c.empresa)) || 'COMPRA'; }
+    for(const d of porVeredicto('DUDOSA')) console.warn(`[JUEZ-COM] DUDOSA (pasa, no bloquea): ${d.empresa} — ${d.motivo}`);
+    const malas = porVeredicto('NO_COMPRA');
+    if(!malas.length){ console.log(`[JUEZ-COM] OK${evaluacion > 1 ? ` tras ${evaluacion - 1} reemplazo(s)${rebuscado ? ' + re-sourcing' : ''}` : ''}: ${jc.cards.length} cuenta(s) con valor comercial.`); _bancoGuardarAprobadas(cliente, data.cards); _bancoMejorarCards(data, cliente); return { data, pool: _pool, senales: _senales }; }
+    ultimasMalas = malas;
+    for(const m of malas){
+      console.warn(`[JUEZ-COM] NO_COMPRA: ${m.empresa} — ${m.motivo}`);
+      const k = _empKey(m.empresa); if(k && !vetadasKeys.has(k)){ vetadasKeys.add(k); vetadasNombres.push(String(m.empresa).trim()); }
+      _bancoGuardarVetada(cliente, m);
+    }
+    _pool = _pool.filter(c => !vetadasKeys.has(_empKey(c.empresa || '')));
+    const fixes = malas.map(m => `La cuenta "${m.empresa}" NO es un comprador realista del cliente: ${m.motivo}. NO la elijas de nuevo; reemplazala por OTRA empresa que sí compraría.`);
+
+    // ¿Alcanza el pool actual para re-elegir? (y nos quedan evaluaciones del presupuesto base)
+    if(evaluacion < TRIES && _pool.length >= NUM_CUENTAS){
+      data = await seleccionarConRetry({ cliente, plan, pool: _pool, fixes, senales: _senales });
+      continue;
+    }
+
+    // Pool agotado o intentos agotados → UNA rebusca completa antes de rendirnos.
+    if(!rebuscado){
+      rebuscado = true;
+      console.warn(`[JUEZ-COM] sin reemplazo digno en el pool → RE-SOURCING: rebusco con ${vetadasNombres.length} empresa(s) vetada(s) como competidores [${vetadasNombres.join(', ')}].`);
+      try{
+        const icp = (plan && plan._plan) || {};
+        icp.competidores = [ ...(Array.isArray(icp.competidores) ? icp.competidores : []), ...vetadasNombres ];
+        const r = await sourceConRetry(plan, cliente);
+        const nuevo = (r && Array.isArray(r.pool) ? r.pool : []).filter(c => !vetadasKeys.has(_empKey(c.empresa || '')));
+        if(nuevo.length >= NUM_CUENTAS){
+          _pool = nuevo;
+          _senales = (r && r.senales && r.senales.length) ? r.senales : _senales;
+          console.log(`[JUEZ-COM] re-sourcing OK: pool nuevo de ${_pool.length} candidatos sin las vetadas. Re-eligiendo...`);
+          data = await seleccionarConRetry({ cliente, plan, pool: _pool, fixes, senales: _senales });
+          continue;   // la evaluación TRIES+1 juzga la selección post-rebusca
+        }
+        console.warn(`[JUEZ-COM] la rebusca dejó ${nuevo.length} candidato(s) (<${NUM_CUENTAS}); no hay mercado comprable con este ICP.`);
+      }catch(e){ console.warn(`[JUEZ-COM] re-sourcing falló (${e.message}); cierro fail-closed.`); }
+    }
+
+    // ÚLTIMO RECURSO antes de no emitir (política del negocio: en mercados jodidos, MEJOR 2 cards
+    // excelentes que 0 reporte, y muchísimo mejor que 3 con relleno): si al sacar las vetadas quedan al
+    // menos JUEZ_COM_MIN cards que el juez SÍ aprobó, el reporte sale REDUCIDO. _cuentasOk le avisa al
+    // juez de veracidad y a la guarda de integridad que la reducción fue deliberada, y los conteos de
+    // página 1 se reconcilian. NOTA: si después la ronda de fixes del juez de veracidad re-elige, puede
+    // volver a 3 desde el pool depurado (sin vetadas) — eso es un upgrade, no un bug.
+    const MIN_JC = Math.max(1, parseInt(process.env.JUEZ_COM_MIN || '2', 10));
+    const buenas = (data.cards || []).filter(c => c && c.empresa && !vetadasKeys.has(_empKey(c.empresa)));
+    if(buenas.length >= MIN_JC){
+      _bancoGuardarAprobadas(cliente, buenas);
+      data = { ...data, cards: buenas.slice() };
+      // Antes de reducir: el banco puede COMPLETAR con cards de corridas previas (ya aprobadas por el juez).
+      if(_bancoMejorarCards(data, cliente) && data.cards.length >= NUM_CUENTAS){
+        console.log(`[BANCO] el banco completó el reporte a ${data.cards.length} cuentas: no hace falta reducir.`);
+        return { data, pool: _pool, senales: _senales };
+      }
+      console.warn(`[JUEZ-COM] sin reemplazo comprable para completar ${NUM_CUENTAS}: emito el reporte REDUCIDO con ${data.cards.length} card(s) aprobadas.`);
+      data._cuentasOk = data.cards.length;
+      _reconciliarConteoCuentas(data, NUM_CUENTAS);
+      return { data, pool: _pool, senales: _senales };
+    }
+    throw new Error(`El juez comercial rechazó cuentas sin valor de compra y no quedó reemplazo digno ni rebuscando (ni siquiera ${MIN_JC} cards buenas): ${ultimasMalas.map(m => `${m.empresa} (${m.motivo})`).join(' | ')}. Mejor sin reporte que con leads que no compran.`);
+  }
+  return { data, pool: _pool, senales: _senales };
+}
+
+async function procesar(jobId, { email, dominio, empresa, nombre, profileId, destinatario, evalMode, idioma, test }) {
   return _statsALS.run(_nuevoStats(), async () => {
   const _st0 = _statsALS.getStore(); if (_st0) _st0.idiomaDoc = _idiomaCode(idioma);   // idioma del DOCUMENTO (manual desde la landing)
   try {
     console.log(`\n========== Job ${jobId} - Inicio (${NUM_CUENTAS} cuentas) ==========`);
-    console.log(`Empresa: ${empresa} | Email: ${email} | Dominio: ${dominio} | profileId: ${profileId ?? '-'}`);
+    console.log(`Empresa: ${empresa} | Email: ${email} | Dominio: ${dominio} | profileId: ${profileId ?? '-'} | destinatario: ${destinatario || '-'}`);
 
     // ===== MODO TEST (n8n end-to-end sin gastar): "test":true en el body O TEST_MODE=on en el env. =====
     // Devuelve un reporte FALSO (PDF mínimo válido) con TODOS los campos que n8n lee (status, pdf_base64,
@@ -3798,11 +4319,20 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
     const cliente = await resolverCliente({ profileId, dominio, empresa });
     const empresaFinal = cliente.empresa || empresa;
 
+    // Destinatario del reporte: link de la landing ("destinatario") o el profileId del chat (flujo N8N).
+    // Si no resuelve → null y el PLAN corre como siempre (nunca bloquea el reporte).
+    const dest = await resolverDestinatario({ perfil: destinatario, profileId });
+
     const fechaHoy = _fechaHoy();
-    const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre, cliente, fechaHoy });
-    const { pool, senales } = await sourceConRetry(plan, cliente);
+    const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre: nombre || (dest && dest.nombre) || '', cliente, fechaHoy, dest });
+    _bancoAplicarVetadas(plan, cliente);   // supresión: empresas vetadas en corridas previas no vuelven a entrar
+    let { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) throw new Error(_msgSourcingVacio(plan));
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
+    // El juez comercial puede vetar empresas y hasta REBUSCAR el pool entero: de acá en adelante (ronda de
+    // fixes del juez de veracidad incluida) SIEMPRE se usa el pool depurado que devuelve, no el original
+    // (bug real: el fix re-eligió a COFIDES, ya vetada, desde el pool viejo).
+    ({ data, pool, senales } = await aplicarJuezComercial({ cliente, plan, pool, senales, data }));
     await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
     await enriquecerSenalesEmpresa(data);     // señales REALES de EMPRESA en las 3 cards finales (id-cross MCP)
 
@@ -3810,7 +4340,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
     if (!cleanHtml) throw new Error('No se pudo renderizar el reporte');
 
     // El juez evalúa el HTML; el PDF se genera una sola vez al final y SOLO si queda apto.
-    let judgeResult = await runJudge(cleanHtml, null);
+    let judgeResult = await runJudge(cleanHtml, null, (data && data._cuentasOk) || NUM_CUENTAS);
 
     // Si el juez rechaza, reintenta re-seleccionando con los fixes. NO se renderiza PDF en
     // el medio: solo HTML + juez. Configurable con MAX_FIX_ITERS (default 1).
@@ -3834,14 +4364,16 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
         await enriquecerSenalesEmpresa(data);     // re-chequea señales de EMPRESA para las cuentas del fix
         cleanHtml = limpiarHtml(renderReport(data));
         console.log(`[Job ${jobId}] Re-validando con el juez (re-render incluye normalización de países)...`);
-        judgeResult = await runJudge(cleanHtml, null);
+        judgeResult = await runJudge(cleanHtml, null, (data && data._cuentasOk) || NUM_CUENTAS);
       } catch (e) {
         console.warn(`[FIX] Falló, conservo el reporte previo:`, e.message);
         break;
       }
     }
 
-    const MIN_CARDS_OK = parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10);
+    // _cuentasOk: seteado SOLO cuando el juez comercial redujo el reporte a propósito (mercado sin 3ra
+    // cuenta comprable): el mínimo de integridad acompaña esa decisión en vez de rechazar el reporte reducido.
+    const MIN_CARDS_OK = Math.min(parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10), (data && data._cuentasOk) || Infinity);
     const cardsValidas = _cuentaCompletas(data);
     if (cardsValidas < MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO') {
       console.warn(`[INTEGRIDAD] Override: juez dijo APROBADO con ${cardsValidas}/${MIN_CARDS_OK} cards completas → RECHAZADO.`);
@@ -3953,6 +4485,8 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
       tokens_cache_write: _stats().total.cache_write, tokens_cache_read: _stats().total.cache_read,
       finishedAt: Date.now()
     });
+    // Persistencia en disco: el link /pdf/:jobId sigue vivo PDF_RETENTION_DIAS aunque el job expire de RAM.
+    if (pdfBuffer) _guardarPdfEnDisco(jobId, pdfBuffer, { pdf_filename: _nombreArchivoPDF(empresaFinal), empresa: empresaFinal, ts: new Date().toISOString() });
     const motivoRechazo = _motivoRechazo({
       aptoEnvio,
       integridadMal: cardsValidas < MIN_CARDS_OK,
@@ -3962,12 +4496,12 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, eva
       calidezMal: !!(gateCal && gateCal.retener),
       juezRechazo: judgeResult.veredicto === 'RECHAZADO'
     });
-    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId }, cliente, plan, data, judgeResult, aptoEnvio, pageCount, motivo_rechazo: motivoRechazo }));
+    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId, destinatario }, cliente, plan, data, judgeResult, aptoEnvio, pageCount, motivo_rechazo: motivoRechazo }));
     console.log(`========== Job ${jobId} - ${aptoEnvio ? `OK ${pageCount} páginas` : 'NO apto (sin PDF)'}, juez FINAL ${judgeResult.veredicto} ${judgeResult.score}/8 (motivo: ${motivoRechazo}) ==========\n`);
   } catch (err) {
     console.error(`[Job ${jobId}] Error:`, err);
     jobs.set(jobId, { status: 'error', error: err.message, finishedAt: Date.now() });
-    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId }, error: err.message }));
+    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId, destinatario }, error: err.message }));
   }
   });
 }
@@ -3987,11 +4521,54 @@ function _leadKey({ profileId, dominio, email, empresa }) {
   return String(profileId || dominio || email || empresa || '').trim().toLowerCase();
 }
 
+// ===== STORAGE DE PDFs EN DISCO =====
+// El job en RAM expira rápido (JOB_TTL_MS) porque pdf_base64 pesa (~1-3 MB por reporte) y conviene
+// no acumularlo en memoria junto a Chromium. Pero el PDF se persiste TAMBIÉN en disco (PDF_DIR) y
+// /pdf/:jobId lo sirve desde ahí aunque el job ya no exista en el Map: el link de descarga vive
+// PDF_RETENTION_DIAS, no 1 hora. OJO Railway: el filesystem es EFÍMERO (se pierde en cada redeploy);
+// para que la retención sobreviva deploys hay que montar un Volume y apuntar PDF_DIR adentro
+// (ej. PDF_DIR=/data/pdfs con el Volume montado en /data). Sin Volume igual mejora: sobrevive al
+// TTL de RAM y a crashes del proceso dentro del mismo deploy.
+const PDF_DIR = process.env.PDF_DIR || path.join(__dirname, 'pdfs');
+const PDF_RETENTION_DIAS = Math.max(1, parseInt(process.env.PDF_RETENTION_DIAS || '30', 10));
+const JOB_TTL_MS = Math.max(60 * 1000, parseInt(process.env.JOB_TTL_MS || String(60 * 60 * 1000), 10));
+
+function _guardarPdfEnDisco(jobId, pdfBuffer, meta) {
+  try {
+    fs.mkdirSync(PDF_DIR, { recursive: true });
+    fs.writeFile(path.join(PDF_DIR, jobId + '.pdf'), pdfBuffer, e => { if (e) console.warn('[PDF] no pude guardar el PDF en disco:', e.message); });
+    // Sidecar con el nombre de archivo/empresa: /pdf/:jobId lo necesita cuando el job ya expiró de RAM.
+    fs.writeFile(path.join(PDF_DIR, jobId + '.json'), JSON.stringify(meta), e => { if (e) console.warn('[PDF] no pude guardar la meta en disco:', e.message); });
+  } catch (e) { console.warn('[PDF] error guardando en disco:', e.message); }
+}
+
+function _leerPdfDeDisco(jobId) {
+  try {
+    // El jobId viene de la URL y va a un path: solo aceptamos el formato UUID (anti path-traversal).
+    if (!/^[0-9a-f-]{36}$/i.test(String(jobId || ''))) return null;
+    const p = path.join(PDF_DIR, jobId + '.pdf');
+    if (!fs.existsSync(p)) return null;
+    let meta = {};
+    try { meta = JSON.parse(fs.readFileSync(path.join(PDF_DIR, jobId + '.json'), 'utf8')); } catch { /* sin meta: se usa el nombre default */ }
+    return { buf: fs.readFileSync(p), meta };
+  } catch (e) { console.warn('[PDF] error leyendo de disco:', e.message); return null; }
+}
+
 setInterval(() => {
-  const limite = Date.now() - 60 * 60 * 1000;
+  const limite = Date.now() - JOB_TTL_MS;
   for (const [id, job] of jobs.entries()) {
     if ((job.finishedAt || job.createdAt || 0) < limite) jobs.delete(id);
   }
+  // PDFs en disco: retención larga (días), independiente del TTL en RAM.
+  try {
+    if (fs.existsSync(PDF_DIR)) {
+      const limitePdf = Date.now() - PDF_RETENTION_DIAS * 24 * 60 * 60 * 1000;
+      for (const f of fs.readdirSync(PDF_DIR)) {
+        const p = path.join(PDF_DIR, f);
+        try { if (fs.statSync(p).mtimeMs < limitePdf) fs.unlinkSync(p); } catch { /* archivo en uso o ya borrado */ }
+      }
+    }
+  } catch (e) { console.warn('[PDF] error limpiando PDFs viejos:', e.message); }
 }, 30 * 60 * 1000);
 
 // ===== COLA CON LÍMITE DE CONCURRENCIA =====
@@ -4021,7 +4598,7 @@ app.post('/generar', (req, res) => {
   if (process.env.LANDING_KEY && req.header('x-landing-key') !== process.env.LANDING_KEY) {
     return res.status(401).json({ error: 'Clave invalida' });
   }
-  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug, idioma, test } = req.body || {};
+  const { email, dominio, empresa, nombre, profileId, destinatario, eval: evalMode, debug, idioma, test } = req.body || {};
   if (!empresa && !dominio && !profileId) {
     return res.status(400).json({ error: 'Falta empresa, dominio o profileId' });
   }
@@ -4061,7 +4638,7 @@ app.post('/generar', (req, res) => {
       }, JOB_TIMEOUT_MS);
     });
     return Promise.race([
-      procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, evalMode: evalMode || debug, idioma, test }),
+      procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, destinatario, evalMode: evalMode || debug, idioma, test }),
       timeoutGlobal
     ])
     .catch((err) => {   // CATCH DEFENSIVO: si procesar() rechaza sin atrapar, no tumbamos el server.
@@ -4091,15 +4668,25 @@ app.get('/resultado/:jobId', (req, res) => {
   res.json(job);
 });
 
-// Descarga del PDF por jobId (para la landing). Sin gate: el jobId es un UUID no adivinable y expira a 1h.
-// Sirve el pdf_base64 que ya guardó el job como un PDF nativo descargable (Content-Disposition).
+// Descarga del PDF por jobId (para la landing). Sin gate: el jobId es un UUID no adivinable.
+// Sirve el pdf_base64 del job en RAM y, si el job ya expiró del Map (TTL de RAM), cae al PDF
+// persistido en PDF_DIR: el link de descarga vive PDF_RETENTION_DIAS, no 1 hora.
 app.get('/pdf/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ error: 'jobId no encontrado o expirado' });
-  if (job.status === 'processing') return res.status(409).json({ error: 'el reporte todavia se esta generando' });
-  if (!job.pdf_base64) return res.status(422).json({ error: 'el reporte no generó PDF (no apto o sin cuentas)' });
-  const buf = Buffer.from(job.pdf_base64, 'base64');
-  const nombre = String(job.pdf_filename || 'Analisis de Mercado.pdf').replace(/[\\/:*?"<>|]/g, '');
+  if (job && (job.status === 'processing' || job.status === 'queued')) return res.status(409).json({ error: 'el reporte todavia se esta generando' });
+  let buf = null, nombreCrudo = null;
+  if (job && job.pdf_base64) {
+    buf = Buffer.from(job.pdf_base64, 'base64');
+    nombreCrudo = job.pdf_filename;
+  } else {
+    const disco = _leerPdfDeDisco(req.params.jobId);
+    if (disco) { buf = disco.buf; nombreCrudo = disco.meta && disco.meta.pdf_filename; }
+  }
+  if (!buf) {
+    if (job) return res.status(422).json({ error: 'el reporte no generó PDF (no apto o sin cuentas)' });
+    return res.status(404).json({ error: 'jobId no encontrado o expirado' });
+  }
+  const nombre = String(nombreCrudo || 'Analisis de Mercado.pdf').replace(/[\\/:*?"<>|]/g, '');
   // Los headers HTTP viajan en Latin-1, así que un filename con acentos ("Análisis") se corrompe
   // ("Anýlisis"). RFC 5987: filename* en UTF-8 percent-encoded para navegadores modernos + un filename
   // ASCII (sin acentos) de fallback para clientes viejos.
@@ -4109,8 +4696,45 @@ app.get('/pdf/:jobId', (req, res) => {
   res.send(buf);
 });
 
+// Índice de PDFs guardados en disco (para recuperar diagnósticos cuyo link se perdió). SOLO
+// funciona si LANDING_KEY está seteada (en producción/n8n no lo está → 404, no se expone nada)
+// y con la clave correcta por header x-landing-key o ?key= (query, para abrirlo en el navegador).
+app.get('/pdfs', (req, res) => {
+  if (!process.env.LANDING_KEY) return res.status(404).json({ error: 'no disponible' });
+  const key = req.header('x-landing-key') || req.query.key;
+  if (key !== process.env.LANDING_KEY) return res.status(401).json({ error: 'Clave invalida' });
+  let items = [];
+  try {
+    if (fs.existsSync(PDF_DIR)) {
+      items = fs.readdirSync(PDF_DIR)
+        .filter(f => f.endsWith('.pdf'))
+        .map(f => {
+          const jobId = f.slice(0, -4);
+          let meta = {};
+          try { meta = JSON.parse(fs.readFileSync(path.join(PDF_DIR, jobId + '.json'), 'utf8')); } catch { /* sin meta */ }
+          let mtime = 0;
+          try { mtime = fs.statSync(path.join(PDF_DIR, f)).mtimeMs; } catch { /* borrado entre readdir y stat */ }
+          return { jobId, empresa: meta.empresa || '', fecha: meta.ts || new Date(mtime).toISOString(), mtime };
+        })
+        .sort((a, b) => b.mtime - a.mtime);
+    }
+  } catch (e) { console.warn('[PDF] error listando PDFs:', e.message); }
+  // HTML mínimo: esto lo abre una persona en el navegador, no un sistema.
+  const filas = items.map(it =>
+    `<tr><td>${new Date(it.fecha).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}</td>` +
+    `<td>${String(it.empresa).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</td>` +
+    `<td><a href="/pdf/${it.jobId}">Descargar PDF</a></td></tr>`
+  ).join('\n');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!doctype html><meta charset="utf-8"><title>Diagnósticos guardados</title>
+<style>body{font-family:system-ui;margin:24px}table{border-collapse:collapse}td,th{padding:6px 14px;border-bottom:1px solid #ddd;text-align:left}</style>
+<h2>Diagnósticos guardados (${items.length})</h2>
+<p>Se conservan ${PDF_RETENTION_DIAS} días.</p>
+<table><tr><th>Fecha</th><th>Empresa</th><th></th></tr>${filas}</table>`);
+});
+
 app.post('/generar-reporte', async (req, res) => {
-  const { email, dominio, empresa, nombre, profileId, eval: evalMode, debug, idioma } = req.body || {};
+  const { email, dominio, empresa, nombre, profileId, destinatario, eval: evalMode, debug, idioma } = req.body || {};
   if (!email || !dominio) return res.status(400).json({ error: 'email y dominio son obligatorios' });
 
   await _statsALS.run(_nuevoStats(), async () => {
@@ -4118,11 +4742,15 @@ app.post('/generar-reporte', async (req, res) => {
   try {
     const cliente = await resolverCliente({ profileId, dominio, empresa: empresa || dominio });
     const empresaFinal = cliente.empresa || empresa || dominio;
+    const dest = await resolverDestinatario({ perfil: destinatario, profileId });   // mismo scoping que procesar()
     const fechaHoy = _fechaHoy();
-    const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre: nombre || '', cliente, fechaHoy });
-    const { pool, senales } = await sourceConRetry(plan, cliente);
+    const plan = await runPlanConRetry({ empresa: empresaFinal, dominio, email, nombre: nombre || (dest && dest.nombre) || '', cliente, fechaHoy, dest });
+    _bancoAplicarVetadas(plan, cliente);   // supresión: empresas vetadas en corridas previas no vuelven a entrar
+    let { pool, senales } = await sourceConRetry(plan, cliente);
     if (!pool.length) return res.status(422).json({ error: _msgSourcingVacio(plan) });
     let data = await seleccionarConRetry({ cliente, plan, pool, senales });
+    // Mismo contrato que procesar(): el pool depurado del juez comercial alimenta todo lo posterior.
+    ({ data, pool, senales } = await aplicarJuezComercial({ cliente, plan, pool, senales, data }));
     await enriquecerSenales(data, cliente);   // señales de compra por cuenta (no-op si SIGNALS_MODE off)
     await enriquecerSenalesEmpresa(data);     // señales REALES de EMPRESA en las 3 cards finales (id-cross MCP)
 
@@ -4130,7 +4758,7 @@ app.post('/generar-reporte', async (req, res) => {
     if (!cleanHtml) return res.status(500).json({ error: 'No se pudo renderizar el reporte' });
 
     // El juez evalúa el HTML; el PDF se genera abajo y solo si quedó apto.
-    let judgeResult = await runJudge(cleanHtml, null);
+    let judgeResult = await runJudge(cleanHtml, null, (data && data._cuentasOk) || NUM_CUENTAS);
 
     // Si el juez rechaza, reintenta re-seleccionando con los fixes (sin renderizar PDF en el medio).
     const MAX_FIX = parseInt(process.env.MAX_FIX_ITERS || '1', 10);
@@ -4149,14 +4777,16 @@ app.post('/generar-reporte', async (req, res) => {
         await enriquecerSenales(data, cliente);   // re-busca señales para las cuentas nuevas del fix
         await enriquecerSenalesEmpresa(data);     // re-chequea señales de EMPRESA para las cuentas del fix
         cleanHtml = limpiarHtml(renderReport(data));
-        judgeResult = await runJudge(cleanHtml, null);
+        judgeResult = await runJudge(cleanHtml, null, (data && data._cuentasOk) || NUM_CUENTAS);
       } catch (e) {
         console.warn(`[FIX] Falló, conservo el reporte previo:`, e.message);
         break;
       }
     }
 
-    const MIN_CARDS_OK = parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10);
+    // _cuentasOk: seteado SOLO cuando el juez comercial redujo el reporte a propósito (mercado sin 3ra
+    // cuenta comprable): el mínimo de integridad acompaña esa decisión en vez de rechazar el reporte reducido.
+    const MIN_CARDS_OK = Math.min(parseInt(process.env.MIN_CARDS_OK || String(NUM_CUENTAS), 10), (data && data._cuentasOk) || Infinity);
     const cardsValidas = _cuentaCompletas(data);
     if (cardsValidas < MIN_CARDS_OK && judgeResult.veredicto === 'APROBADO') {
       console.warn(`[INTEGRIDAD] Override: juez dijo APROBADO con ${cardsValidas}/${MIN_CARDS_OK} cards completas → RECHAZADO.`);
@@ -4251,7 +4881,7 @@ app.post('/generar-reporte', async (req, res) => {
       calidezMal: !!(gateCal && gateCal.retener),
       juezRechazo: judgeResult.veredicto === 'RECHAZADO'
     });
-    _registrarResultado(_recResultado({ input: { email, dominio, empresa, profileId }, cliente, plan, data, judgeResult, aptoEnvio, pageCount, motivo_rechazo: motivoRechazo }));
+    _registrarResultado(_recResultado({ input: { email, dominio, empresa, profileId, destinatario }, cliente, plan, data, judgeResult, aptoEnvio, pageCount, motivo_rechazo: motivoRechazo }));
 
     return res.json({
       status: 'ok',
@@ -4276,7 +4906,7 @@ app.post('/generar-reporte', async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    _registrarResultado(_recResultado({ input: { email, dominio, empresa, profileId }, error: err.message }));
+    _registrarResultado(_recResultado({ input: { email, dominio, empresa, profileId, destinatario }, error: err.message }));
     return res.status(500).json({ error: err.message });
   }
   });
@@ -4376,5 +5006,7 @@ module.exports = {
   _idiomaCode, _idiomaNombre, _idiomaHookDeLoc, _promptSelect, _promptPlan, _statsALS,
   _reconciliarTitulo, _reconciliarGeoVisible, _geoIncoherente, callMCP, resolverCliente, _nuevoStats,
   _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN,
-  _sedeDeLookup, _corregirGeoSede
+  _sedeDeLookup, _corregirGeoSede, _parseDestinatario, resolverDestinatario, _reconciliarConteoCuentas,
+  _bancoLeer, _bancoAplicarVetadas, _bancoMejorarCards, _bancoGuardarAprobadas, _bancoGuardarVetada,
+  _guardarPdfEnDisco, _leerPdfDeDisco
 };

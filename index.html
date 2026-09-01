@@ -70,6 +70,11 @@
           <div class="hint">Pegá el <b>link de LinkedIn</b> de la empresa (más confiable). También funciona el dominio, ej: brandtrack.fm</div>
         </div>
         <div class="field">
+          <label>Quién lo recibe (opcional)</label>
+          <input id="destinatario" type="text" placeholder="linkedin.com/in/nombre-apellido" autocomplete="off">
+          <div class="hint">Link de LinkedIn de la <b>persona que va a leer el reporte</b>. Enfoca el análisis en su país y su operación (clave si la empresa es multinacional).</div>
+        </div>
+        <div class="field">
           <label>Idioma del documento</label>
           <select id="idioma" autocomplete="off">
             <option value="es" selected>Español</option>
@@ -149,6 +154,15 @@ function normDom(v){
   if(/linkedin\.com\/(company|school|showcase)\//i.test(s)) return s.replace(/\/+$/,'').trim();
   return s.replace(/\/.*$/,'').trim();
 }
+// Link del DESTINATARIO (perfil de persona): devuelve el public id ("nombre-apellido") o '' si está vacío.
+// Devuelve null si pegaron un link de EMPRESA (error de uso: va el perfil de la PERSONA).
+function normPerfil(v){
+  let s = (v||'').trim().replace(/^https?:\/\//i,'').replace(/^www\./i,'');
+  if(!s) return '';
+  if(/linkedin\.com\/(company|school|showcase)\//i.test(s)) return null;
+  const m = s.match(/linkedin\.com\/in\/([^/?#]+)/i);
+  return (m ? m[1] : s.replace(/\/+$/,'')).trim();
+}
 
 function startProgress(startTs){
   t0 = startTs || Date.now(); msgIdx = 0; $('pmsg').textContent = MSGS[0];
@@ -181,10 +195,12 @@ function mostrarOk(jobId, empresa){
 
 async function generar(){
   const dominio = normDom($('dominio').value);
+  const destinatario = normPerfil($('destinatario').value);
   const clave = $('clave').value.trim();
   const idioma = ($('idioma') && $('idioma').value) || 'es';
   $('err').textContent = '';
   if(!dominio){ $('err').textContent = 'Pegá el link de LinkedIn o el dominio de la empresa.'; return; }
+  if(destinatario === null){ $('err').textContent = 'Ese es el link de una empresa. En "Quién lo recibe" va el perfil de la persona (linkedin.com/in/...).'; return; }
   if(!clave){ $('err').textContent = 'Ingresá la clave de acceso.'; return; }
 
   let jobId, j;
@@ -192,7 +208,7 @@ async function generar(){
     const r = await fetch('/generar', {
       method:'POST',
       headers:{ 'Content-Type':'application/json', 'x-landing-key': clave },
-      body: JSON.stringify({ dominio, idioma })
+      body: JSON.stringify({ dominio, idioma, ...(destinatario ? { destinatario } : {}) })
     });
     j = await r.json().catch(()=>({}));
     if(r.status === 401){ $('err').textContent = 'Clave incorrecta.'; return; }
@@ -254,7 +270,7 @@ async function init(){
 
 $('go').addEventListener('click', generar);
 $('clave').addEventListener('keydown', e=>{ if(e.key==='Enter') generar(); });
-$('again').addEventListener('click', ()=>{ clearJob(); $('dominio').value=''; $('err').textContent=''; show('stageForm'); });
+$('again').addEventListener('click', ()=>{ clearJob(); $('dominio').value=''; $('destinatario').value=''; $('err').textContent=''; show('stageForm'); });
 $('retry').addEventListener('click', ()=>{ clearJob(); show('stageForm'); });
 init();
 </script>
