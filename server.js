@@ -4485,6 +4485,8 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, des
       tokens_cache_write: _stats().total.cache_write, tokens_cache_read: _stats().total.cache_read,
       finishedAt: Date.now()
     });
+    // Persistencia en disco: el link /pdf/:jobId sigue vivo PDF_RETENTION_DIAS aunque el job expire de RAM.
+    if (pdfBuffer) _guardarPdfEnDisco(jobId, pdfBuffer, { pdf_filename: _nombreArchivoPDF(empresaFinal), empresa: empresaFinal, ts: new Date().toISOString() });
     const motivoRechazo = _motivoRechazo({
       aptoEnvio,
       integridadMal: cardsValidas < MIN_CARDS_OK,
@@ -4519,11 +4521,54 @@ function _leadKey({ profileId, dominio, email, empresa }) {
   return String(profileId || dominio || email || empresa || '').trim().toLowerCase();
 }
 
+// ===== STORAGE DE PDFs EN DISCO =====
+// El job en RAM expira rápido (JOB_TTL_MS) porque pdf_base64 pesa (~1-3 MB por reporte) y conviene
+// no acumularlo en memoria junto a Chromium. Pero el PDF se persiste TAMBIÉN en disco (PDF_DIR) y
+// /pdf/:jobId lo sirve desde ahí aunque el job ya no exista en el Map: el link de descarga vive
+// PDF_RETENTION_DIAS, no 1 hora. OJO Railway: el filesystem es EFÍMERO (se pierde en cada redeploy);
+// para que la retención sobreviva deploys hay que montar un Volume y apuntar PDF_DIR adentro
+// (ej. PDF_DIR=/data/pdfs con el Volume montado en /data). Sin Volume igual mejora: sobrevive al
+// TTL de RAM y a crashes del proceso dentro del mismo deploy.
+const PDF_DIR = process.env.PDF_DIR || path.join(__dirname, 'pdfs');
+const PDF_RETENTION_DIAS = Math.max(1, parseInt(process.env.PDF_RETENTION_DIAS || '30', 10));
+const JOB_TTL_MS = Math.max(60 * 1000, parseInt(process.env.JOB_TTL_MS || String(60 * 60 * 1000), 10));
+
+function _guardarPdfEnDisco(jobId, pdfBuffer, meta) {
+  try {
+    fs.mkdirSync(PDF_DIR, { recursive: true });
+    fs.writeFile(path.join(PDF_DIR, jobId + '.pdf'), pdfBuffer, e => { if (e) console.warn('[PDF] no pude guardar el PDF en disco:', e.message); });
+    // Sidecar con el nombre de archivo/empresa: /pdf/:jobId lo necesita cuando el job ya expiró de RAM.
+    fs.writeFile(path.join(PDF_DIR, jobId + '.json'), JSON.stringify(meta), e => { if (e) console.warn('[PDF] no pude guardar la meta en disco:', e.message); });
+  } catch (e) { console.warn('[PDF] error guardando en disco:', e.message); }
+}
+
+function _leerPdfDeDisco(jobId) {
+  try {
+    // El jobId viene de la URL y va a un path: solo aceptamos el formato UUID (anti path-traversal).
+    if (!/^[0-9a-f-]{36}$/i.test(String(jobId || ''))) return null;
+    const p = path.join(PDF_DIR, jobId + '.pdf');
+    if (!fs.existsSync(p)) return null;
+    let meta = {};
+    try { meta = JSON.parse(fs.readFileSync(path.join(PDF_DIR, jobId + '.json'), 'utf8')); } catch { /* sin meta: se usa el nombre default */ }
+    return { buf: fs.readFileSync(p), meta };
+  } catch (e) { console.warn('[PDF] error leyendo de disco:', e.message); return null; }
+}
+
 setInterval(() => {
-  const limite = Date.now() - 60 * 60 * 1000;
+  const limite = Date.now() - JOB_TTL_MS;
   for (const [id, job] of jobs.entries()) {
     if ((job.finishedAt || job.createdAt || 0) < limite) jobs.delete(id);
   }
+  // PDFs en disco: retención larga (días), independiente del TTL en RAM.
+  try {
+    if (fs.existsSync(PDF_DIR)) {
+      const limitePdf = Date.now() - PDF_RETENTION_DIAS * 24 * 60 * 60 * 1000;
+      for (const f of fs.readdirSync(PDF_DIR)) {
+        const p = path.join(PDF_DIR, f);
+        try { if (fs.statSync(p).mtimeMs < limitePdf) fs.unlinkSync(p); } catch { /* archivo en uso o ya borrado */ }
+      }
+    }
+  } catch (e) { console.warn('[PDF] error limpiando PDFs viejos:', e.message); }
 }, 30 * 60 * 1000);
 
 // ===== COLA CON LÍMITE DE CONCURRENCIA =====
@@ -4623,15 +4668,25 @@ app.get('/resultado/:jobId', (req, res) => {
   res.json(job);
 });
 
-// Descarga del PDF por jobId (para la landing). Sin gate: el jobId es un UUID no adivinable y expira a 1h.
-// Sirve el pdf_base64 que ya guardó el job como un PDF nativo descargable (Content-Disposition).
+// Descarga del PDF por jobId (para la landing). Sin gate: el jobId es un UUID no adivinable.
+// Sirve el pdf_base64 del job en RAM y, si el job ya expiró del Map (TTL de RAM), cae al PDF
+// persistido en PDF_DIR: el link de descarga vive PDF_RETENTION_DIAS, no 1 hora.
 app.get('/pdf/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ error: 'jobId no encontrado o expirado' });
-  if (job.status === 'processing') return res.status(409).json({ error: 'el reporte todavia se esta generando' });
-  if (!job.pdf_base64) return res.status(422).json({ error: 'el reporte no generó PDF (no apto o sin cuentas)' });
-  const buf = Buffer.from(job.pdf_base64, 'base64');
-  const nombre = String(job.pdf_filename || 'Analisis de Mercado.pdf').replace(/[\\/:*?"<>|]/g, '');
+  if (job && (job.status === 'processing' || job.status === 'queued')) return res.status(409).json({ error: 'el reporte todavia se esta generando' });
+  let buf = null, nombreCrudo = null;
+  if (job && job.pdf_base64) {
+    buf = Buffer.from(job.pdf_base64, 'base64');
+    nombreCrudo = job.pdf_filename;
+  } else {
+    const disco = _leerPdfDeDisco(req.params.jobId);
+    if (disco) { buf = disco.buf; nombreCrudo = disco.meta && disco.meta.pdf_filename; }
+  }
+  if (!buf) {
+    if (job) return res.status(422).json({ error: 'el reporte no generó PDF (no apto o sin cuentas)' });
+    return res.status(404).json({ error: 'jobId no encontrado o expirado' });
+  }
+  const nombre = String(nombreCrudo || 'Analisis de Mercado.pdf').replace(/[\\/:*?"<>|]/g, '');
   // Los headers HTTP viajan en Latin-1, así que un filename con acentos ("Análisis") se corrompe
   // ("Anýlisis"). RFC 5987: filename* en UTF-8 percent-encoded para navegadores modernos + un filename
   // ASCII (sin acentos) de fallback para clientes viejos.
@@ -4639,6 +4694,43 @@ app.get('/pdf/:jobId', (req, res) => {
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${nombreAscii}"; filename*=UTF-8''${encodeURIComponent(nombre)}`);
   res.send(buf);
+});
+
+// Índice de PDFs guardados en disco (para recuperar diagnósticos cuyo link se perdió). SOLO
+// funciona si LANDING_KEY está seteada (en producción/n8n no lo está → 404, no se expone nada)
+// y con la clave correcta por header x-landing-key o ?key= (query, para abrirlo en el navegador).
+app.get('/pdfs', (req, res) => {
+  if (!process.env.LANDING_KEY) return res.status(404).json({ error: 'no disponible' });
+  const key = req.header('x-landing-key') || req.query.key;
+  if (key !== process.env.LANDING_KEY) return res.status(401).json({ error: 'Clave invalida' });
+  let items = [];
+  try {
+    if (fs.existsSync(PDF_DIR)) {
+      items = fs.readdirSync(PDF_DIR)
+        .filter(f => f.endsWith('.pdf'))
+        .map(f => {
+          const jobId = f.slice(0, -4);
+          let meta = {};
+          try { meta = JSON.parse(fs.readFileSync(path.join(PDF_DIR, jobId + '.json'), 'utf8')); } catch { /* sin meta */ }
+          let mtime = 0;
+          try { mtime = fs.statSync(path.join(PDF_DIR, f)).mtimeMs; } catch { /* borrado entre readdir y stat */ }
+          return { jobId, empresa: meta.empresa || '', fecha: meta.ts || new Date(mtime).toISOString(), mtime };
+        })
+        .sort((a, b) => b.mtime - a.mtime);
+    }
+  } catch (e) { console.warn('[PDF] error listando PDFs:', e.message); }
+  // HTML mínimo: esto lo abre una persona en el navegador, no un sistema.
+  const filas = items.map(it =>
+    `<tr><td>${new Date(it.fecha).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}</td>` +
+    `<td>${String(it.empresa).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</td>` +
+    `<td><a href="/pdf/${it.jobId}">Descargar PDF</a></td></tr>`
+  ).join('\n');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!doctype html><meta charset="utf-8"><title>Diagnósticos guardados</title>
+<style>body{font-family:system-ui;margin:24px}table{border-collapse:collapse}td,th{padding:6px 14px;border-bottom:1px solid #ddd;text-align:left}</style>
+<h2>Diagnósticos guardados (${items.length})</h2>
+<p>Se conservan ${PDF_RETENTION_DIAS} días.</p>
+<table><tr><th>Fecha</th><th>Empresa</th><th></th></tr>${filas}</table>`);
 });
 
 app.post('/generar-reporte', async (req, res) => {
@@ -4915,5 +5007,6 @@ module.exports = {
   _reconciliarTitulo, _reconciliarGeoVisible, _geoIncoherente, callMCP, resolverCliente, _nuevoStats,
   _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN,
   _sedeDeLookup, _corregirGeoSede, _parseDestinatario, resolverDestinatario, _reconciliarConteoCuentas,
-  _bancoLeer, _bancoAplicarVetadas, _bancoMejorarCards, _bancoGuardarAprobadas, _bancoGuardarVetada
+  _bancoLeer, _bancoAplicarVetadas, _bancoMejorarCards, _bancoGuardarAprobadas, _bancoGuardarVetada,
+  _guardarPdfEnDisco, _leerPdfDeDisco
 };

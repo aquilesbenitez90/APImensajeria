@@ -32,6 +32,8 @@ N8N (cada 5 min) → lee chats IBT → detecta email + keyword "mercado"
 | POST | `/generar` | Async. Body `{email,dominio,empresa,nombre,profileId,destinatario}`. `destinatario` = link/public-id de LinkedIn de la persona que RECIBE el reporte (opcional): ancla el país y el alcance del documento a su operación (clave en multinacionales). Devuelve `{jobId}`. **Idempotente** por lead (dedup `enProgreso`). |
 | GET | `/resultado/:jobId` | Estado del job. `status`: processing / ok / error. |
 | POST | `/generar-reporte` | **Síncrono**. Requiere `email` y `dominio`. `eval:true` o `debug:true` incluye el objeto `data` estructurado en `reporte` (úsalo para auditar). |
+| GET | `/pdf/:jobId` | Descarga el PDF. Sirve desde RAM y, si el job ya expiró del Map, desde el disco (`PDF_DIR`): el link vive `PDF_RETENTION_DIAS` (default 30), no 1 hora. |
+| GET | `/pdfs` | Índice HTML de los PDFs en disco (recuperar diagnósticos con link perdido). Solo si `LANDING_KEY` está seteada; clave por header `x-landing-key` o `?key=`. |
 | GET | `/health` | `{ok, jobs_activos, cuentas}`. |
 
 ## Comandos
@@ -47,6 +49,7 @@ Deploy: Railway (nixpacks.toml instala chromium para Puppeteer). El N8N en produ
 
 Obligatorias: `ANTHROPIC_API_KEY`, `IBT_EMAIL`, `IBT_PASSWORD`. Opcional `PORT`.
 Tuning (con default): `NUM_CUENTAS=3`, `EXPECTED_PAGES=0` (0 = el juez NO valida páginas), `SOURCE_CONCURRENCY=4`, `SOURCE_HOME_MIN`, `SOURCE_ENRICH_TOP=12`, `SOURCE_TO_IA=18`, `SOURCE_MIN_2ND=4`, `ICP_MIN_HEADCOUNT=20`, `PLAN_MAX_TOOL_ITERS=8`, `SELECT_MAX_TRIES=3`, `PEER_INDUSTRY_CHECK=on` (filtro anti-peer por industria de empresa), `MIN_CARDS_OK`, `CLAUDE_MAX_RETRIES=3`, `CLAUDE_TIMEOUT_MS=240000`, `WS_DEBUG=1` (log de web_search), `LOGO_PATH`.
+Storage de PDFs: `PDF_DIR=./pdfs` (en Railway apuntarlo a un Volume, ej. `/data/pdfs`, o se pierde en cada redeploy), `PDF_RETENTION_DIAS=30`, `JOB_TTL_MS=3600000` (TTL del job en RAM; el PDF en disco vive aparte).
 
 ## Modelos
 

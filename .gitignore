@@ -18,3 +18,6 @@ smoke.js
 # Secretos (NUNCA commitear)
 .env
 banco-leads.jsonl
+
+# PDFs persistidos por el servicio (storage local de /pdf/:jobId)
+pdfs/
