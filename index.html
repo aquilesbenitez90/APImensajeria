@@ -83,9 +83,14 @@
           </select>
           <div class="hint">El idioma del reporte. El mensaje a cada lead se adapta al idioma de su país automáticamente.</div>
         </div>
-        <div class="field">
+        <div class="field" id="claveField">
           <label>Clave de acceso</label>
           <input id="clave" type="password" placeholder="••••••••" autocomplete="off">
+        </div>
+        <div class="field" id="gAuth" style="display:none">
+          <label>Ingresá con tu cuenta</label>
+          <div id="gbtn"></div>
+          <div id="quien" class="hint" style="display:none; text-align:left"></div>
         </div>
         <button id="go">Generar análisis</button>
         <div id="err" class="err"></div>
@@ -194,6 +199,59 @@ function mostrarOk(jobId, empresa){
   show('stageOk');
 }
 
+// ===== LOGIN CON GOOGLE =====
+// Si /config trae google_client_id, el acceso es con el botón oficial de Google (GIS) en vez de la clave.
+// El ID token (JWT de ~1h) se guarda en localStorage y viaja en x-user-token; el server lo valida contra
+// Google y contra la lista de emails permitidos. Si venció, se borra y se vuelve a pedir el login.
+let GCFG = null;      // respuesta de /config
+let GTOKEN = null;    // ID token vigente
+const LS_TOKEN = 'ibt_gtoken';
+const modoGoogle = () => !!(GCFG && GCFG.google_client_id);
+
+function _jwtPayload(t){ try{ return JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))); }catch(e){ return null; } }
+function _tokenVigente(t){ const p = t && _jwtPayload(t); return (p && p.exp*1000 > Date.now()+60000) ? p : null; }   // 1 min de margen
+
+function setSesion(token){
+  const p = _tokenVigente(token);
+  if(!p) return false;
+  GTOKEN = token;
+  try{ localStorage.setItem(LS_TOKEN, token); }catch(e){}
+  $('gbtn').style.display='none';
+  $('quien').style.display='block';
+  $('quien').textContent = '';
+  const b = document.createElement('b'); b.textContent = p.name || p.email;
+  $('quien').append('Conectado como ', b, ' · ');
+  const a = document.createElement('a'); a.href='#'; a.textContent='salir';
+  a.onclick = (e)=>{ e.preventDefault(); cerrarSesion(); };
+  $('quien').append(a);
+  return true;
+}
+function cerrarSesion(){
+  GTOKEN = null;
+  try{ localStorage.removeItem(LS_TOKEN); }catch(e){}
+  $('quien').style.display='none';
+  $('gbtn').style.display='block';
+}
+
+async function initAuth(){
+  try{ GCFG = await (await fetch('/config')).json(); }catch(e){ GCFG = {}; }
+  if(!modoGoogle()) return;   // modo clave compartida: la landing queda como siempre
+  $('claveField').style.display='none';
+  $('gAuth').style.display='block';
+  let guardado = null; try{ guardado = localStorage.getItem(LS_TOKEN); }catch(e){}
+  if(guardado) setSesion(guardado);   // si venció, setSesion devuelve false y queda el botón visible
+  await new Promise((done)=>{ const s=document.createElement('script'); s.src='https://accounts.google.com/gsi/client'; s.async=true; s.onload=done; s.onerror=done; document.head.appendChild(s); });
+  if(!(window.google && google.accounts && google.accounts.id)){
+    if(!GTOKEN) $('err').textContent = 'No se pudo cargar el login de Google. Recargá la página.';
+    return;
+  }
+  google.accounts.id.initialize({
+    client_id: GCFG.google_client_id,
+    callback: (resp)=>{ $('err').textContent=''; if(!setSesion(resp.credential)) $('err').textContent = 'No se pudo validar la sesión. Probá de nuevo.'; }
+  });
+  google.accounts.id.renderButton($('gbtn'), { theme:'outline', size:'large', text:'continue_with', width:380 });
+}
+
 async function generar(){
   const dominio = normDom($('dominio').value);
   const destinatario = normPerfil($('destinatario').value);
@@ -202,17 +260,25 @@ async function generar(){
   $('err').textContent = '';
   if(!dominio){ $('err').textContent = 'Pegá el link de LinkedIn o el dominio de la empresa.'; return; }
   if(destinatario === null){ $('err').textContent = 'Ese es el link de una empresa. En "Quién lo recibe" va el perfil de la persona (linkedin.com/in/...).'; return; }
-  if(!clave){ $('err').textContent = 'Ingresá la clave de acceso.'; return; }
+  if(modoGoogle()){
+    if(!GTOKEN || !_tokenVigente(GTOKEN)){ cerrarSesion(); $('err').textContent = 'Tu sesión venció. Ingresá con Google de nuevo.'; return; }
+  } else if(!clave){ $('err').textContent = 'Ingresá la clave de acceso.'; return; }
 
   let jobId, j;
   try{
+    const auth = modoGoogle() ? { 'x-user-token': GTOKEN } : { 'x-landing-key': clave };
     const r = await fetch('/generar', {
       method:'POST',
-      headers:{ 'Content-Type':'application/json', 'x-landing-key': clave },
+      headers:{ 'Content-Type':'application/json', ...auth },
       body: JSON.stringify({ dominio, idioma, ...(destinatario ? { destinatario } : {}) })
     });
     j = await r.json().catch(()=>({}));
-    if(r.status === 401){ $('err').textContent = 'Clave incorrecta.'; return; }
+    if(r.status === 401){
+      if(modoGoogle()){ cerrarSesion(); $('err').textContent = j.error || 'Tu sesión venció. Ingresá con Google de nuevo.'; }
+      else $('err').textContent = 'Clave incorrecta.';
+      return;
+    }
+    if(r.status === 403){ $('err').textContent = j.error || 'Tu cuenta no tiene acceso.'; return; }
     if(!j.jobId){ $('err').textContent = j.error || 'No se pudo iniciar el análisis.'; return; }
     jobId = j.jobId;
   }catch(e){ $('err').textContent = 'Error de conexión. Reintentá.'; return; }
@@ -280,6 +346,7 @@ $('go').addEventListener('click', generar);
 $('clave').addEventListener('keydown', e=>{ if(e.key==='Enter') generar(); });
 $('again').addEventListener('click', ()=>{ clearJob(); $('dominio').value=''; $('destinatario').value=''; $('err').textContent=''; show('stageForm'); });
 $('retry').addEventListener('click', ()=>{ clearJob(); show('stageForm'); });
+initAuth();   // decide clave vs Google según /config; corre en paralelo con la reanudación de jobs
 init();
 </script>
 </body>

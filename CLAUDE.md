@@ -34,7 +34,10 @@ N8N (cada 5 min) → lee chats IBT → detecta email + keyword "mercado"
 | POST | `/generar-reporte` | **Síncrono**. Requiere `email` y `dominio`. `eval:true` o `debug:true` incluye el objeto `data` estructurado en `reporte` (úsalo para auditar). |
 | GET | `/pdf/:jobId` | Descarga el PDF. Sirve desde RAM y, si el job ya expiró del Map, desde el disco (`PDF_DIR`): el link vive `PDF_RETENTION_DIAS` (default 30), no 1 hora. |
 | GET | `/pdfs` | Índice HTML de los PDFs en disco (recuperar diagnósticos con link perdido). Solo si `LANDING_KEY` está seteada; clave por header `x-landing-key` o `?key=`. |
+| GET | `/config` | Config pública del front: `{google_client_id}` (null si el login con Google no está activo). |
 | GET | `/health` | `{ok, jobs_activos, cuentas}`. |
+
+Gate de `/generar` y `/generar-reporte` (`_gateGenerar`): con `GOOGLE_CLIENT_ID` seteado → login con Google obligatorio (ID token en header `x-user-token`, verificado contra tokeninfo + lista `ALLOWED_EMAILS`; la clave vieja NO vale acá, si no nadie se loguearía); solo `LANDING_KEY` → clave compartida; ninguna → sin gate (producción/n8n). Quién generó queda como `generado_por` en `resultados.jsonl`, columna `usuario` en el Sheet y columna "Generó" en `/pdfs`.
 
 ## Comandos
 
@@ -50,6 +53,7 @@ Deploy: Railway (nixpacks.toml instala chromium para Puppeteer). El N8N en produ
 Obligatorias: `ANTHROPIC_API_KEY`, `IBT_EMAIL`, `IBT_PASSWORD`. Opcional `PORT`.
 Tuning (con default): `NUM_CUENTAS=3`, `EXPECTED_PAGES=0` (0 = el juez NO valida páginas), `SOURCE_CONCURRENCY=4`, `SOURCE_HOME_MIN`, `SOURCE_ENRICH_TOP=12`, `SOURCE_TO_IA=18`, `SOURCE_MIN_2ND=4`, `ICP_MIN_HEADCOUNT=20`, `PLAN_MAX_TOOL_ITERS=8`, `SELECT_MAX_TRIES=3`, `PEER_INDUSTRY_CHECK=on` (filtro anti-peer por industria de empresa), `MIN_CARDS_OK`, `CLAUDE_MAX_RETRIES=3`, `CLAUDE_TIMEOUT_MS=240000`, `WS_DEBUG=1` (log de web_search), `LOGO_PATH`.
 Storage de PDFs: `PDF_DIR=./pdfs` (en Railway apuntarlo a un Volume, ej. `/data/pdfs`, o se pierde en cada redeploy), `PDF_RETENTION_DIAS=30`, `JOB_TTL_MS=3600000` (TTL del job en RAM; el PDF en disco vive aparte).
+Login de la landing: `GOOGLE_CLIENT_ID` (activa el login con Google en `/generar` y `/generar-reporte`; el front lo lee de `/config`), `ALLOWED_EMAILS` (lista blanca separada por coma: emails exactos o `@dominio.com`; vacía = cualquier cuenta Google verificada, pero registrada). Solo en el servicio de la landing, NUNCA en producción/n8n.
 
 ## Modelos
 
