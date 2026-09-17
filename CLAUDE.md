@@ -93,6 +93,7 @@ cards[NUM_CUENTAS]{empresa,nombre,cargo,slug,urn,ubicacion,grado,angulo,hook}
 - `EXPECTED_PAGES=0` por default → el juez no valida el número de páginas. Setear `=2` cuando se confirme.
 - `Date.now()` como id JSON-RPC del MCP puede colisionar bajo concurrencia (menor).
 - Estado de tokens aislado por job con `AsyncLocalStorage` (no usar globales mutables).
+- La landing (`index.html`) se sirve con `Cache-Control: no-cache` (en `express.static`): sin eso, tras un deploy la gente seguía viendo la versión vieja (en incógnito sí veía la nueva). El panel Leaderboard se muestra SIEMPRE en modo Google (con aviso si no hay sesión o hay 401/403), nunca se esconde en silencio.
 
 ## Convenciones de código
 

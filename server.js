@@ -4543,7 +4543,10 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, des
 // ---------------------------------------------------------------------------
 const app = express();
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static('.'));
+// HTML sin caché: la landing cambia con cada deploy y una copia vieja en el navegador hace que la persona no
+// vea lo nuevo (caso Marcela: en incógnito sí, en su navegador no). no-cache = el navegador SIEMPRE revalida
+// con el ETag antes de usar su copia. Imágenes/estáticos siguen con el default.
+app.use(express.static('.', { setHeaders: (res, p) => { if (p.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache, must-revalidate'); } }));
 
 const jobs = new Map();
 // Dedup anti doble-disparo: leadKey -> jobId EN CURSO. Si el mismo lead se dispara dos veces

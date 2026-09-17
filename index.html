@@ -269,7 +269,7 @@ function cerrarSesion(){
   try{ localStorage.removeItem(LS_TOKEN); }catch(e){}
   $('quien').style.display='none';
   $('gbtn').style.display='block';
-  $('lb').classList.remove('on');
+  if(modoGoogle()) lbMensaje('Ingresá con Google para ver el ranking del mes.');   // el panel queda, con el aviso
 }
 
 // ===== LEADERBOARD =====
@@ -286,15 +286,23 @@ function lbQuery(){
   if(LB_MODO === 'mes') return 'desde=' + encodeURIComponent(primerDiaDelMes().toISOString());
   return 'dias=0';
 }
+// El panel se ve SIEMPRE en modo Google (antes se escondía en silencio si algo fallaba y nadie sabía que
+// existía). Sin sesión o con error, muestra el motivo en vez de desaparecer.
+function lbMensaje(txt){
+  const body = $('lbBody'); body.textContent = '';
+  const p = document.createElement('div'); p.className='lb-empty'; p.textContent = txt; body.appendChild(p);
+}
 async function cargarLeaderboard(){
-  if(!modoGoogle() || !GTOKEN) return;
+  if(!modoGoogle()) return;
+  $('lb').classList.add('on');
+  if(!GTOKEN){ lbMensaje('Ingresá con Google para ver el ranking del mes.'); return; }
   try{
-    const r = await fetch('/leaderboard?' + lbQuery(), { headers:{ 'x-user-token': GTOKEN } });
-    if(!r.ok) return;                 // 401/403: sin acceso al ranking, simplemente no se muestra
-    const d = await r.json();
-    pintarLeaderboard(d);
-    $('lb').classList.add('on');
-  }catch(e){}
+    const r = await fetch('/leaderboard?' + lbQuery(), { headers:{ 'x-user-token': GTOKEN }, cache:'no-store' });
+    if(r.status === 401){ cerrarSesion(); lbMensaje('Tu sesión venció. Ingresá con Google de nuevo.'); return; }   // el server rechazó el token guardado: la UI deja de decir "conectado"
+    if(r.status === 403){ lbMensaje('Tu cuenta no tiene acceso al ranking.'); return; }
+    if(!r.ok){ lbMensaje('No se pudo cargar el ranking (' + r.status + ').'); return; }
+    pintarLeaderboard(await r.json());
+  }catch(e){ lbMensaje('No se pudo cargar el ranking. Recargá la página.'); }
 }
 function pintarLeaderboard(d){
   const yo = (_jwtPayload(GTOKEN||'')||{}).email || '';
@@ -331,7 +339,7 @@ async function initAuth(){
   $('claveField').style.display='none';
   $('gAuth').style.display='block';
   let guardado = null; try{ guardado = localStorage.getItem(LS_TOKEN); }catch(e){}
-  if(guardado) setSesion(guardado);   // si venció, setSesion devuelve false y queda el botón visible
+  if(!(guardado && setSesion(guardado))) cargarLeaderboard();   // sin sesión válida: el panel igual se ve, con el aviso de login
   await new Promise((done)=>{ const s=document.createElement('script'); s.src='https://accounts.google.com/gsi/client'; s.async=true; s.onload=done; s.onerror=done; document.head.appendChild(s); });
   if(!(window.google && google.accounts && google.accounts.id)){
     if(!GTOKEN) $('err').textContent = 'No se pudo cargar el login de Google. Recargá la página.';
