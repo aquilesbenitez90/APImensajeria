@@ -50,10 +50,12 @@
   .dl{display:block; text-align:center; text-decoration:none; margin-top:22px}
   .linkbtn{background:none; color:var(--accent); font-weight:500; font-size:13px; margin-top:14px}
   .foot{text-align:center; font-family:var(--mono); font-size:10px; letter-spacing:.1em; color:#3A3F4A; padding:18px; text-transform:uppercase}
-  /* leaderboard: segunda tarjeta debajo del formulario, solo con sesión de Google */
-  .wrap{flex-direction:column; gap:18px}
-  .lb{display:none; background:var(--panel); border-radius:16px; box-shadow:0 30px 80px -40px rgba(0,0,0,.5); width:100%; max-width:460px; padding:26px 34px}
+  /* leaderboard: panel LATERAL a la derecha del formulario (solo con sesión de Google). El formulario sigue
+     centrado cuando el panel no está; con el panel, los dos quedan centrados como par. En angosto, cae debajo. */
+  .wrap{align-items:flex-start; gap:24px; flex-wrap:wrap}
+  .lb{display:none; background:var(--panel); border-radius:16px; box-shadow:0 30px 80px -40px rgba(0,0,0,.5); width:340px; flex:0 0 340px; padding:24px 26px; align-self:flex-start}
   .lb.on{display:block}
+  @media (max-width: 880px){ .lb{width:100%; flex:0 0 auto; max-width:460px} }
   .lb-head{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:14px}
   .lb-head label{margin:0}
   .lb-per{font-family:var(--mono); font-size:11px; color:var(--ink-3)}
@@ -64,7 +66,7 @@
   table.lbt th:first-child, table.lbt td:first-child{text-align:left}
   table.lbt td{padding:9px 0; border-top:1px solid var(--line); text-align:right; font-variant-numeric:tabular-nums}
   table.lbt td.nm{font-weight:500}
-  table.lbt td.nm small{display:block; color:var(--ink-3); font-size:11px; font-weight:400}
+  table.lbt td.nm small{display:block; color:var(--ink-3); font-size:11px; font-weight:400; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
   table.lbt td.pos{width:28px; font-family:var(--mono); color:var(--ink-3); text-align:left}
   table.lbt tr.yo td{color:var(--accent)}
   .lb-empty{color:var(--ink-3); font-size:13px; text-align:center; padding:10px 0}
@@ -143,7 +145,7 @@
       </div>
     </div>
 
-    <!-- LEADERBOARD (solo con sesión de Google: muestra nombres/emails del equipo) -->
+    <!-- LEADERBOARD: panel lateral derecho (solo con sesión de Google: muestra nombres/emails del equipo) -->
     <div id="lb" class="lb">
       <div class="lb-head">
         <label>Leaderboard</label>
@@ -299,16 +301,14 @@ function pintarLeaderboard(d){
   }
   const t = document.createElement('table'); t.className='lbt';
   const th = t.createTHead().insertRow();
-  for(const h of ['#','Quién','Diagnósticos','Aprobados','Tasa']){ const c=document.createElement('th'); c.textContent=h; th.appendChild(c); }
+  for(const h of ['#','Quién','Diagnósticos']){ const c=document.createElement('th'); c.textContent=h; th.appendChild(c); }
   const tb = t.createTBody();
   d.usuarios.slice(0, 15).forEach((u, i) => {
     const tr = tb.insertRow(); if(u.email === yo.toLowerCase()) tr.className='yo';
     const pos = tr.insertCell(); pos.className='pos'; pos.textContent = String(i+1).padStart(2,'0');
     const nm = tr.insertCell(); nm.className='nm'; nm.textContent = u.nombre || u.email;
     const sm = document.createElement('small'); sm.textContent = u.email; nm.appendChild(sm);
-    tr.insertCell().textContent = u.diagnosticos;
-    tr.insertCell().textContent = u.aprobados;
-    tr.insertCell().textContent = u.tasa_aprobacion + '%';
+    tr.insertCell().textContent = u.diagnosticos;   // solo la cuenta: aprobados/tasa no van en el ranking
   });
   body.appendChild(t);
 }
