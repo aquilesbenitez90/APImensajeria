@@ -418,7 +418,8 @@ function _enviarASheet(rec){
       paginas: rec.paginas ?? '',
       motivo: rec.motivo_rechazo || '',
       costo_usd: rec.costo ?? '',
-      jobId: rec.jobId || ''
+      jobId: rec.jobId || '',
+      usuario: rec.generado_por || ''   // quién generó el diagnóstico (login Google): la medición por persona
     };
     const ctrl = new AbortController();
     const _t = setTimeout(() => ctrl.abort(), 10000);
@@ -452,7 +453,7 @@ function _motivoRechazo({ aptoEnvio, sourcingVacio, integridadMal, geoMal, paise
 
 // Construye el registro de un job. NO incluye el PDF (pesa). Incluye el ICP y las cards
 // (empresa/cargo/grado/tamaño) + calidez, que es lo que la IA usa para detectar patrones.
-function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnvio, pageCount, error, motivo_rechazo }){
+function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnvio, pageCount, error, motivo_rechazo, usuario }){
   const t = _stats().total;
   const icp = (plan && plan._plan) || {};
   const cards = (((data && data.cards) || [])).map(c => ({
@@ -474,6 +475,7 @@ function _recResultado({ jobId, input, cliente, plan, data, judgeResult, aptoEnv
     jobId: jobId || null,
     status: error ? 'error' : 'ok',
     error: error || undefined,
+    generado_por: usuario ? `${usuario.nombre || ''} <${usuario.email}>`.trim() : undefined,   // quién lo pidió (login Google de la landing)
     motivo_rechazo: motivo,
     empresa: (cliente && cliente.empresa) || (input && input.empresa) || '',
     dominio: (input && input.dominio) || '',
@@ -4282,7 +4284,7 @@ async function aplicarJuezComercial({ cliente, plan, pool, senales, data }){
   return { data, pool: _pool, senales: _senales };
 }
 
-async function procesar(jobId, { email, dominio, empresa, nombre, profileId, destinatario, evalMode, idioma, test }) {
+async function procesar(jobId, { email, dominio, empresa, nombre, profileId, destinatario, evalMode, idioma, test, usuario }) {
   return _statsALS.run(_nuevoStats(), async () => {
   const _st0 = _statsALS.getStore(); if (_st0) _st0.idiomaDoc = _idiomaCode(idioma);   // idioma del DOCUMENTO (manual desde la landing)
   try {
@@ -4486,7 +4488,7 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, des
       finishedAt: Date.now()
     });
     // Persistencia en disco: el link /pdf/:jobId sigue vivo PDF_RETENTION_DIAS aunque el job expire de RAM.
-    if (pdfBuffer) _guardarPdfEnDisco(jobId, pdfBuffer, { pdf_filename: _nombreArchivoPDF(empresaFinal), empresa: empresaFinal, ts: new Date().toISOString() });
+    if (pdfBuffer) _guardarPdfEnDisco(jobId, pdfBuffer, { pdf_filename: _nombreArchivoPDF(empresaFinal), empresa: empresaFinal, ts: new Date().toISOString(), generado_por: usuario ? `${usuario.nombre || ''} <${usuario.email}>`.trim() : '' });
     const motivoRechazo = _motivoRechazo({
       aptoEnvio,
       integridadMal: cardsValidas < MIN_CARDS_OK,
@@ -4496,12 +4498,12 @@ async function procesar(jobId, { email, dominio, empresa, nombre, profileId, des
       calidezMal: !!(gateCal && gateCal.retener),
       juezRechazo: judgeResult.veredicto === 'RECHAZADO'
     });
-    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId, destinatario }, cliente, plan, data, judgeResult, aptoEnvio, pageCount, motivo_rechazo: motivoRechazo }));
+    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId, destinatario }, cliente, plan, data, judgeResult, aptoEnvio, pageCount, motivo_rechazo: motivoRechazo, usuario }));
     console.log(`========== Job ${jobId} - ${aptoEnvio ? `OK ${pageCount} páginas` : 'NO apto (sin PDF)'}, juez FINAL ${judgeResult.veredicto} ${judgeResult.score}/8 (motivo: ${motivoRechazo}) ==========\n`);
   } catch (err) {
     console.error(`[Job ${jobId}] Error:`, err);
     jobs.set(jobId, { status: 'error', error: err.message, finishedAt: Date.now() });
-    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId, destinatario }, error: err.message }));
+    _registrarResultado(_recResultado({ jobId, input: { email, dominio, empresa, profileId, destinatario }, error: err.message, usuario }));
   }
   });
 }
@@ -4571,6 +4573,68 @@ setInterval(() => {
   } catch (e) { console.warn('[PDF] error limpiando PDFs viejos:', e.message); }
 }, 30 * 60 * 1000);
 
+// ===== LOGIN CON GOOGLE (landing) =====
+// Si GOOGLE_CLIENT_ID está seteado (solo en el servicio de la landing), /generar exige un ID token de
+// Google (header x-user-token) EN LUGAR de la clave compartida: identifica QUIÉN genera cada diagnóstico
+// (medición por persona en el Sheet / resultados.jsonl / índice /pdfs). La clave vieja deja de valer en
+// /generar a propósito: si siguiera valiendo, nadie se loguearía y no se podría medir. LANDING_KEY sigue
+// gateando /pdfs, /stats y /resultados-log. El token se verifica server-side contra el tokeninfo de Google
+// (firma/vencimiento/audiencia) y el email contra ALLOWED_EMAILS (emails exactos o "@dominio.com" para el
+// dominio entero, separados por coma; vacía → cualquier cuenta Google verificada entra, pero queda
+// registrada). n8n NO se toca: en producción GOOGLE_CLIENT_ID no está seteado y /generar sigue como hoy.
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const ALLOWED_EMAILS = String(process.env.ALLOWED_EMAILS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const _tokensOk = new Map();   // token -> {email, nombre, exp}: cache para no pegarle a Google en cada request
+
+function _emailPermitido(email) {
+  if (!ALLOWED_EMAILS.length) return true;
+  const e = String(email || '').toLowerCase();
+  return ALLOWED_EMAILS.some(a => a.startsWith('@') ? e.endsWith(a) : e === a);
+}
+
+async function _validarTokenGoogle(token) {
+  if (!token) return null;
+  const cacheado = _tokensOk.get(token);
+  if (cacheado && cacheado.exp * 1000 > Date.now()) return cacheado;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    const r = await fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(token), { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) return null;   // token inválido/vencido: Google devuelve 4xx
+    const info = await r.json();
+    if (info.aud !== GOOGLE_CLIENT_ID) return null;            // token emitido para OTRA app: no vale
+    if (String(info.email_verified) !== 'true') return null;
+    const u = { email: String(info.email || '').toLowerCase(), nombre: info.name || '', exp: parseInt(info.exp, 10) || 0 };
+    if (!u.email || u.exp * 1000 < Date.now()) return null;
+    if (_tokensOk.size > 500) _tokensOk.clear();               // tope de memoria; se repuebla solo
+    _tokensOk.set(token, u);
+    return u;
+  } catch (e) { console.warn('[AUTH] no pude validar el token de Google:', e.message); return null; }
+}
+
+// Valida el acceso a /generar según el modo del servicio. Devuelve {usuario} (null si no hay login por
+// Google activo) o {error, status} para responder. Compartido con /generar-reporte.
+async function _gateGenerar(req) {
+  if (GOOGLE_CLIENT_ID) {
+    const usuario = await _validarTokenGoogle(req.header('x-user-token'));
+    if (!usuario) return { error: 'Sesion invalida o vencida. Ingresa con Google de nuevo.', status: 401 };
+    if (!_emailPermitido(usuario.email)) {
+      console.warn(`[AUTH] email NO permitido: ${usuario.email}`);
+      return { error: 'Tu cuenta no tiene acceso. Pedi que agreguen tu email a la lista.', status: 403 };
+    }
+    return { usuario };
+  }
+  if (process.env.LANDING_KEY && req.header('x-landing-key') !== process.env.LANDING_KEY) {
+    return { error: 'Clave invalida', status: 401 };
+  }
+  return { usuario: null };
+}
+
+// Config pública del front: la landing pregunta acá si el login con Google está activo (el client id
+// NO es un secreto; igual solo sirve para NUESTRO origen autorizado en Google Cloud).
+app.get('/config', (req, res) => res.json({ google_client_id: GOOGLE_CLIENT_ID || null }));
+
 // ===== COLA CON LÍMITE DE CONCURRENCIA =====
 // Sin esto, N diagnósticos simultáneos = N pipelines en paralelo → se pasa el tope de 60 req/min del MCP
 // (cada reporte ~40 llamadas) y se acumulan instancias de Chromium en RAM (riesgo de OOM y caída del server).
@@ -4591,13 +4655,13 @@ function _dispatchCola(){
   }
 }
 
-app.post('/generar', (req, res) => {
-  // GATE DE LA LANDING (uso privado): si LANDING_KEY está seteada (solo en el servicio de la landing,
-  // NO en el de producción que usa n8n), exigimos la clave en el header. Si no está seteada, no gatea
-  // (producción/n8n sigue igual). Así la misma /generar sirve para n8n (sin gate) y para la landing (con gate).
-  if (process.env.LANDING_KEY && req.header('x-landing-key') !== process.env.LANDING_KEY) {
-    return res.status(401).json({ error: 'Clave invalida' });
-  }
+app.post('/generar', async (req, res) => {
+  // GATE DE LA LANDING (uso privado): con GOOGLE_CLIENT_ID → login con Google (identifica a la persona);
+  // solo con LANDING_KEY → clave compartida (modo anterior); sin ninguna → sin gate (producción/n8n).
+  const acceso = await _gateGenerar(req);
+  if (acceso.error) return res.status(acceso.status).json({ error: acceso.error });
+  const usuario = acceso.usuario;   // {email, nombre} o null: viaja al job para registrar quién generó
+  if (usuario) console.log(`[AUTH] diagnostico pedido por ${usuario.nombre || '?'} <${usuario.email}>`);
   const { email, dominio, empresa, nombre, profileId, destinatario, eval: evalMode, debug, idioma, test } = req.body || {};
   if (!empresa && !dominio && !profileId) {
     return res.status(400).json({ error: 'Falta empresa, dominio o profileId' });
@@ -4638,7 +4702,7 @@ app.post('/generar', (req, res) => {
       }, JOB_TIMEOUT_MS);
     });
     return Promise.race([
-      procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, destinatario, evalMode: evalMode || debug, idioma, test }),
+      procesar(jobId, { email, dominio, empresa: empresa || dominio, nombre: nombre || '', profileId, destinatario, evalMode: evalMode || debug, idioma, test, usuario }),
       timeoutGlobal
     ])
     .catch((err) => {   // CATCH DEFENSIVO: si procesar() rechaza sin atrapar, no tumbamos el server.
@@ -4714,15 +4778,17 @@ app.get('/pdfs', (req, res) => {
           try { meta = JSON.parse(fs.readFileSync(path.join(PDF_DIR, jobId + '.json'), 'utf8')); } catch { /* sin meta */ }
           let mtime = 0;
           try { mtime = fs.statSync(path.join(PDF_DIR, f)).mtimeMs; } catch { /* borrado entre readdir y stat */ }
-          return { jobId, empresa: meta.empresa || '', fecha: meta.ts || new Date(mtime).toISOString(), mtime };
+          return { jobId, empresa: meta.empresa || '', generado_por: meta.generado_por || '', fecha: meta.ts || new Date(mtime).toISOString(), mtime };
         })
         .sort((a, b) => b.mtime - a.mtime);
     }
   } catch (e) { console.warn('[PDF] error listando PDFs:', e.message); }
   // HTML mínimo: esto lo abre una persona en el navegador, no un sistema.
+  const esc = s => String(s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
   const filas = items.map(it =>
     `<tr><td>${new Date(it.fecha).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}</td>` +
-    `<td>${String(it.empresa).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</td>` +
+    `<td>${esc(it.empresa)}</td>` +
+    `<td>${esc(it.generado_por)}</td>` +
     `<td><a href="/pdf/${it.jobId}">Descargar PDF</a></td></tr>`
   ).join('\n');
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -4730,10 +4796,14 @@ app.get('/pdfs', (req, res) => {
 <style>body{font-family:system-ui;margin:24px}table{border-collapse:collapse}td,th{padding:6px 14px;border-bottom:1px solid #ddd;text-align:left}</style>
 <h2>Diagnósticos guardados (${items.length})</h2>
 <p>Se conservan ${PDF_RETENTION_DIAS} días.</p>
-<table><tr><th>Fecha</th><th>Empresa</th><th></th></tr>${filas}</table>`);
+<table><tr><th>Fecha</th><th>Empresa</th><th>Generó</th><th></th></tr>${filas}</table>`);
 });
 
 app.post('/generar-reporte', async (req, res) => {
+  // Mismo gate que /generar: en el servicio con login por Google, este endpoint sync también lo exige
+  // (si no, sería la puerta de atrás para generar sin loguearse). En producción/n8n sigue sin gate.
+  const _acceso = await _gateGenerar(req);
+  if (_acceso.error) return res.status(_acceso.status).json({ error: _acceso.error });
   const { email, dominio, empresa, nombre, profileId, destinatario, eval: evalMode, debug, idioma } = req.body || {};
   if (!email || !dominio) return res.status(400).json({ error: 'email y dominio son obligatorios' });
 
