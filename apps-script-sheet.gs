@@ -3,7 +3,14 @@
  *
  * Recibe una fila por cada análisis (el server la manda a SHEET_WEBHOOK_URL) y la agrega a la hoja.
  * El server manda: fecha, empresa, dominio, estado, veredicto, score, apto_envio, cards, paginas,
- * motivo, costo_usd, jobId. Incluye TODOS los análisis (aprobados, rechazados y errores) con su costo.
+ * motivo, costo_usd, jobId, usuario (quién lo generó, del login con Google). Incluye TODOS los análisis
+ * (aprobados, rechazados y errores) con su costo.
+ *
+ * ─── SI YA ESTABA INSTALADO Y CAMBIÓ ESTE ARCHIVO (ej. columna nueva) ─────────
+ * Pegá el archivo entero de nuevo y después: Deploy → Administrar implementaciones → lápiz (editar) →
+ * Versión: "Nueva versión" → Implementar. La URL /exec NO cambia (no hay que tocar Railway). Un Web App
+ * sigue corriendo la versión vieja hasta que se publica una nueva; con solo guardar el código no alcanza.
+ * El encabezado de la hoja se actualiza solo en la próxima fila que llegue.
  *
  * ─── CÓMO INSTALARLO (una sola vez) ───────────────────────────────────────────
  * 1. Abrí (o creá) el Google Sheet donde querés el registro.
@@ -25,7 +32,9 @@ var SHEET_ID = '19c8FYt0cDcIQoBRhKCK5WzEW6QXUg4u6PdVA806Ln90';  // Sheet "Diagno
 var HOJA  = 'Analisis';   // nombre de la pestaña; se crea sola si no existe
 var TOKEN = '';           // opcional: si lo llenás, el server tiene que mandar el mismo token
 
-var COLUMNAS = ['fecha','empresa','dominio','estado','veredicto','score','apto_envio','cards','paginas','motivo','costo_usd','jobId'];
+// 'usuario' = quién generó el diagnóstico (nombre <email> del login con Google). El server lo manda desde el
+// commit 9b2613b; sin esta columna acá, el dato llegaba y se descartaba.
+var COLUMNAS = ['fecha','empresa','dominio','estado','veredicto','score','apto_envio','cards','paginas','motivo','costo_usd','jobId','usuario'];
 
 function doPost(e) {
   var lock = LockService.getScriptLock();
@@ -35,7 +44,13 @@ function doPost(e) {
     if (TOKEN && d.token !== TOKEN) return _out('unauthorized');
     var ss = SHEET_ID ? SpreadsheetApp.openById(SHEET_ID) : SpreadsheetApp.getActiveSpreadsheet();
     var sh = ss.getSheetByName(HOJA) || ss.insertSheet(HOJA);
-    if (sh.getLastRow() === 0) sh.appendRow(COLUMNAS);   // encabezado la primera vez
+    // Encabezado: se escribe la primera vez y se ACTUALIZA si cambió COLUMNAS (ej. se agregó 'usuario'),
+    // sin tocar las filas viejas (quedan con la celda nueva vacía).
+    if (sh.getLastRow() === 0) sh.appendRow(COLUMNAS);
+    else {
+      var cab = sh.getRange(1, 1, 1, COLUMNAS.length).getValues()[0];
+      if (cab.join('|') !== COLUMNAS.join('|')) sh.getRange(1, 1, 1, COLUMNAS.length).setValues([COLUMNAS]);
+    }
     sh.appendRow(COLUMNAS.map(function (c) { return d[c] !== undefined && d[c] !== null ? d[c] : ''; }));
     return _out('ok');
   } catch (err) {

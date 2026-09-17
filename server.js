@@ -2284,14 +2284,19 @@ async function sourceCandidates(plan, cliente, conSenal = true){
   const top = out.slice(0, K);
   let _skipTop = 0;
   await _mapLimit(top, CONC, async (c) => {
-    if(c.headcount==null){
+    // Se pide el perfil si falta el tamaño O si falta la BIO: antes solo se llamaba por headcount, así que los
+    // candidatos de cuentas-ancla (que heredan headcount del search de companies) llegaban a SELECT SIN bio,
+    // y la bio es el único texto propio de cada persona que varía dentro del pool (las banderas no: casi
+    // todos las tienen). Tope K y deadline de fase siguen acotando el costo.
+    if(c.headcount==null || !c.about){
       // DEADLINE DE FASE (best-effort, acumulado por job): si el MCP está lento y ya gastamos el presupuesto
       // de enriquecimiento, NO lanzamos más get_contact_profile; el candidato queda con headcount=null (tolerado).
       if(!_enrichTienePresupuesto()){ _skipTop++; }
       else try{
         const _raw = await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache });
         const prof=_parseProfile(_raw);
-        if(prof.headcount!=null) c.headcount=prof.headcount;
+        // el headcount del perfil solo COMPLETA el faltante: el heredado de la cuenta-ancla no se pisa.
+        if(prof.headcount!=null && c.headcount==null) c.headcount=prof.headcount;
         if(prof.headRich && prof.headRich.length>=3){
           c.head=prof.headRich; c.empresa=_empresaDeHeadline(prof.headRich) || c.empresa; c.fit=_rankFit(prof.headRich, titulos);
         }
@@ -2369,8 +2374,12 @@ async function sourceCandidates(plan, cliente, conSenal = true){
       // presupuesto de enriquecimiento, dejamos headcount=null (tolerado) en vez de seguir pegando al MCP lento.
       if(!_enrichTienePresupuesto()){ _skipHC++; return; }
       try{
-        const prof=_parseProfile(await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache }));
+        const _raw = await callMCP('get_contact_profile',{ publicIdOrUrl: c.id, noCache });
+        const prof=_parseProfile(_raw);
         if(prof.headcount!=null) c.headcount=prof.headcount;
+        // ABOUT: viene GRATIS en esta misma llamada (igual que en el loop del top); antes se descartaba acá.
+        const _about = _raw && _raw.structuredContent && _raw.structuredContent.about;
+        if(_about && !c.about) c.about = String(_about).replace(/\s+/g,' ').trim().slice(0, 300);
         if(prof.headRich && prof.headRich.length>=3){
           c.head=prof.headRich; c.empresa=_empresaDeHeadline(prof.headRich) || c.empresa; c.fit=_rankFit(prof.headRich, titulos);
         }
@@ -3262,6 +3271,26 @@ function _senalesVisibles(p){
   if(s.growth)       out.push('Creciendo en plantilla');
   return out;
 }
+// BADGES DISTINTOS ENTRE CARDS (determinístico, post-selección). Las banderas salen de búsquedas filtradas por
+// esa misma bandera, así que dentro del pool casi todos las tienen (hiring/growth tocan el techo de 50 sobre
+// ~85 empresas; recienAsumio 91% del pool): si las 3 cards muestran los mismos 3-4 badges, el badge no informa
+// nada y el juez lo lee como plantilla repetida ("comparten la misma señal 'creciendo en plantilla'").
+// Regla: si una card tiene alguna bandera que NO comparten todas las cards, oculta las universales y deja solo
+// las propias. Si todas sus banderas son universales, deja solo la más fuerte (1 badge, no 4 iguales).
+// NUNCA agrega ni inventa: solo recorta. El orden visible lo decide render.js (por fuerza).
+function _diferenciarBadges(cards){
+  const lista = (cards||[]).filter(c => c && Array.isArray(c.senalesVisibles) && c.senalesVisibles.length);
+  if(lista.length < 2) return;
+  const freq = new Map();
+  for(const c of lista) for(const s of new Set(c.senalesVisibles)) freq.set(s, (freq.get(s)||0)+1);
+  for(const c of lista){
+    const orig = c.senalesVisibles;                                  // ya viene en orden de fuerza (_senalesVisibles)
+    const propias = orig.filter(s => freq.get(s) < lista.length);    // banderas que NO tienen todas las cards
+    const out = propias.length ? propias : orig.slice(0, 1);
+    if(out.length !== orig.length) console.log(`[BADGES] ${c.nombre||'?'} @ ${c.empresa||'?'}: [${orig.join(', ')}] -> [${out.join(', ')}]`);
+    c.senalesVisibles = out;
+  }
+}
 function armarReporte(plan, seleccion, pool, senales){
   const titulos = (plan._plan && plan._plan.titulos_objetivo) || [];
   const industrias = (plan._plan && plan._plan.industrias) || [];
@@ -3468,6 +3497,7 @@ function armarReporte(plan, seleccion, pool, senales){
   // SEÑALES DE MERCADO: datos REALES del MCP (sourceCandidates), no generados por IA. Se pegan tal cual.
   // Si el sourcing no logró ninguna señal real, queda [] (el template/render decide cómo mostrarlo).
   const senalesReales = Array.isArray(senales) ? senales.filter(s => s && s.label && (s.value!=null && String(s.value).trim()!=='')) : [];
+  _diferenciarBadges(cards);   // badges por card sin repetir los universales (ver _diferenciarBadges)
   // _plan vuelve adjunto (no se publica en página 1 ni en cards): render.js lo usa para la hoja de
   // diagnóstico (industrias_list + anti_icp_html). Belt en el punto donde se arma data → sirve a ambos endpoints.
   return { ...base, cards, senales: senalesReales, _plan, _idioma: _idiomaDoc() };
@@ -5057,6 +5087,59 @@ app.get('/stats', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// LEADERBOARD: quién generó cuántos diagnósticos (lee resultados.jsonl del volumen, campo `generado_por`,
+// que existe desde el login con Google → el ranking arranca desde ese deploy, no tiene histórico previo).
+// Lo consume la landing una vez logueada. GATE: en modo Google, cualquier email PERMITIDO (misma regla que
+// /generar: el ranking muestra nombres y emails del equipo, así que solo el equipo lo ve); sin Google, la
+// clave de /stats. Período: es MENSUAL por decisión del negocio → la landing manda ?desde=<día 1 del mes 00:00
+// local> y el ranking arranca de cero cada mes; ?dias=N es la alternativa (default 30; 0 = todo). Solo se cuentan
+// filas con generado_por (los jobs de n8n/API sin usuario no compiten).
+// FUENTE: resultados.jsonl del volumen, NO el Google Sheet. El Sheet es una COPIA que este mismo server manda
+// (fire-and-forget, puede perder filas si el Apps Script devuelve 'busy') y leerlo exigiría credenciales de
+// Google API en el server; el jsonl es la fuente de verdad, ya está local y es lo que usa /stats.
+function _leaderboard(dias, desdeMs) {
+  const periodo = desdeMs ? `desde ${new Date(desdeMs).toISOString().slice(0, 10)}` : (dias > 0 ? `últimos ${dias} días` : 'todo el histórico');
+  if (!fs.existsSync(RESULT_LOG)) return { periodo, usuarios: [], total: 0 };
+  const desde = desdeMs || (dias > 0 ? Date.now() - dias * 24 * 60 * 60 * 1000 : 0);
+  const por = new Map();
+  let total = 0;
+  for (const ln of fs.readFileSync(RESULT_LOG, 'utf8').split('\n')) {
+    if (!ln.trim()) continue;
+    let r; try { r = JSON.parse(ln); } catch { continue; }
+    if (!r.generado_por) continue;
+    const ts = Date.parse(r.ts || '') || 0;
+    if (desde && ts && ts < desde) continue;
+    // "Nombre <email>" → clave por email (estable aunque cambie el nombre en Google); nombre para mostrar.
+    const m = String(r.generado_por).match(/^(.*?)\s*<([^>]+)>\s*$/);
+    const email = (m ? m[2] : r.generado_por).toLowerCase();
+    const nombre = (m && m[1].trim()) || email.split('@')[0];
+    const u = por.get(email) || { email, nombre, diagnosticos: 0, aprobados: 0, aptos: 0, errores: 0, costo_usd: 0, ultimo: '' };
+    u.diagnosticos++; total++;
+    if (r.status === 'error') u.errores++;
+    else if (r.veredicto === 'APROBADO') u.aprobados++;
+    if (r.apto_envio) u.aptos++;
+    u.costo_usd = +(u.costo_usd + (Number(r.costo) || 0)).toFixed(4);
+    if ((r.ts || '') > u.ultimo) u.ultimo = r.ts || '';
+    if (nombre && nombre !== email.split('@')[0]) u.nombre = nombre;   // el nombre más reciente con formato completo gana
+    por.set(email, u);
+  }
+  const usuarios = [...por.values()]
+    .map(u => ({ ...u, tasa_aprobacion: u.diagnosticos ? Math.round(100 * u.aprobados / u.diagnosticos) : 0 }))
+    .sort((a, b) => (b.diagnosticos - a.diagnosticos) || (b.aprobados - a.aprobados) || a.email.localeCompare(b.email));
+  return { periodo, usuarios, total };
+}
+app.get('/leaderboard', async (req, res) => {
+  if (GOOGLE_CLIENT_ID) {
+    const acceso = await _gateGenerar(req);   // token de Google válido + email permitido
+    if (acceso.error) return res.status(acceso.status).json({ error: acceso.error });
+  } else if (!_gateDatos(req, res)) return;
+  try {
+    const desdeMs = req.query.desde ? (Date.parse(String(req.query.desde)) || 0) : 0;   // inicio del mes (lo calcula la landing en hora local)
+    const dias = req.query.dias === undefined ? 30 : Math.max(0, parseInt(req.query.dias, 10) || 0);
+    res.json(_leaderboard(dias, desdeMs));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT} (NUM_CUENTAS=${NUM_CUENTAS}, EXPECTED_PAGES=${EXPECTED_PAGES||'no validar'})`));
@@ -5078,5 +5161,5 @@ module.exports = {
   _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN,
   _sedeDeLookup, _corregirGeoSede, _parseDestinatario, resolverDestinatario, _reconciliarConteoCuentas,
   _bancoLeer, _bancoAplicarVetadas, _bancoMejorarCards, _bancoGuardarAprobadas, _bancoGuardarVetada,
-  _guardarPdfEnDisco, _leerPdfDeDisco
+  _guardarPdfEnDisco, _leerPdfDeDisco, _leaderboard, _diferenciarBadges
 };

@@ -50,6 +50,24 @@
   .dl{display:block; text-align:center; text-decoration:none; margin-top:22px}
   .linkbtn{background:none; color:var(--accent); font-weight:500; font-size:13px; margin-top:14px}
   .foot{text-align:center; font-family:var(--mono); font-size:10px; letter-spacing:.1em; color:#3A3F4A; padding:18px; text-transform:uppercase}
+  /* leaderboard: segunda tarjeta debajo del formulario, solo con sesión de Google */
+  .wrap{flex-direction:column; gap:18px}
+  .lb{display:none; background:var(--panel); border-radius:16px; box-shadow:0 30px 80px -40px rgba(0,0,0,.5); width:100%; max-width:460px; padding:26px 34px}
+  .lb.on{display:block}
+  .lb-head{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:14px}
+  .lb-head label{margin:0}
+  .lb-per{font-family:var(--mono); font-size:11px; color:var(--ink-3)}
+  .lb-per a{color:var(--accent); text-decoration:none; cursor:pointer}
+  .lb-per a.sel{color:var(--ink); font-weight:600; cursor:default}
+  table.lbt{width:100%; border-collapse:collapse; font-size:14px}
+  table.lbt th{font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3); text-align:right; padding:0 0 8px}
+  table.lbt th:first-child, table.lbt td:first-child{text-align:left}
+  table.lbt td{padding:9px 0; border-top:1px solid var(--line); text-align:right; font-variant-numeric:tabular-nums}
+  table.lbt td.nm{font-weight:500}
+  table.lbt td.nm small{display:block; color:var(--ink-3); font-size:11px; font-weight:400}
+  table.lbt td.pos{width:28px; font-family:var(--mono); color:var(--ink-3); text-align:left}
+  table.lbt tr.yo td{color:var(--accent)}
+  .lb-empty{color:var(--ink-3); font-size:13px; text-align:center; padding:10px 0}
 </style>
 </head>
 <body>
@@ -124,6 +142,15 @@
         <button id="retry" style="margin-top:22px">Volver a intentar</button>
       </div>
     </div>
+
+    <!-- LEADERBOARD (solo con sesión de Google: muestra nombres/emails del equipo) -->
+    <div id="lb" class="lb">
+      <div class="lb-head">
+        <label>Leaderboard</label>
+        <div class="lb-per"><a id="lbMes" class="sel">Este mes</a> · <a id="lbAll">Todo</a></div>
+      </div>
+      <div id="lbBody"></div>
+    </div>
   </div>
 
   <div class="foot">Inbound Tools · inbound-tools.com</div>
@@ -197,6 +224,7 @@ function mostrarOk(jobId, empresa){
   $('okEmp').textContent = empresa || '';
   $('dlLink').setAttribute('href', '/pdf/'+jobId);
   show('stageOk');
+  cargarLeaderboard();   // el diagnóstico recién terminado ya cuenta en el ranking
 }
 
 // ===== LOGIN CON GOOGLE =====
@@ -224,6 +252,7 @@ function setSesion(token){
   const a = document.createElement('a'); a.href='#'; a.textContent='salir';
   a.onclick = (e)=>{ e.preventDefault(); cerrarSesion(); };
   $('quien').append(a);
+  cargarLeaderboard();   // con sesión, el ranking se muestra debajo del formulario
   return true;
 }
 function cerrarSesion(){
@@ -231,6 +260,62 @@ function cerrarSesion(){
   try{ localStorage.removeItem(LS_TOKEN); }catch(e){}
   $('quien').style.display='none';
   $('gbtn').style.display='block';
+  $('lb').classList.remove('on');
+}
+
+// ===== LEADERBOARD =====
+// Quién generó cuántos diagnósticos (server: /leaderboard, lee el log del volumen). Solo con sesión de Google:
+// expone nombres y emails del equipo. Se recarga al entrar y cada vez que termina un diagnóstico.
+// MENSUAL: el período por default es el mes en curso (desde el día 1 a las 00:00 hora local), así el ranking
+// arranca de cero cada mes. "Todo" queda como vista secundaria.
+let LB_MODO = 'mes';   // 'mes' | 'all'
+function primerDiaDelMes(){
+  const d = new Date(); d.setHours(0,0,0,0); d.setDate(1);
+  return d;
+}
+function lbQuery(){
+  if(LB_MODO === 'mes') return 'desde=' + encodeURIComponent(primerDiaDelMes().toISOString());
+  return 'dias=0';
+}
+async function cargarLeaderboard(){
+  if(!modoGoogle() || !GTOKEN) return;
+  try{
+    const r = await fetch('/leaderboard?' + lbQuery(), { headers:{ 'x-user-token': GTOKEN } });
+    if(!r.ok) return;                 // 401/403: sin acceso al ranking, simplemente no se muestra
+    const d = await r.json();
+    pintarLeaderboard(d);
+    $('lb').classList.add('on');
+  }catch(e){}
+}
+function pintarLeaderboard(d){
+  const yo = (_jwtPayload(GTOKEN||'')||{}).email || '';
+  const body = $('lbBody'); body.textContent = '';
+  if(!d.usuarios || !d.usuarios.length){
+    const p = document.createElement('div'); p.className='lb-empty';
+    p.textContent = LB_MODO === 'mes'
+      ? 'Nadie generó diagnósticos todavía este mes. El primero que generes aparece acá.'
+      : 'Todavía no hay diagnósticos con usuario.';
+    body.appendChild(p); return;
+  }
+  const t = document.createElement('table'); t.className='lbt';
+  const th = t.createTHead().insertRow();
+  for(const h of ['#','Quién','Diagnósticos','Aprobados','Tasa']){ const c=document.createElement('th'); c.textContent=h; th.appendChild(c); }
+  const tb = t.createTBody();
+  d.usuarios.slice(0, 15).forEach((u, i) => {
+    const tr = tb.insertRow(); if(u.email === yo.toLowerCase()) tr.className='yo';
+    const pos = tr.insertCell(); pos.className='pos'; pos.textContent = String(i+1).padStart(2,'0');
+    const nm = tr.insertCell(); nm.className='nm'; nm.textContent = u.nombre || u.email;
+    const sm = document.createElement('small'); sm.textContent = u.email; nm.appendChild(sm);
+    tr.insertCell().textContent = u.diagnosticos;
+    tr.insertCell().textContent = u.aprobados;
+    tr.insertCell().textContent = u.tasa_aprobacion + '%';
+  });
+  body.appendChild(t);
+}
+function setPeriodoLb(modo){
+  LB_MODO = modo;
+  $('lbMes').classList.toggle('sel', modo==='mes'); $('lbAll').classList.toggle('sel', modo==='all');
+  cargarLeaderboard();
 }
 
 async function initAuth(){
@@ -346,6 +431,8 @@ $('go').addEventListener('click', generar);
 $('clave').addEventListener('keydown', e=>{ if(e.key==='Enter') generar(); });
 $('again').addEventListener('click', ()=>{ clearJob(); $('dominio').value=''; $('destinatario').value=''; $('err').textContent=''; show('stageForm'); });
 $('retry').addEventListener('click', ()=>{ clearJob(); show('stageForm'); });
+$('lbMes').addEventListener('click', ()=>setPeriodoLb('mes'));
+$('lbAll').addEventListener('click', ()=>setPeriodoLb('all'));
 initAuth();   // decide clave vs Google según /config; corre en paralelo con la reanudación de jobs
 init();
 </script>
