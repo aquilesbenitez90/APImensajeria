@@ -20,7 +20,10 @@
   h1{font-size:34px; font-weight:700; letter-spacing:-.03em; margin-top:10px; line-height:1.1}
   h1 span{color:var(--accent)}
   .sub{color:#A0A5AE; font-size:15px; margin-top:12px; max-width:480px; margin-left:auto; margin-right:auto; line-height:1.5}
-  .wrap{flex:1; display:flex; align-items:center; justify-content:center; padding:40px 20px}
+  /* grilla de 3 columnas: la del medio (formulario) mide siempre 460px y queda centrada bajo el título;
+     el leaderboard vive en la derecha y no mueve el eje. Sin sesión el panel es display:none y nada cambia. */
+  .wrap{flex:1; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,460px) minmax(0,1fr); column-gap:24px; align-content:center; align-items:start; padding:40px 20px}
+  .wrap > .card{grid-column:2}
   .card{background:var(--panel); border-radius:16px; box-shadow:0 30px 80px -40px rgba(0,0,0,.5); width:100%; max-width:460px; padding:34px}
   label{font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); display:block; margin-bottom:7px}
   input,select{width:100%; font-family:var(--font); font-size:15px; padding:13px 15px; border:1px solid var(--line); border-radius:10px; outline:none; transition:border .15s; background:#fff; -webkit-appearance:none; appearance:none}
@@ -50,24 +53,28 @@
   .dl{display:block; text-align:center; text-decoration:none; margin-top:22px}
   .linkbtn{background:none; color:var(--accent); font-weight:500; font-size:13px; margin-top:14px}
   .foot{text-align:center; font-family:var(--mono); font-size:10px; letter-spacing:.1em; color:#3A3F4A; padding:18px; text-transform:uppercase}
-  /* leaderboard: panel LATERAL a la derecha del formulario (solo con sesión de Google). El formulario sigue
-     centrado cuando el panel no está; con el panel, los dos quedan centrados como par. En angosto, cae debajo. */
-  .wrap{align-items:flex-start; gap:24px; flex-wrap:wrap}
-  .lb{display:none; background:var(--panel); border-radius:16px; box-shadow:0 30px 80px -40px rgba(0,0,0,.5); width:340px; flex:0 0 340px; padding:24px 26px; align-self:flex-start}
+  /* leaderboard: panel LATERAL en la 3ra columna (solo con sesión de Google). En angosto cae debajo del formulario. */
+  .lb{display:none; grid-column:3; justify-self:start; width:100%; max-width:340px; min-width:0; background:var(--panel); border-radius:16px; box-shadow:0 30px 80px -40px rgba(0,0,0,.5); padding:24px 26px}
   .lb.on{display:block}
-  @media (max-width: 880px){ .lb{width:100%; flex:0 0 auto; max-width:460px} }
-  .lb-head{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:14px}
+  @media (max-width: 1080px){
+    .wrap{grid-template-columns:minmax(0,460px); justify-content:center; row-gap:24px}
+    .wrap > .card, .lb{grid-column:1}
+    .lb{max-width:none}
+  }
+  .lb-head{display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:14px}
   .lb-head label{margin:0}
-  .lb-per{font-family:var(--mono); font-size:11px; color:var(--ink-3)}
+  .lb-per{font-family:var(--mono); font-size:11px; color:var(--ink-3); white-space:nowrap}
   .lb-per a{color:var(--accent); text-decoration:none; cursor:pointer}
   .lb-per a.sel{color:var(--ink); font-weight:600; cursor:default}
-  table.lbt{width:100%; border-collapse:collapse; font-size:14px}
-  table.lbt th{font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3); text-align:right; padding:0 0 8px}
-  table.lbt th:first-child, table.lbt td:first-child{text-align:left}
-  table.lbt td{padding:9px 0; border-top:1px solid var(--line); text-align:right; font-variant-numeric:tabular-nums}
-  table.lbt td.nm{font-weight:500}
-  table.lbt td.nm small{display:block; color:var(--ink-3); font-size:11px; font-weight:400; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-  table.lbt td.pos{width:28px; font-family:var(--mono); color:var(--ink-3); text-align:left}
+  /* tabla: # angosta a la izquierda, Quién ocupa el sobrante (izquierda), Diagnósticos numérica a la derecha */
+  table.lbt{width:100%; border-collapse:collapse; table-layout:fixed; font-size:14px}
+  table.lbt th{font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3); text-align:left; padding:0 0 8px}
+  table.lbt td{padding:9px 0; border-top:1px solid var(--line); text-align:left; vertical-align:top}
+  table.lbt th:first-child, table.lbt td.pos{width:30px}
+  table.lbt th:last-child, table.lbt td:last-child{width:84px; text-align:right; padding-left:12px; font-variant-numeric:tabular-nums}
+  table.lbt td.pos{font-family:var(--mono); font-size:12px; color:var(--ink-3); padding-top:11px}
+  table.lbt td.nm{font-weight:500; overflow:hidden; overflow-wrap:anywhere; padding-right:8px}
+  table.lbt td.nm small{display:block; color:var(--ink-3); font-size:11px; font-weight:400; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
   table.lbt tr.yo td{color:var(--accent)}
   .lb-empty{color:var(--ink-3); font-size:13px; text-align:center; padding:10px 0}
 </style>
