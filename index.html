@@ -333,6 +333,20 @@ function setPeriodoLb(modo){
   cargarLeaderboard();
 }
 
+// CANJE: el ID token de Google dura 1 hora → lo cambiamos UNA vez por una sesión del server de 30 días
+// (POST /sesion). Lo que se guarda y viaja en x-user-token es ESA sesión ("ibt.…", mismo formato de payload
+// que un JWT, así _tokenVigente la lee igual). Si el canje falla por red, se usa el token de Google (1 hora)
+// para no dejar a la persona afuera.
+async function canjearSesion(credential){
+  try{
+    const r = await fetch('/sesion', { method:'POST', headers:{ 'x-user-token': credential } });
+    const j = await r.json().catch(()=>({}));
+    if(r.status === 403){ $('err').textContent = j.error || 'Tu cuenta no tiene acceso.'; return; }
+    if(r.ok && j.token){ if(!setSesion(j.token)) $('err').textContent = 'No se pudo validar la sesión. Probá de nuevo.'; return; }
+  }catch(e){}
+  if(!setSesion(credential)) $('err').textContent = 'No se pudo validar la sesión. Probá de nuevo.';
+}
+
 async function initAuth(){
   try{ GCFG = await (await fetch('/config')).json(); }catch(e){ GCFG = {}; }
   if(!modoGoogle()) return;   // modo clave compartida: la landing queda como siempre
@@ -347,7 +361,7 @@ async function initAuth(){
   }
   google.accounts.id.initialize({
     client_id: GCFG.google_client_id,
-    callback: (resp)=>{ $('err').textContent=''; if(!setSesion(resp.credential)) $('err').textContent = 'No se pudo validar la sesión. Probá de nuevo.'; }
+    callback: (resp)=>{ $('err').textContent=''; canjearSesion(resp.credential); }
   });
   google.accounts.id.renderButton($('gbtn'), { theme:'outline', size:'large', text:'continue_with', width:380 });
 }

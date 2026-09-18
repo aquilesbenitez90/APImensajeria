@@ -4646,11 +4646,48 @@ async function _validarTokenGoogle(token) {
   } catch (e) { console.warn('[AUTH] no pude validar el token de Google:', e.message); return null; }
 }
 
+// ===== SESIÓN PROPIA (30 días) =====
+// El ID token de Google vence a la HORA: usarlo como sesión obligaba a loguearse de nuevo cada rato (queja del
+// equipo). Ahora el front lo canjea UNA vez en POST /sesion por un token nuestro firmado (HMAC-SHA256) con
+// vida SESSION_DIAS (default 30). Formato "ibt.<payload b64url>.<firma b64url>": el payload lleva
+// {email, name, exp} como un JWT, así el front lo lee con el mismo _jwtPayload/_tokenVigente sin cambios.
+// Sin estado en el server (nada que persistir ni que se pierda al redeploy) MIENTRAS SESSION_SECRET esté en
+// el env: si falta, se genera uno al arrancar y las sesiones mueren con cada deploy (se avisa en el log).
+// La lista ALLOWED_EMAILS se re-chequea en CADA request, así que sacar un email de la lista corta su sesión.
+const SESSION_DIAS = parseInt(process.env.SESSION_DIAS || '30', 10);
+const SESSION_SECRET = process.env.SESSION_SECRET || (() => {
+  if (GOOGLE_CLIENT_ID) console.warn('[AUTH] SESSION_SECRET no seteado: las sesiones de la landing van a morir en cada redeploy.');
+  return crypto.randomBytes(32).toString('hex');
+})();
+const _b64u = (buf) => Buffer.from(buf).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+const _firmaSesion = (payloadB64) => _b64u(crypto.createHmac('sha256', SESSION_SECRET).update(payloadB64).digest());
+function _emitirSesion(u) {
+  const payload = _b64u(JSON.stringify({ email: u.email, name: u.nombre || '', exp: Math.floor(Date.now() / 1000) + SESSION_DIAS * 86400 }));
+  return 'ibt.' + payload + '.' + _firmaSesion(payload);
+}
+function _validarSesion(token) {
+  const p = String(token || '').split('.');
+  if (p.length !== 3 || p[0] !== 'ibt') return null;
+  const esperada = Buffer.from(_firmaSesion(p[1])), dada = Buffer.from(p[2]);
+  if (esperada.length !== dada.length || !crypto.timingSafeEqual(esperada, dada)) return null;
+  try {
+    const d = JSON.parse(Buffer.from(p[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+    if (!d.email || !(d.exp * 1000 > Date.now())) return null;
+    return { email: String(d.email).toLowerCase(), nombre: d.name || '', exp: d.exp };
+  } catch { return null; }
+}
+// Un token puede ser nuestra sesión ("ibt.…") o un ID token de Google crudo (el front lo manda así si el canje
+// falló, y n8n/tests nunca lo mandan). Los dos caminos terminan en {email, nombre} o null.
+async function _resolverUsuario(token) {
+  if (!token) return null;
+  return String(token).startsWith('ibt.') ? _validarSesion(token) : await _validarTokenGoogle(token);
+}
+
 // Valida el acceso a /generar según el modo del servicio. Devuelve {usuario} (null si no hay login por
-// Google activo) o {error, status} para responder. Compartido con /generar-reporte.
+// Google activo) o {error, status} para responder. Compartido con /generar-reporte y /leaderboard.
 async function _gateGenerar(req) {
   if (GOOGLE_CLIENT_ID) {
-    const usuario = await _validarTokenGoogle(req.header('x-user-token'));
+    const usuario = await _resolverUsuario(req.header('x-user-token'));
     if (!usuario) return { error: 'Sesion invalida o vencida. Ingresa con Google de nuevo.', status: 401 };
     if (!_emailPermitido(usuario.email)) {
       console.warn(`[AUTH] email NO permitido: ${usuario.email}`);
@@ -4667,6 +4704,17 @@ async function _gateGenerar(req) {
 // Config pública del front: la landing pregunta acá si el login con Google está activo (el client id
 // NO es un secreto; igual solo sirve para NUESTRO origen autorizado en Google Cloud).
 app.get('/config', (req, res) => res.json({ google_client_id: GOOGLE_CLIENT_ID || null }));
+
+// Canje: ID token de Google (1 hora) → sesión propia (SESSION_DIAS). Solo tiene sentido con el login activo.
+app.post('/sesion', async (req, res) => {
+  if (!GOOGLE_CLIENT_ID) return res.status(404).json({ error: 'login con Google no activo' });
+  const u = await _validarTokenGoogle(req.header('x-user-token'));
+  if (!u) return res.status(401).json({ error: 'Token de Google invalido o vencido.' });
+  if (!_emailPermitido(u.email)) return res.status(403).json({ error: 'Tu cuenta no tiene acceso. Pedi que agreguen tu email a la lista.' });
+  const token = _emitirSesion(u);
+  console.log(`[AUTH] sesion de ${SESSION_DIAS} dias emitida para ${u.nombre || '?'} <${u.email}>`);
+  res.json({ token, email: u.email, nombre: u.nombre, dias: SESSION_DIAS });
+});
 
 // ===== COLA CON LÍMITE DE CONCURRENCIA =====
 // Sin esto, N diagnósticos simultáneos = N pipelines en paralelo → se pasa el tope de 60 req/min del MCP
@@ -5181,5 +5229,6 @@ module.exports = {
   _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN,
   _sedeDeLookup, _corregirGeoSede, _parseDestinatario, resolverDestinatario, _reconciliarConteoCuentas,
   _bancoLeer, _bancoAplicarVetadas, _bancoMejorarCards, _bancoGuardarAprobadas, _bancoGuardarVetada,
-  _guardarPdfEnDisco, _leerPdfDeDisco, _leaderboard, _leadKeyDiag, _diferenciarBadges
+  _guardarPdfEnDisco, _leerPdfDeDisco, _leaderboard, _leadKeyDiag, _diferenciarBadges,
+  _emitirSesion, _validarSesion
 };
