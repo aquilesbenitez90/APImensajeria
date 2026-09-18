@@ -5100,26 +5100,43 @@ app.get('/stats', (req, res) => {
 // FUENTE: resultados.jsonl del volumen, NO el Google Sheet. El Sheet es una COPIA que este mismo server manda
 // (fire-and-forget, puede perder filas si el Apps Script devuelve 'busy') y leerlo exigiría credenciales de
 // Google API en el server; el jsonl es la fuente de verdad, ya está local y es lo que usa /stats.
+// REGLAS DE CONTEO (decisión del negocio, 18-sep-2026):
+//  - Un diagnóstico = una EMPRESA distinta por persona. Repetir la misma empresa (reintento, segundo click,
+//    "/about" vs "/home") NO suma: se cuenta 1 vez y queda en `repetidos`. Clave = _leadKeyDiag (mismo criterio
+//    que el dedup de /generar, más normalización de la URL de LinkedIn).
+//  - Los jobs que terminaron en `error` (timeout, MCP caído, sourcing vacío) NO cuentan: no hubo reporte.
+//  - LEADERBOARD_DESDE (env, ISO): piso absoluto. Nada anterior cuenta en ningún período (reset del ranking).
+function _leadKeyDiag(r) {
+  let k = String(r.profileId || r.dominio || r.empresa || '').trim().toLowerCase();
+  k = k.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/[?#].*$/, '');
+  k = k.replace(/\/(about|home|posts|people|jobs|mycompany)(\/.*)?$/, '').replace(/\/+$/, '');
+  return k;
+}
 function _leaderboard(dias, desdeMs) {
   const periodo = desdeMs ? `desde ${new Date(desdeMs).toISOString().slice(0, 10)}` : (dias > 0 ? `últimos ${dias} días` : 'todo el histórico');
   if (!fs.existsSync(RESULT_LOG)) return { periodo, usuarios: [], total: 0 };
-  const desde = desdeMs || (dias > 0 ? Date.now() - dias * 24 * 60 * 60 * 1000 : 0);
+  const piso = Date.parse(process.env.LEADERBOARD_DESDE || '') || 0;
+  const desde = Math.max(piso, desdeMs || (dias > 0 ? Date.now() - dias * 24 * 60 * 60 * 1000 : 0));
   const por = new Map();
+  const vistos = new Set();   // email|empresa ya contada (dentro del período)
   let total = 0;
   for (const ln of fs.readFileSync(RESULT_LOG, 'utf8').split('\n')) {
     if (!ln.trim()) continue;
     let r; try { r = JSON.parse(ln); } catch { continue; }
     if (!r.generado_por) continue;
+    if (r.status === 'error') continue;   // sin reporte no hay diagnóstico
     const ts = Date.parse(r.ts || '') || 0;
     if (desde && ts && ts < desde) continue;
     // "Nombre <email>" → clave por email (estable aunque cambie el nombre en Google); nombre para mostrar.
     const m = String(r.generado_por).match(/^(.*?)\s*<([^>]+)>\s*$/);
     const email = (m ? m[2] : r.generado_por).toLowerCase();
     const nombre = (m && m[1].trim()) || email.split('@')[0];
-    const u = por.get(email) || { email, nombre, diagnosticos: 0, aprobados: 0, aptos: 0, errores: 0, costo_usd: 0, ultimo: '' };
+    const u = por.get(email) || { email, nombre, diagnosticos: 0, repetidos: 0, aprobados: 0, aptos: 0, errores: 0, costo_usd: 0, ultimo: '' };
+    const clave = email + '|' + _leadKeyDiag(r);
+    if (vistos.has(clave)) { u.repetidos++; u.costo_usd = +(u.costo_usd + (Number(r.costo) || 0)).toFixed(4); por.set(email, u); continue; }
+    vistos.add(clave);
     u.diagnosticos++; total++;
-    if (r.status === 'error') u.errores++;
-    else if (r.veredicto === 'APROBADO') u.aprobados++;
+    if (r.veredicto === 'APROBADO') u.aprobados++;
     if (r.apto_envio) u.aptos++;
     u.costo_usd = +(u.costo_usd + (Number(r.costo) || 0)).toFixed(4);
     if ((r.ts || '') > u.ultimo) u.ultimo = r.ts || '';
@@ -5164,5 +5181,5 @@ module.exports = {
   _mapIndustria, _mapFuncion, _normTax, _TAX_IND, _TAX_FUN,
   _sedeDeLookup, _corregirGeoSede, _parseDestinatario, resolverDestinatario, _reconciliarConteoCuentas,
   _bancoLeer, _bancoAplicarVetadas, _bancoMejorarCards, _bancoGuardarAprobadas, _bancoGuardarVetada,
-  _guardarPdfEnDisco, _leerPdfDeDisco, _leaderboard, _diferenciarBadges
+  _guardarPdfEnDisco, _leerPdfDeDisco, _leaderboard, _leadKeyDiag, _diferenciarBadges
 };
