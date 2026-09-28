@@ -5199,6 +5199,22 @@ function _leaderboard(dias, desdeMs) {
     .sort((a, b) => (b.diagnosticos - a.diagnosticos) || (b.aprobados - a.aprobados) || a.email.localeCompare(b.email));
   return { periodo, usuarios, total };
 }
+// HISTÓRICO para "tiempo ahorrado": TODOS los diagnósticos desde que existe el log, sin período ni el piso
+// LEADERBOARD_DESDE (ese reset es del ranking, no del ahorro), y también los anteriores al login (sin usuario).
+// Misma regla de conteo: 1 por persona+empresa (sin usuario = una sola "persona"), solo con descargable.
+function _diagnosticosHistoricos() {
+  if (!fs.existsSync(RESULT_LOG)) return 0;
+  const vistos = new Set();
+  for (const ln of fs.readFileSync(RESULT_LOG, 'utf8').split('\n')) {
+    if (!ln.trim()) continue;
+    let r; try { r = JSON.parse(ln); } catch { continue; }
+    if (r.status === 'error' && !(r.jobId && fs.existsSync(path.join(PDF_DIR, r.jobId + '.pdf')))) continue;
+    const m = String(r.generado_por || '').match(/<([^>]+)>/);
+    const quien = (m ? m[1] : (r.generado_por || '')).toLowerCase();
+    vistos.add(quien + '|' + _leadKeyDiag(r));
+  }
+  return vistos.size;
+}
 app.get('/leaderboard', async (req, res) => {
   if (GOOGLE_CLIENT_ID) {
     const acceso = await _gateGenerar(req);   // token de Google válido + email permitido
@@ -5207,7 +5223,7 @@ app.get('/leaderboard', async (req, res) => {
   try {
     const desdeMs = req.query.desde ? (Date.parse(String(req.query.desde)) || 0) : 0;   // inicio del mes (lo calcula la landing en hora local)
     const dias = req.query.dias === undefined ? 30 : Math.max(0, parseInt(req.query.dias, 10) || 0);
-    res.json(_leaderboard(dias, desdeMs));
+    res.json({ ..._leaderboard(dias, desdeMs), historico: _diagnosticosHistoricos() });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

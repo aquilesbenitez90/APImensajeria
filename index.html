@@ -324,12 +324,13 @@ function pintarLeaderboard(d){
   const n = document.createElement('b'); n.textContent = d.total;
   tot.append(n, ' diagnósticos del equipo ' + (LB_MODO === 'mes' ? 'este mes' : 'en total'));
   // TIEMPO AHORRADO: cada diagnóstico es un deal que el bot Radar crea solo en el CRM; a mano costaba
-  // MIN_POR_DEAL minutos en promedio (dato del equipo). Mismo conteo que el total (sin repetidos).
+  // MIN_POR_DEAL minutos en promedio (dato del equipo). Es SIEMPRE el HISTÓRICO total (d.historico), no el
+  // período del toggle ni el reset del ranking.
   const MIN_POR_DEAL = 5;
-  const mins = (d.total || 0) * MIN_POR_DEAL, h = Math.floor(mins / 60), m = mins % 60;
+  const mins = (d.historico || 0) * MIN_POR_DEAL, h = Math.floor(mins / 60), m = mins % 60;
   const aho = document.createElement('div'); aho.className = 'lb-ahorro';
   const ab = document.createElement('b'); ab.textContent = h ? (h + ' h' + (m ? ' ' + m + ' min' : '')) : (m + ' min');
-  aho.append(ab, ' ahorrados creando deals (' + MIN_POR_DEAL + ' min c/u)');
+  aho.append(ab, ' ahorrados en total creando deals (' + (d.historico || 0) + ' × ' + MIN_POR_DEAL + ' min)');
   tot.appendChild(aho);
   body.appendChild(tot);
   const t = document.createElement('table'); t.className='lbt';
