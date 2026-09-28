@@ -897,6 +897,15 @@ APROBADO solo si pasa los 8/8. Si RECHAZADO, "fixes" lista instrucciones concret
 // ---------------------------------------------------------------------------
 // Llamadas a Claude — CON PROMPT CACHING + logging de tokens
 // ---------------------------------------------------------------------------
+// JSON SIN SURROGATES SUELTOS (caso Patagonian / Origen): textos de LinkedIn con emojis o letras "𝗕𝗥"
+// (pares UTF-16) que en algún lado se recortan con .slice(0, N) quedan con media letra; JSON.stringify la
+// emite como "\ud835" suelto y la API responde 400 "no low surrogate in string" → el diagnóstico muere en 3s
+// y los reintentos fallan igual. Se reemplaza cada mitad huérfana por U+FFFD antes de mandar: cubre TODAS las
+// llamadas (PLAN, SELECT, jueces, señales) sin tener que encontrar cada slice.
+const _SURROGATE_SUELTO = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+function _jsonBienFormado(obj) {
+  return JSON.stringify(obj, (k, v) => (typeof v === 'string' ? v.replace(_SURROGATE_SUELTO, '�') : v));
+}
 async function callClaude({ model, system, messages, tools = [], stopSequences = [], maxTokens = 16000, temperature }) {
   const body = {
     model,
@@ -929,7 +938,7 @@ async function callClaude({ model, system, messages, tools = [], stopSequences =
           'anthropic-version': '2023-06-01',
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify(body),
+        body: _jsonBienFormado(body),
         signal: ac.signal
       });
       clearTimeout(timer);
