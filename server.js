@@ -2509,6 +2509,32 @@ async function sourceCandidates(plan, cliente, conSenal = true){
     console.log(`[ROL] ICP pide decisores | IC sueltos en el pool a la IA: ${icEnPool}/${final.length} (penalizados en el ranking).`);
   }
 
+  // PAÍS PROMETIDO (caso Flowly Group, 28-sep): el ICP puede ser multi-país (se busca en 5) pero el reporte
+  // promete país(es) en h1_post/lead ("clientes en Chile"), y la guarda _geoIncoherente BLOQUEA el descargable
+  // si una card cae afuera. Flowly: 39 chilenos en un pool de 575, la IA eligió México + Madrid → sin PDF.
+  // Mismo set que usa la guarda (título + lead): al pool de la IA solo van candidatos de esos países (o sin
+  // país reconocible, que la guarda tampoco juzga). Si en esos países no alcanza, se completa desde `out` con
+  // el mismo gate de fit; si ni así hay NUM_CUENTAS, no se toca (degradación: mejor intentar que vaciar).
+  {
+    const _prometidos = new Set([..._paisesDeTexto(plan && plan.h1_post), ..._paisesDeTexto(plan && plan.lead)]);
+    const _enPromesa = (c) => { const ps = _paisesDeTexto(c.loc); return !ps.length || ps.some(p => _prometidos.has(p)); };
+    if(!unSoloPais && _prometidos.size && final.some(c => !_enPromesa(c))){
+      const dentro = final.filter(_enPromesa);
+      const ya = new Set(dentro.map(c => c.id));
+      const extra = out.filter(c => !ya.has(c.id) && _enPromesa(c) && _paisesDeTexto(c.loc).length
+        && _rolRelevante(c.head, titulos, industriasICP) && !(pideDecisores && _esICsuelto(c.head)) && !_offVert(c));
+      for(const c of extra){ if(c.score == null){ c.icSuelto = pideDecisores && _esICsuelto(c.head); c.score = _scoreCand(c); } }
+      extra.sort((a,b)=> ((b.score||0)-(a.score||0)) || (b.ancla-a.ancla) || (b.fit-a.fit));
+      const nuevo = dentro.concat(extra).slice(0, N_IA);
+      if(nuevo.length >= NUM_CUENTAS){
+        console.log(`[GEO] pool a la IA acotado a los países que promete el reporte [${[..._prometidos].join(', ')}]: ${final.length - dentro.length} fuera sacados, ${Math.max(0, nuevo.length - dentro.length)} del país sumados → ${nuevo.length}.`);
+        final = nuevo;
+      } else {
+        console.warn(`[GEO] solo ${nuevo.length} candidatos en [${[..._prometidos].join(', ')}] (< ${NUM_CUENTAS}): dejo el pool multi-país como está.`);
+      }
+    }
+  }
+
   const n2 = final.filter(c=>c.dist===2).length, nAncla = final.filter(c=>c.ancla).length;
   console.log(`[SOURCE] pool ${out.length} (${out.filter(c=>c.cerca).length} en ${geografia}) | enriquecidos ${top.length} | fuera-tam ${fueraTam.length} | a la IA ${final.length} (ancla=${nAncla}, 2do=${n2}, terminos=[${terminos.join(', ')||'-'}], ind=[${indIds.join('+')||'-'}], piso<${PISO}${tamMax>0?`, techo>${tamMax}`:''}).`);
 
