@@ -5172,7 +5172,10 @@ function _leaderboard(dias, desdeMs) {
     if (!ln.trim()) continue;
     let r; try { r = JSON.parse(ln); } catch { continue; }
     if (!r.generado_por) continue;
-    if (r.status === 'error') continue;   // sin reporte no hay diagnóstico
+    // La regla es "¿la persona se llevó un descargable?". Los rechazados por el juez con PDF (ALWAYS_SEND) son
+    // status ok y cuentan. Un 'error' cuenta solo si igual quedó PDF en disco (ej. timeout global que marcó
+    // error pero el proceso de fondo terminó y guardó el PDF).
+    if (r.status === 'error' && !(r.jobId && fs.existsSync(path.join(PDF_DIR, r.jobId + '.pdf')))) continue;
     const ts = Date.parse(r.ts || '') || 0;
     if (desde && ts && ts < desde) continue;
     // "Nombre <email>" → clave por email (estable aunque cambie el nombre en Google); nombre para mostrar.
