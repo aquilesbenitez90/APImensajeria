@@ -77,6 +77,8 @@
   table.lbt td.nm small{display:block; color:var(--ink-3); font-size:11px; font-weight:400; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
   table.lbt tr.yo td{color:var(--accent)}
   .lb-empty{color:var(--ink-3); font-size:13px; text-align:center; padding:10px 0}
+  .lb-total{font-size:13px; color:var(--ink-3); margin:0 0 14px; padding-bottom:12px; border-bottom:1px solid var(--line)}
+  .lb-total b{display:block; font-size:30px; font-weight:700; letter-spacing:-.02em; color:var(--ink); line-height:1.1}
 </style>
 </head>
 <body>
@@ -314,6 +316,12 @@ function pintarLeaderboard(d){
       : 'Todavía no hay diagnósticos con usuario.';
     body.appendChild(p); return;
   }
+  // CONTADOR del equipo: suma de lo que cuenta cada persona (ya sin sus repetidos ni errores; si dos personas
+  // trabajan la misma empresa, cuenta para las dos). Es el número para el KPI.
+  const tot = document.createElement('div'); tot.className='lb-total';
+  const n = document.createElement('b'); n.textContent = d.total;
+  tot.append(n, ' diagnósticos del equipo ' + (LB_MODO === 'mes' ? 'este mes' : 'en total'));
+  body.appendChild(tot);
   const t = document.createElement('table'); t.className='lbt';
   const th = t.createTHead().insertRow();
   for(const h of ['#','Quién','Diagnósticos']){ const c=document.createElement('th'); c.textContent=h; th.appendChild(c); }
