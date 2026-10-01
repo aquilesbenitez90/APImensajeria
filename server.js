@@ -4654,6 +4654,23 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const ALLOWED_EMAILS = String(process.env.ALLOWED_EMAILS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const _tokensOk = new Map();   // token -> {email, nombre, exp}: cache para no pegarle a Google en cada request
 
+// FOTOS del equipo (panel de ganadores del mes): la foto de la cuenta Google (`picture` del ID token) se guarda
+// por email en fotos.json, junto a resultados.jsonl (volumen). Se captura en cada login con Google: quien tiene
+// una sesión de 30 días vieja aparece con sus iniciales hasta que vuelva a loguearse.
+const FOTOS_PATH = process.env.FOTOS_PATH || path.join(path.dirname(RESULT_LOG), 'fotos.json');
+let _fotos = null;
+function _leerFotos() {
+  if (_fotos) return _fotos;
+  try { _fotos = JSON.parse(fs.readFileSync(FOTOS_PATH, 'utf8')) || {}; } catch { _fotos = {}; }
+  return _fotos;
+}
+function _guardarFoto(email, url) {
+  const f = _leerFotos();
+  if (!/^https:\/\//i.test(url) || f[email] === url) return;
+  f[email] = url;
+  try { fs.writeFileSync(FOTOS_PATH, JSON.stringify(f)); } catch (e) { console.warn('[AUTH] no pude guardar la foto:', e.message); }
+}
+
 function _emailPermitido(email) {
   if (!ALLOWED_EMAILS.length) return true;
   const e = String(email || '').toLowerCase();
@@ -4673,8 +4690,9 @@ async function _validarTokenGoogle(token) {
     const info = await r.json();
     if (info.aud !== GOOGLE_CLIENT_ID) return null;            // token emitido para OTRA app: no vale
     if (String(info.email_verified) !== 'true') return null;
-    const u = { email: String(info.email || '').toLowerCase(), nombre: info.name || '', exp: parseInt(info.exp, 10) || 0 };
+    const u = { email: String(info.email || '').toLowerCase(), nombre: info.name || '', foto: info.picture || '', exp: parseInt(info.exp, 10) || 0 };
     if (!u.email || u.exp * 1000 < Date.now()) return null;
+    if (u.foto) _guardarFoto(u.email, u.foto);
     if (_tokensOk.size > 500) _tokensOk.clear();               // tope de memoria; se repuebla solo
     _tokensOk.set(token, u);
     return u;
@@ -5195,7 +5213,7 @@ function _leadKeyDiag(r) {
   k = k.replace(/\/(about|home|posts|people|jobs|mycompany)(\/.*)?$/, '').replace(/\/+$/, '');
   return k;
 }
-function _leaderboard(dias, desdeMs) {
+function _leaderboard(dias, desdeMs, hastaMs) {
   const periodo = desdeMs ? `desde ${new Date(desdeMs).toISOString().slice(0, 10)}` : (dias > 0 ? `últimos ${dias} días` : 'todo el histórico');
   if (!fs.existsSync(RESULT_LOG)) return { periodo, usuarios: [], total: 0 };
   const piso = Date.parse(process.env.LEADERBOARD_DESDE || '') || 0;
@@ -5213,6 +5231,7 @@ function _leaderboard(dias, desdeMs) {
     if (r.status === 'error' && !(r.jobId && fs.existsSync(path.join(PDF_DIR, r.jobId + '.pdf')))) continue;
     const ts = Date.parse(r.ts || '') || 0;
     if (desde && ts && ts < desde) continue;
+    if (hastaMs && ts >= hastaMs) continue;   // tope (exclusivo): ranking de un mes cerrado
     // "Nombre <email>" → clave por email (estable aunque cambie el nombre en Google); nombre para mostrar.
     const m = String(r.generado_por).match(/^(.*?)\s*<([^>]+)>\s*$/);
     const email = (m ? m[2] : r.generado_por).toLowerCase();
@@ -5230,7 +5249,7 @@ function _leaderboard(dias, desdeMs) {
     por.set(email, u);
   }
   const usuarios = [...por.values()]
-    .map(u => ({ ...u, tasa_aprobacion: u.diagnosticos ? Math.round(100 * u.aprobados / u.diagnosticos) : 0 }))
+    .map(u => ({ ...u, foto: _leerFotos()[u.email] || '', tasa_aprobacion: u.diagnosticos ? Math.round(100 * u.aprobados / u.diagnosticos) : 0 }))
     .sort((a, b) => (b.diagnosticos - a.diagnosticos) || (b.aprobados - a.aprobados) || a.email.localeCompare(b.email));
   return { periodo, usuarios, total };
 }
@@ -5257,8 +5276,9 @@ app.get('/leaderboard', async (req, res) => {
   } else if (!_gateDatos(req, res)) return;
   try {
     const desdeMs = req.query.desde ? (Date.parse(String(req.query.desde)) || 0) : 0;   // inicio del mes (lo calcula la landing en hora local)
+    const hastaMs = req.query.hasta ? (Date.parse(String(req.query.hasta)) || 0) : 0;   // tope exclusivo (ganadores del mes anterior)
     const dias = req.query.dias === undefined ? 30 : Math.max(0, parseInt(req.query.dias, 10) || 0);
-    res.json({ ..._leaderboard(dias, desdeMs), historico: _diagnosticosHistoricos() });
+    res.json({ ..._leaderboard(dias, desdeMs, hastaMs), historico: _diagnosticosHistoricos() });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

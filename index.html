@@ -56,11 +56,28 @@
   /* leaderboard: panel LATERAL en la 3ra columna (solo con sesión de Google). En angosto cae debajo del formulario. */
   .lb{display:none; grid-column:3; justify-self:start; width:100%; max-width:340px; min-width:0; background:var(--panel); border-radius:16px; box-shadow:0 30px 80px -40px rgba(0,0,0,.5); padding:24px 26px}
   .lb.on{display:block}
+  /* ganadores del mes anterior: panel LATERAL izquierdo (1ra columna), espejo del leaderboard. grid-row:1 explícito:
+     si no, el auto-placement lo manda a la fila 2 porque viene después en el DOM. */
+  .win{display:none; grid-column:1; grid-row:1; justify-self:end; width:100%; max-width:300px; min-width:0; background:var(--panel); border-radius:16px; box-shadow:0 30px 80px -40px rgba(0,0,0,.5); padding:24px 26px}
+  .win.on{display:block}
   @media (max-width: 1080px){
     .wrap{grid-template-columns:minmax(0,460px); justify-content:center; row-gap:24px}
-    .wrap > .card, .lb{grid-column:1}
-    .lb{max-width:none}
+    .wrap > .card, .lb, .win{grid-column:1}
+    .win{grid-row:auto}
+    .lb, .win{max-width:none}
   }
+  .win-sub{font-size:13px; color:var(--ink-3); margin:-6px 0 16px}
+  .win-sub b{color:var(--ink); text-transform:capitalize}
+  .wr{display:flex; align-items:center; gap:12px; padding:10px 0; border-top:1px solid var(--line)}
+  .wr:first-of-type{border-top:none}
+  .wr .av{position:relative; flex:none; width:44px; height:44px}
+  .wr .av img, .wr .av span{width:100%; height:100%; border-radius:50%; object-fit:cover; display:flex; align-items:center; justify-content:center; background:var(--accent-soft); color:var(--accent); font-weight:700; font-size:15px}
+  .wr .av i{position:absolute; right:-4px; bottom:-4px; font-style:normal; font-size:17px; line-height:1}
+  .wr.p1 .av{width:60px; height:60px}
+  .wr.p1 .av span{font-size:20px}
+  .wr .wn{flex:1; min-width:0; font-weight:600; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .wr .wn small{display:block; font-weight:400; font-size:12px; color:var(--ink-3)}
+  .wr.p1 .wn{font-size:16px}
   .lb-head{display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:14px}
   .lb-head label{margin:0}
   .lb-per{font-family:var(--mono); font-size:11px; color:var(--ink-3); white-space:nowrap}
@@ -164,6 +181,12 @@
       </div>
       <div id="lbBody"></div>
     </div>
+
+    <!-- GANADORES DEL MES ANTERIOR: panel lateral izquierdo (solo con sesión de Google), con la foto de la cuenta -->
+    <div id="win" class="win">
+      <div class="lb-head"><label>Ganadores del mes</label></div>
+      <div id="winBody"></div>
+    </div>
   </div>
 
   <div class="foot">Inbound Tools · inbound-tools.com</div>
@@ -266,6 +289,7 @@ function setSesion(token){
   a.onclick = (e)=>{ e.preventDefault(); cerrarSesion(); };
   $('quien').append(a);
   cargarLeaderboard();   // con sesión, el ranking se muestra debajo del formulario
+  cargarGanadores();     // y el podio del mes anterior a la izquierda
   return true;
 }
 function cerrarSesion(){
@@ -273,6 +297,7 @@ function cerrarSesion(){
   try{ localStorage.removeItem(LS_TOKEN); }catch(e){}
   $('quien').style.display='none';
   $('gbtn').style.display='block';
+  $('win').classList.remove('on');
   if(modoGoogle()) lbMensaje('Ingresá con Google para ver el ranking del mes.');   // el panel queda, con el aviso
 }
 
@@ -346,6 +371,46 @@ function pintarLeaderboard(d){
   });
   body.appendChild(t);
 }
+// ===== GANADORES DEL MES ANTERIOR =====
+// Top 3 del mes cerrado (desde el día 1 del mes pasado hasta el día 1 de este, hora local) con la foto de
+// Google que el server guardó en el login. Sin foto (sesión vieja, o la URL falla) → iniciales.
+async function cargarGanadores(){
+  if(!modoGoogle() || !GTOKEN){ $('win').classList.remove('on'); return; }
+  const hasta = primerDiaDelMes(), desde = new Date(hasta); desde.setMonth(desde.getMonth() - 1);
+  try{
+    const r = await fetch('/leaderboard?desde=' + encodeURIComponent(desde.toISOString()) + '&hasta=' + encodeURIComponent(hasta.toISOString()),
+      { headers:{ 'x-user-token': GTOKEN }, cache:'no-store' });
+    if(!r.ok){ $('win').classList.remove('on'); return; }
+    pintarGanadores(await r.json(), desde.toLocaleString('es', { month:'long' }));
+  }catch(e){ $('win').classList.remove('on'); }
+}
+function _iniciales(n){ return String(n||'?').split(/[\s@.]+/).filter(Boolean).slice(0,2).map(s=>s[0].toUpperCase()).join(''); }
+function pintarGanadores(d, mes){
+  const top = (d.usuarios || []).slice(0, 3);
+  if(!top.length){ $('win').classList.remove('on'); return; }   // mes sin diagnósticos: no hay podio que mostrar
+  const body = $('winBody'); body.textContent = '';
+  const sub = document.createElement('div'); sub.className = 'win-sub';
+  const bm = document.createElement('b'); bm.textContent = mes;
+  sub.append('Los que más diagnósticos hicieron en ', bm);
+  body.appendChild(sub);
+  const MEDALLAS = ['🥇','🥈','🥉'];
+  top.forEach((u, i) => {
+    const row = document.createElement('div'); row.className = 'wr p' + (i+1);
+    const av = document.createElement('div'); av.className = 'av';
+    const ini = () => { const s = document.createElement('span'); s.textContent = _iniciales(u.nombre || u.email); return s; };
+    if(u.foto){
+      const img = document.createElement('img'); img.alt = ''; img.referrerPolicy = 'no-referrer';   // las fotos de Google dan 403 con referrer
+      img.onerror = () => img.replaceWith(ini());
+      img.src = u.foto; av.appendChild(img);
+    } else av.appendChild(ini());
+    const md = document.createElement('i'); md.textContent = MEDALLAS[i]; av.appendChild(md);
+    const nm = document.createElement('div'); nm.className = 'wn'; nm.textContent = u.nombre || u.email;
+    const sm = document.createElement('small'); sm.textContent = u.diagnosticos + (u.diagnosticos === 1 ? ' diagnóstico' : ' diagnósticos'); nm.appendChild(sm);
+    row.append(av, nm); body.appendChild(row);
+  });
+  $('win').classList.add('on');
+}
+
 function setPeriodoLb(modo){
   LB_MODO = modo;
   $('lbMes').classList.toggle('sel', modo==='mes'); $('lbAll').classList.toggle('sel', modo==='all');
